@@ -17,6 +17,10 @@ device_table = {
     'Pupil Lab IMU': {
         'module': 'plasma.devices.pupil_labs',
         'class': 'PupilLabsIMU'
+    },
+    'Pupil Lab Eye Event': {
+        'module': 'plasma.devices.pupil_labs',
+        'class': 'PupilLabsEyeEvent'
     }
 }
 
