@@ -4,3 +4,4 @@ tqdm
 gradio
 blickfeld-qb2
 pupil-labs-realtime-api
+pylsl
