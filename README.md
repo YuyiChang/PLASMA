@@ -1,4 +1,6 @@
-# lsl_integrated_sensor
+# PLASMA
+
+PLASMA: Platform for LSL-based Acquisition of Sensor Metrics and Analytics
 
 ## quickstart
 
