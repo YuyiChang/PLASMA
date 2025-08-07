@@ -6,10 +6,10 @@ import importlib
 
 device_table = {
     # 'Pupil Labs': 'pupil_labs',
-    'test': {
-        'module': 'plasma.devices.template',
-        'class': 'PlasmaDevice'
-    },
+    # 'test': {
+    #     'module': 'plasma.devices.template',
+    #     'class': 'PlasmaDevice'
+    # },
     'qb2 LiDAR': {
         'module': 'plasma.devices.qb2',
         'class': 'Qb2'
@@ -18,9 +18,13 @@ device_table = {
         'module': 'plasma.devices.pupil_labs',
         'class': 'PupilLabsIMU'
     },
-    'Pupil Lab Eye Event': {
+    'Pupil Lab Eye Event Blink': {
         'module': 'plasma.devices.pupil_labs',
-        'class': 'PupilLabsEyeEvent'
+        'class': 'PupilLabsEyeEventBlink'
+    },
+    'Pupil Lab Eye Event Fixation': {
+        'module': 'plasma.devices.pupil_labs',
+        'class': 'PupilLabsEyeEventFixation'
     }
 }
 
