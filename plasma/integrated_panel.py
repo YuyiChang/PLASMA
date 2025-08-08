@@ -10,6 +10,10 @@ device_table = {
     #     'module': 'plasma.devices.template',
     #     'class': 'PlasmaDevice'
     # },
+     'MSense Wristbands': {
+        'module': 'plasma.devices.msense',
+        'class': 'MotionSenseHRV'
+    },
     'qb2 LiDAR': {
         'module': 'plasma.devices.qb2',
         'class': 'Qb2'
@@ -37,40 +41,49 @@ class IntegratedPanel():
         self.available_devices = []
 
     def interface(self):
-        with gr.Accordion(label="Session info", open=True):
-            default_sub = "sub-1000"
-            default_ses = "ses-00"
+        with gr.Row():
+            with gr.Column():
+                with gr.Accordion(label="Session info", open=True):
+                    default_sub = "sub-1000"
+                    default_ses = "ses-00"
 
-            with gr.Row():
-                sub_name = gr.Text(default_sub, label="Subject ID", info="Format: sub-XXXX, X is integer")
-                ses_name = gr.Text(default_ses, label="Session ID", info="Format: ses-YY, Y is integer")
-                subject_enc = gr.Number(self.get_participant_encoding(default_sub, default_ses), label='Participant encoding (Read-only)', interactive=False,
-                                        info="Format: XXXXYY")
-                sub_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
-                ses_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
-                _ = self.get_participant_encoding(default_sub, default_ses)
+                    with gr.Row():
+                        sub_name = gr.Text(default_sub, label="Subject ID", info="Format: sub-XXXX, X is integer")
+                        ses_name = gr.Text(default_ses, label="Session ID", info="Format: ses-YY, Y is integer")
+                        subject_enc = gr.Number(self.get_participant_encoding(default_sub, default_ses), label='Participant encoding (Read-only)', interactive=False,
+                                                info="Format: XXXXYY")
+                        sub_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
+                        ses_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
+                        _ = self.get_participant_encoding(default_sub, default_ses)
 
 
-        with gr.Accordion(label="Device initialization", open=True):
-            device_grp = gr.CheckboxGroup(choices=self.device_list, value=self.device_list, label="Select sensor(s)")
-            btn_init = gr.Button("Initialize selected device(s)")
+                with gr.Accordion(label="Device initialization", open=True):
+                    device_grp = gr.CheckboxGroup(choices=self.device_list, value=self.device_list, label="Select sensor(s)")
+                    btn_init = gr.Button("Initialize selected device(s)")
 
-            btn_init.click(self.init_devices, inputs=device_grp)
+                    btn_init.click(self.init_devices, inputs=device_grp)
 
-        
-        with gr.Accordion(label="Device control", open=True):
-        
-            with gr.Row():
-                self.btn_start = gr.Button("Start▶️")
-                self.btn_stop = gr.Button("Stop🛑")
-                                
-            self.btn_start.click(self.start_collection)
-            self.btn_stop.click(self.stop_collection)
+            
+            with gr.Column():
+                with gr.Accordion(label="Device control", open=True):
+                
+                    with gr.Row():
+                        self.btn_start = gr.Button("Start▶️")
+                        self.btn_stop = gr.Button("Stop🛑")
+                                        
+                    self.btn_start.click(self.start_collection)
+                    self.btn_stop.click(self.stop_collection)
 
-        self.params = {"Memo": {"type": "welcome!"}}
-        params = gr.ParamViewer(self.params)
-        timer = gr.Timer(value=1)
-        timer.tick(fn=self.update_params, outputs=params)
+                self.params = {"Memo": {"type": "welcome!"}}
+                params = gr.ParamViewer(self.params)
+                timer = gr.Timer(value=1)
+                timer.tick(fn=self.update_params, outputs=params)
+
+        with gr.Accordion("Help", open=False):
+            with open("./plasma/help.md") as f:
+                help_txt = f.read()
+                print(help_txt)
+            md = gr.Markdown(help_txt)
 
     def init_devices(self, selected_devices):
         self.available_devices = []
@@ -98,7 +111,11 @@ class IntegratedPanel():
         }
 
         for dev in self.available_devices:
-            params[dev.name] = {"type": dev.sts}
+            if isinstance(dev.name, str):
+                params[f"- {dev.name}"] = {"type": dev.sts}
+            elif isinstance(dev.name, dict):
+                for k, v in dev.name.items():
+                    params[f"- {k}"] = {"type": v}
 
         # print(params)
         return params

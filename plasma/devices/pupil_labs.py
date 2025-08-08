@@ -46,6 +46,11 @@ class PupilLabsIMU(PlasmaDevice):
             self.device.close()
         self.sts = "🟥"
 
+# def pupil_labs_video_feed():
+#     with gr.Row():
+#         btn_start = gr.Button("Start")
+#         btn_stop = gr.Button("Stop")
+#     video = gr.Video(f"http://{ip}:8080", streaming=True)
 
 class PupilLabsEyeEventBlink(PlasmaDevice):
     def __init__(self, session_info):
@@ -61,7 +66,7 @@ class PupilLabsEyeEventBlink(PlasmaDevice):
             self.sts = "❌ Fault"
             # raise SystemExit()
 
-        info = StreamInfo('pupil_labs_eye_event_blink', 'pupillabs', 
+        info = StreamInfo('pupil_labs_blink', 'pupillabs', 
                           channel_count=1, channel_format=cf_string)
         self.outlet = StreamOutlet(info)
 
@@ -109,7 +114,7 @@ class PupilLabsEyeEventFixation(PlasmaDevice):
             self.sts = "❌ Fault"
             # raise SystemExit()
 
-        info = StreamInfo('pupil_labs_eye_event_fixation', 'pupillabs', 
+        info = StreamInfo('pupil_labs_fixation', 'pupillabs', 
                           channel_count=1, channel_format=cf_string)
         self.outlet = StreamOutlet(info)
 
