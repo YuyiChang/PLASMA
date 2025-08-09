@@ -10,16 +10,17 @@ import os
 import gradio as gr
 import threading
 import asyncio
-from plasma.devices.template import PlasmaDevice
+from plasma.devices.template import PlasmaDevice, PlasmaMemo
+from plasma.config import IP_QB2_LIDAR
 
-ip = "192.168.50.35"
+ip = IP_QB2_LIDAR
 
 class Qb2(PlasmaDevice):
-    def __init__(self, session_info, addr=ip) -> None:
-        super().__init__(session_info)
-        self.name = 'qb2 LiDAR'
+    def __init__(self, session_info, logger, tag) -> None:
+        super().__init__(session_info, logger, tag)
+        self.memo = PlasmaMemo('qb2 LiDAR')
         self.session_info = session_info
-        self.addr = addr
+        self.addr = ip
         self.status = ""
         self.last_lsl = ""
 
@@ -37,8 +38,10 @@ class Qb2(PlasmaDevice):
         try:
             channel = blickfeld_qb2.Channel(fqdn_or_ip=self.addr)
             print("qb2 ready")
+            self.memo.sts = "Ready"
         except Exception as e:
             gr.Error(str(e))
+            self.memo.sts = f"⛔ {str(e)}"
 
     def interface(self):
         pass

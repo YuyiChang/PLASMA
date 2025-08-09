@@ -1,4 +1,4 @@
-from plasma.devices.template import PlasmaDevice
+from plasma.devices.template import PlasmaDevice, PlasmaMemo
 import simplepyble
 import datetime
 import os
@@ -8,45 +8,28 @@ import time
 from pylsl import StreamInfo, StreamOutlet, cf_double64
 import numpy as np
 import struct
+from plasma.config import __data_dir__, __version__, MSENSE_DEV
 
-yams_dir = "data"
-__version__ = "0.1.0-beta"
+yams_dir = __data_dir__
 
 # device name - mac addr here
-device_list = {
-    "MSense Left 74N": "D3:54:EB:A4:9B:82",
-    "Msense Right 70N": "FF:7D:06:B4:51:98",
-}
+device_list = MSENSE_DEV
 
 class MotionSenseHRV(PlasmaDevice):
-    def __init__(self, session_info):
-        super().__init__(session_info)
+    def __init__(self, session_info, logger, tag):
+        super().__init__(session_info, logger, tag)
 
-        self.name = {}
+        self.memo = {}
         for k in device_list.keys():
-            self.name[k] = "🟦"
-
-        # current YYMMDD
-        now = datetime.datetime.now()
-        date = now.strftime("%Y-%m-%d")
-    
-        # init logger
-        self.logger = logging.getLogger(__name__)
-        os.makedirs(yams_dir, exist_ok=True)
-        logging.basicConfig(level=logging.INFO, 
-                            format='%(asctime)s [%(levelname)s] %(message)s',
-                            handlers=[
-                                logging.FileHandler(os.path.join(yams_dir, f"{date}_yams_session.log")),
-                                logging.StreamHandler()
-                            ])
-        self.logger.info(f"Begin PLASMA v{__version__} session log")
+            self.memo[k] = PlasmaMemo(k)
 
         self.init_adapter()
 
         self.active_devices = {}
         self.active_outlets = {}
 
-        # self.connect_devices()
+        self.scan_devices()
+        self.connect_devices()
         
     def init_adapter(self):
         adapters = simplepyble.Adapter.get_adapters()
@@ -55,11 +38,11 @@ class MotionSenseHRV(PlasmaDevice):
         self.adapter = adapters[0]
 
         # print(f"Selected adapter: {self.adapter.identifier()} [{self.adapter.address()}]")
-        self.logger.info(f"Selected adapter: {self.adapter.identifier()} [{self.adapter.address()}]")
+        self.info(f"Selected adapter: {self.adapter.identifier()} [{self.adapter.address()}]")
 
     def scan_devices(self, filter_name="MSense"):
         print("start scanning devices")
-        self.logger.info("start device scanning")
+        self.info("start device scanning")
         self.ctl_state = "Start device scanning"
         self.adapter.scan_for(5000)
         peripherals = self.adapter.scan_get_results()
@@ -67,7 +50,7 @@ class MotionSenseHRV(PlasmaDevice):
         self.devices = {}
         for i, peripheral in enumerate(peripherals):
             if filter_name in peripheral.identifier():
-                self.logger.info(f"{i}: {peripheral.identifier()} [{peripheral.address()}]")
+                self.info(f"{i}: {peripheral.identifier()} [{peripheral.address()}]")
                 # try to look up device alias
                 addr = peripheral.address().upper()
                 if addr in self.device_name.keys():
@@ -82,6 +65,7 @@ class MotionSenseHRV(PlasmaDevice):
                     "pheripheral": peripheral
                 }
 
+        self.info("device scanning completed")
         self.ctl_state = "Device scanning completed"
 
     def connect_devices(self):
@@ -92,26 +76,31 @@ class MotionSenseHRV(PlasmaDevice):
         self.ctl_state = "Start device connection"
 
         # quick sanity check
-        for addr in device_list.values():
-            assert addr in self.devices.keys(), self.logger.info(f"Target device not found {addr}")
+        for name, addr in device_list.items():
+            self.info(f"Connecting to device {addr}")
+            # assert addr in self.devices.keys(), self.info(f"Target device not found {addr}")
 
-            dev = self.devices[addr]
-            p = dev['pheripheral']
-            n = dev['name']
+            if addr in self.devices.keys():
+                dev = self.devices[addr]
+                p = dev['pheripheral']
+                n = dev['name']
+                
+                self.info(f"Starting to connect to {n}")
+                # gr.Info(f"Connecting to devices: {n}")
+                print(f'==== {n}')
+                p = self.devices[n]
+                print(f"=== {p.identifier()} at {p.address()}")
+                p.set_callback_on_connected(lambda: self.info(f"{n} {p.identifier()} is connected"))
+                p.set_callback_on_disconnected(lambda: self.info(f"{n} {p.identifier()} is disconnected"))
+                p.connect()
+                self.active_devices[n] = p
+                self.active_outlets[n] = MsenseOutlet(n, p, use_lsl=self.use_lsl)
+            else:
+                self.memo[name].sts = "⛔ device not found"
+                # a =  
 
-            self.logger.info(f"Starting to connect to {n}")
-            # gr.Info(f"Connecting to devices: {n}")
-            print(f'==== {n}')
-            p = self.devices[n]
-            print(f"=== {p.identifier()} at {p.address()}")
-            p.set_callback_on_connected(lambda: self.logger.info(f"{n} {p.identifier()} is connected"))
-            p.set_callback_on_disconnected(lambda: self.logger.info(f"{n} {p.identifier()} is disconnected"))
-            p.connect()
-            self.active_devices[n] = p
-            self.active_outlets[n] = MsenseOutlet(n, p, use_lsl=self.use_lsl)
-
-        self.logger.info(f"All target devices connected")
-        self.ctl_state = "Device(s) connected"
+        # self.info(f"All target devices connected")
+        # self.ctl_state = "Device(s) connected"
 
     def start(self):
         timestamp = time.strftime("%y%m%d_%H%M")
@@ -125,10 +114,10 @@ class MotionSenseHRV(PlasmaDevice):
 
         gr.Info("▶️ Start data collection...")
         self.t_start = time.time()
-        self.logger.info(f"Start data collection with out dir = {self.log_dir}")
-        self.logger.info(f"Subject ID = {self.session_info['sub_id']}")
-        self.logger.info(f"Session ID = {self.session_info['ses_id']}")
-        self.logger.info(f"Participant encoding = {self.session_info['participant_enc']}")
+        self.info(f"Start data collection with out dir = {self.log_dir}")
+        self.info(f"Subject ID = {self.session_info['sub_id']}")
+        self.info(f"Session ID = {self.session_info['ses_id']}")
+        self.info(f"Participant encoding = {self.session_info['participant_enc']}")
 
         for name, p in self.active_devices.items():
             print(name, p.is_connected(), p.is_connectable())
@@ -139,7 +128,7 @@ class MotionSenseHRV(PlasmaDevice):
 
     def stop(self):
         gr.Info("🛑 Stop data collection...")
-        self.logger.info("Data collection stopped")
+        self.info("Data collection stopped")
         for name, p in self.active_devices.items():
             print(name, p.is_connected(), p.is_connectable())
             self.collection_ctl(name, False)
@@ -187,9 +176,10 @@ class MotionSenseHRV(PlasmaDevice):
         
         packet_counter = struct.unpack("<H", packet_counter)
         horizontal_array = [ENMO[0], packet_counter[0]]
-        print(f"{name}: package counter", horizontal_array)
+        # print(f"{name}: package counter", horizontal_array)
 
         self.active_outlets[name].push_sample([ENMO[0], packet_counter[0]])
+        self.memo[name].set_latest(f"{ENMO[0]} {packet_counter[0]}")
 
 
 class MsenseOutlet(StreamOutlet):

@@ -3,42 +3,21 @@ import struct
 import os
 from plasma.lsl_session import encode_participant
 import importlib
-
-device_table = {
-    # 'Pupil Labs': 'pupil_labs',
-    # 'test': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDevice'
-    # },
-     'MSense Wristbands': {
-        'module': 'plasma.devices.msense',
-        'class': 'MotionSenseHRV'
-    },
-    'qb2 LiDAR': {
-        'module': 'plasma.devices.qb2',
-        'class': 'Qb2'
-    },
-    'Pupil Lab IMU': {
-        'module': 'plasma.devices.pupil_labs',
-        'class': 'PupilLabsIMU'
-    },
-    'Pupil Lab Eye Event Blink': {
-        'module': 'plasma.devices.pupil_labs',
-        'class': 'PupilLabsEyeEventBlink'
-    },
-    'Pupil Lab Eye Event Fixation': {
-        'module': 'plasma.devices.pupil_labs',
-        'class': 'PupilLabsEyeEventFixation'
-    }
-}
-
+import logging, datetime
+from logging import Logger
+from plasma.config import device_table, __data_dir__, __version__
 
 class IntegratedPanel():
     def __init__(self):
         self.device_list = list(device_table.keys())
-        self.log_root = "./data"
+        self.log_root = __data_dir__
 
         self.available_devices = []
+
+        self.sts = "Welcome"
+
+        self.logger = get_logger(__data_dir__)
+        self.logger.info(f"Begin PLASMA v{__version__} session log")
 
     def interface(self):
         with gr.Row():
@@ -63,7 +42,6 @@ class IntegratedPanel():
 
                     btn_init.click(self.init_devices, inputs=device_grp)
 
-            
             with gr.Column():
                 with gr.Accordion(label="Device control", open=True):
                 
@@ -82,7 +60,7 @@ class IntegratedPanel():
         with gr.Accordion("Help", open=False):
             with open("./plasma/help.md") as f:
                 help_txt = f.read()
-                print(help_txt)
+                # print(help_txt)
             md = gr.Markdown(help_txt)
 
     def init_devices(self, selected_devices):
@@ -92,30 +70,34 @@ class IntegratedPanel():
             print(cls)
             module = importlib.import_module(cls['module'])
             Device = getattr(module, cls['class'])
-            device_instance = Device(self.session_info)
+            device_instance = Device(self.session_info, self.logger, tag=dev)
             self.available_devices.append(device_instance)
+
+        self.sts = "Ready to start"
 
 
     def start_collection(self):
         for dev in self.available_devices:
             dev.start()
+        self.sts = "Collection in progress"
 
     def stop_collection(self):
         for dev in self.available_devices:
             dev.stop()
+        self.sts = "Collection stopped"
 
     def update_params(self):
         params = {
-            "Memo": {"type": f"Welcome to {self.session_info['sub_id']} {self.session_info['ses_id']}",
+            self.sts: {"type": f"{self.session_info['sub_id']} {self.session_info['ses_id']}",
                      "description": self.session_info['log_dir']}
         }
 
         for dev in self.available_devices:
-            if isinstance(dev.name, str):
-                params[f"- {dev.name}"] = {"type": dev.sts}
-            elif isinstance(dev.name, dict):
-                for k, v in dev.name.items():
-                    params[f"- {k}"] = {"type": v}
+            if isinstance(dev.memo, dict):
+                for k, v in dev.memo.items():
+                    params[f"- {k}"] = v.get_sts()
+            else:
+                params[f"- {dev.memo.name}"] = dev.memo.get_sts()
 
         # print(params)
         return params
@@ -134,3 +116,19 @@ class IntegratedPanel():
         }
         return integer_representation
 
+
+def get_logger(yams_dir="data"):
+    # current YYMMDD
+    now = datetime.datetime.now()
+    date = now.strftime("%Y-%m-%d")
+
+    # init logger
+    logger = logging.getLogger(__name__)
+    os.makedirs(yams_dir, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, 
+                        format='%(asctime)s [%(levelname)s] %(message)s',
+                        handlers=[
+                            logging.FileHandler(os.path.join(yams_dir, f"{date}_plasma_session.log")),
+                            logging.StreamHandler()
+                        ])
+    return logger

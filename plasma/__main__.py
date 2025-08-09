@@ -1,6 +1,5 @@
 import gradio as gr
 from plasma.integrated_panel import IntegratedPanel
-# from plasma.devices.pupil_labs import pupil_labs_video_feed
 
 def main():
     ip = IntegratedPanel()
