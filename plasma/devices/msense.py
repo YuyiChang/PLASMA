@@ -53,18 +53,20 @@ class MotionSenseHRV(PlasmaDevice):
                 self.info(f"{i}: {peripheral.identifier()} [{peripheral.address()}]")
                 # try to look up device alias
                 addr = peripheral.address().upper()
-                if addr in self.device_name.keys():
-                    alias = self.device_name[addr]
+                if addr in device_list.keys():
+                    alias = device_list[addr]
                     name = f"{alias} ({peripheral.identifier()}) [{peripheral.address()}]"
                 else:
                     name = f"{peripheral.identifier()} [{peripheral.address()}]"
 
                 # self.devices[name] = 
-                self.devices[peripheral.address()] = {
+                self.devices[peripheral.address().upper()] = {
                     "name": name,
                     "pheripheral": peripheral
                 }
 
+
+        print(self.devices)
         self.info("device scanning completed")
         self.ctl_state = "Device scanning completed"
 
@@ -88,13 +90,12 @@ class MotionSenseHRV(PlasmaDevice):
                 self.info(f"Starting to connect to {n}")
                 # gr.Info(f"Connecting to devices: {n}")
                 print(f'==== {n}')
-                p = self.devices[n]
                 print(f"=== {p.identifier()} at {p.address()}")
                 p.set_callback_on_connected(lambda: self.info(f"{n} {p.identifier()} is connected"))
                 p.set_callback_on_disconnected(lambda: self.info(f"{n} {p.identifier()} is disconnected"))
                 p.connect()
                 self.active_devices[n] = p
-                self.active_outlets[n] = MsenseOutlet(n, p, use_lsl=self.use_lsl)
+                self.active_outlets[n] = MsenseOutlet(n, p)
             else:
                 self.memo[name].sts = "⛔ device not found"
                 # a =  
@@ -126,6 +127,9 @@ class MotionSenseHRV(PlasmaDevice):
 
         self.ctl_state = "Collection in progress"
 
+        for m in self.memo.values():
+            m.sts = "🟢"
+
     def stop(self):
         gr.Info("🛑 Stop data collection...")
         self.info("Data collection stopped")
@@ -134,6 +138,9 @@ class MotionSenseHRV(PlasmaDevice):
             self.collection_ctl(name, False)
 
         self.ctl_state = "Collection stopped"
+
+        for m in self.memo.values():
+            m.sts = "🛑"
     
     def collection_ctl(self, name, start=True):
         peripheral = self.active_devices[name]
@@ -145,6 +152,7 @@ class MotionSenseHRV(PlasmaDevice):
                                      "da39c932-1d81-48e2-9c68-d0ae4bbd351f", 
                                      struct.pack("<Q", int(time.time())))
             # write participant hash
+            self.participant_byte = struct.pack("<I", self.session_info['participant_enc'])
             peripheral.write_request("da39c930-1d81-48e2-9c68-d0ae4bbd351f",
                                      "da39c933-1d81-48e2-9c68-d0ae4bbd351f", 
                                      self.participant_byte)
