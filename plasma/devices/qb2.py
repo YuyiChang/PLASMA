@@ -62,7 +62,7 @@ class Qb2(PlasmaDevice):
                 frame = response.frame
 
                 self.outlet.push_sample([frame.id])
-                
+                self.memo.latest("frame ID = ", frame.id)
 
                 # response = client.recv(1024).decode()
                 # should_continue = response.lower() == 'true'

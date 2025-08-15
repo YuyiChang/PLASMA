@@ -8,8 +8,42 @@ import gradio as gr
 from plasma.devices.template import PlasmaDevice, PlasmaMemo
 from pylsl import StreamInfo, StreamOutlet, cf_string
 from plasma.config import IP_PUPIL_LABS
+import time
+import cv2
+
+from plasma.devices import *
 
 ip = IP_PUPIL_LABS
+
+class PupilLabsDashboard():
+    def __init__(self):
+        self.device = Device(address=ip, port="8080")
+
+    def interface(self):        
+        img = gr.Image(streaming=True)
+        with gr.Row():
+            btn_start = gr.Button("Start")
+            btn_stop = gr.Button("Stop")
+
+        streaming = btn_start.click(self.stream_frame, outputs=img)
+        stop_streaming = btn_stop.click(cancels=[streaming])
+
+    def stream_src(self):
+        while True:
+            fm = self.device.receive_matched_scene_and_eyes_video_frames_and_gaze()
+            im = fm.scene.bgr_pixels
+            cv2.circle(im,
+                       (int(fm.gaze.x), int(fm.gaze.y)),
+                       radius=20,
+                       color=(0, 0, 255),
+                       thickness=10)
+            im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+            yield im
+            time.sleep(0.01)
+
+    def stream_frame(self):
+        for fm in self.stream_src():
+            yield fm
 
 class PupilLabsIMU(PlasmaDevice):
     def __init__(self, session_info, logger, tag):

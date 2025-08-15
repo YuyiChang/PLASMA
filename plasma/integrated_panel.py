@@ -38,7 +38,7 @@ class IntegratedPanel():
 
                 with gr.Accordion(label="Device initialization", open=True):
                     device_grp = gr.CheckboxGroup(choices=self.device_list, value=self.device_list, label="Select sensor(s)")
-                    btn_init = gr.Button("Initialize selected device(s)")
+                    btn_init = gr.Button("🚦Initialize selected device(s)")
 
                     btn_init.click(self.init_devices, inputs=device_grp)
 
@@ -57,11 +57,11 @@ class IntegratedPanel():
                 timer = gr.Timer(value=1)
                 timer.tick(fn=self.update_params, outputs=params)
 
-        with gr.Accordion("Help", open=False):
-            with open("./plasma/help.md") as f:
-                help_txt = f.read()
-                # print(help_txt)
-            md = gr.Markdown(help_txt)
+        # with gr.Accordion("Help", open=False):
+        #     with open("./plasma/help.md") as f:
+        #         help_txt = f.read()
+        #         # print(help_txt)
+        #     md = gr.Markdown(help_txt)
 
     def init_devices(self, selected_devices):
         self.available_devices = []
