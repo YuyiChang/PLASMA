@@ -1,26 +1,13 @@
-# PLASMA
+## Purpose
+Preparation for Implementing GSR Streaming in PLASMA
 
-PLASMA: Platform for LSL-based Acquisition of Sensor Metrics and Analytics
+## Usage
+- The scripts use the "Bluetooth interface" to stream `GSR_raw`.
+- Change `COM5` if you are using a laptop other than the streamer laptop.
 
-## quickstart
+## Scripts
+- test_shimmer.py is developed to check if the device can be connected to the streamer laptop through `COM5` and then receive data from the `GSR_raw` channel.
+- test_shimmer_lsl.py has LSL, and the stream can appear on LabRecorder. However, a test recording has not been performed yet.
 
-- `conda create -n plasma python=3.12`
-- `conda activate plasma`
-- `pip install -r requirements.txt`
-- `python -m plasma`
-
-## Known issue
-
-- [ ] need manually set lidar ip addr
-
-
-## device template
-
-for developing device-specific interface to be integrayed with `plasma.integrated_panel`
-
-> refer to `PlasmaDevice` in `plasma/devices/template.py`
-
-## references
-
-- qb2: https://docs.blickfeld.com/qb2/Qb2/v1.10/guides/api.html
-- pupil-labs: https://pupil-labs.github.io/pl-realtime-api/dev/
+## References
+- pyshimmer: https://github.com/seemoo-lab/pyshimmer
