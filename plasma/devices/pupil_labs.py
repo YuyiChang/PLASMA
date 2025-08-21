@@ -108,10 +108,29 @@ class PupilLabsEyeEventBlink(PlasmaDevice):
     def streaming(self):
         while not self._stop_event.is_set():
             eye_event = self.device.receive_eye_events()
+
             if isinstance(eye_event, BlinkEventData):
-                # time_sec = eye_event.start_time_ns // 1e9
-                # blink_time = datetime.fromtimestamp(time_sec, timezone.utc)
-                evt = f"[BLINK] blinked at {eye_event.start_time_ns} ns"
+                time_sec = eye_event.start_time_ns // 1e9
+                blink_time = datetime.fromtimestamp(time_sec, timezone.utc)
+                # print(f"[BLINK] blinked at {blink_time.strftime('%H:%M:%S')} UTC")
+
+                evt = f"[BLINK] blinked at {blink_time.strftime('%H:%M:%S')} UTC"
+                self.outlet.push_sample([evt])
+                self.memo.set_latest(evt)
+
+            elif isinstance(eye_event, FixationEventData) and eye_event.event_type == 0:
+                angle = eye_event.amplitude_angle_deg
+                # print(f"[SACCADE] event with {angle:.0f}° amplitude.")
+
+                evt = f"[SACCADE] event with {angle:.0f}° amplitude."
+                self.outlet.push_sample([evt])
+                self.memo.set_latest(evt)
+
+            elif isinstance(eye_event, FixationEventData) and eye_event.event_type == 1:
+                duration = (eye_event.end_time_ns - eye_event.start_time_ns) / 1e9
+                # print(f"[FIXATION] event with duration of {duration:.2f} seconds.")
+
+                evt = f"[FIXATION] event with duration of {duration:.2f} seconds."
                 self.outlet.push_sample([evt])
                 self.memo.set_latest(evt)
         
