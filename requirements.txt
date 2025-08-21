@@ -6,3 +6,5 @@ blickfeld-qb2
 pupil-labs-realtime-api
 pylsl
 simplepyble
+pyserial
+pyshimmer

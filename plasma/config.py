@@ -24,10 +24,10 @@ device_table = {
         'module': 'plasma.devices.pupil_labs',
         'class': 'PupilLabsEyeEventBlink'
     },
-    # 'Pupil Lab Eye Event Fixation': {
-    #     'module': 'plasma.devices.pupil_labs',
-    #     'class': 'PupilLabsEyeEventFixation'
-    # }
+    'ShimmerGSR': {
+        'module': 'plasma.devices.shimmer',
+        'class': 'ShimmerGSR'
+    }
 }
 
 MSENSE_DEV = {
