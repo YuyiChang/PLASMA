@@ -11,9 +11,10 @@ import gradio as gr
 import threading
 import asyncio
 from plasma.devices.template import PlasmaDevice, PlasmaMemo
-from plasma.config import IP_QB2_LIDAR
+# from plasma.config import IP_QB2_LIDAR
+from plasma.config import plasma_config
 
-ip = IP_QB2_LIDAR
+ip = plasma_config.ip_lidar
 
 class Qb2(PlasmaDevice):
     def __init__(self, session_info, logger, tag) -> None:
@@ -26,6 +27,8 @@ class Qb2(PlasmaDevice):
 
         self.out_dir = os.path.join(self.session_info['log_dir'], "qb2")
         os.makedirs(self.out_dir, exist_ok=True)
+
+        print(f"Initializing Qb2 LiDAR at {self.addr}")
 
 
         self._thread = None

@@ -7,13 +7,16 @@ from pupil_labs.realtime_api.streaming.eye_events import (
 import gradio as gr
 from plasma.devices.template import PlasmaDevice, PlasmaMemo
 from pylsl import StreamInfo, StreamOutlet, cf_string
-from plasma.config import IP_PUPIL_LABS
+# from plasma.config import IP_PUPIL_LABS
+# from plasma.config import plasma_config
+import plasma.config as c
 import time
 import cv2
+from importlib import reload
 
 from plasma.devices import *
 
-ip = IP_PUPIL_LABS
+ip = c.plasma_config.ip_pupil_labs
 
 class PupilLabsDashboard():
     def __init__(self):
@@ -49,6 +52,9 @@ class PupilLabsIMU(PlasmaDevice):
     def __init__(self, session_info, logger, tag):
         super().__init__(session_info, logger, tag)
         self.memo = PlasmaMemo('Pupil Labs IMU')
+
+        ip = c.plasma_config.ip_pupil_labs
+        print(f"Initializing Pupil Labs IMU at {ip}")
 
         # self.device = discover_one_device(max_search_duration_seconds=10)
         self.device = Device(address=ip, port="8080")
@@ -91,6 +97,9 @@ class PupilLabsEyeEventBlink(PlasmaDevice):
     def __init__(self, session_info, logger, tag):
         super().__init__(session_info, logger, tag)
         self.memo = PlasmaMemo('Pupil Labs Blink')
+
+        ip = c.plasma_config.ip_pupil_labs
+        print(f"Initializing Pupil Labs Eye Event at {ip}")
 
         # self.device = discover_one_device(max_search_duration_seconds=10)
         self.device = Device(address=ip, port="8080")
