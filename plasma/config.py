@@ -27,6 +27,10 @@ device_table = {
     'ShimmerGSR': {
         'module': 'plasma.devices.shimmer',
         'class': 'ShimmerGSR'
+    },
+    'OBS Recorder': {
+        'module': 'plasma.devices.obs',
+        'class': 'ObsRecorder'
     }
 }
 
