@@ -30,7 +30,7 @@ import pandas as pd
 outlet = None
 shim_dev = None
 streaming = False
-com_port_global = "COM3"  # default COM port
+com_port_global = "COM5"  # default COM port
 sampling_rate = 102.4     # Shimmer sampling rate
 max_points = int(sampling_rate * 10)  # keep last 10 seconds of data
 data_buffer = deque(maxlen=max_points)  # store recent samples
