@@ -67,7 +67,7 @@ class IntegratedPanel():
         self.available_devices = []
         for dev in selected_devices:
             cls = device_table[dev]
-            print(cls)
+            print(dev, cls)
             module = importlib.import_module(cls['module'])
             Device = getattr(module, cls['class'])
             device_instance = Device(self.session_info, self.logger, tag=dev)

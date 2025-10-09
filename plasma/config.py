@@ -3,34 +3,61 @@ import gradio as gr
 __version__ = "0.1.0-beta"
 __data_dir__ = "data"
 
+# device_table = {
+#     # 'test': {
+#     #     'module': 'plasma.devices.template',
+#     #     'class': 'PlasmaDevice'
+#     # },
+#      'MSense Wristbands': {
+#         'module': 'plasma.devices.msense',
+#         'class': 'MotionSenseHRV'
+#     },
+#     'qb2 LiDAR': {
+#         'module': 'plasma.devices.qb2',
+#         'class': 'Qb2'
+#     },
+#     'Pupil Lab IMU': {
+#         'module': 'plasma.devices.pupil_labs',
+#         'class': 'PupilLabsIMU'
+#     },
+#     'Pupil Lab Eye Event Blink': {
+#         'module': 'plasma.devices.pupil_labs',
+#         'class': 'PupilLabsEyeEventBlink'
+#     },
+#     'ShimmerGSR': {
+#         'module': 'plasma.devices.shimmer',
+#         'class': 'ShimmerGSR'
+#     },
+#     'OBS Recorder': {
+#         'module': 'plasma.devices.obs',
+#         'class': 'ObsRecorder'
+#     }
+# }
+
 device_table = {
-    # 'test': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDevice'
-    # },
-     'MSense Wristbands': {
-        'module': 'plasma.devices.msense',
-        'class': 'MotionSenseHRV'
+     'IMU': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
     },
-    'qb2 LiDAR': {
-        'module': 'plasma.devices.qb2',
-        'class': 'Qb2'
+    'Camera recorder': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
     },
-    'Pupil Lab IMU': {
-        'module': 'plasma.devices.pupil_labs',
-        'class': 'PupilLabsIMU'
+    'Eye tracking': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
     },
-    'Pupil Lab Eye Event Blink': {
-        'module': 'plasma.devices.pupil_labs',
-        'class': 'PupilLabsEyeEventBlink'
+    'MotionSENSE PPG wristband': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
     },
-    'ShimmerGSR': {
-        'module': 'plasma.devices.shimmer',
-        'class': 'ShimmerGSR'
+    'Skin conductance': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
     },
-    'OBS Recorder': {
-        'module': 'plasma.devices.obs',
-        'class': 'ObsRecorder'
+    'Camera Recorder 2': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
     }
 }
 

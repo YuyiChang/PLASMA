@@ -7,7 +7,7 @@ def main():
     ip = IntegratedPanel()
     # pl = PupilLabsDashboard()
 
-    with gr.Blocks(title="PLASMA") as app:
+    with gr.Blocks(title="PLASMA", theme=gr.themes.Ocean()) as app:
         with gr.Tab("Session dashboard"):
             ip.interface()
         with gr.Tab("Configuration"):
@@ -15,7 +15,7 @@ def main():
         # with gr.Tab("PL"):
         #     pl.interface()
 
-    app.launch(inbrowser=True)
+    app.launch(inbrowser=True, share=False)
 
 
 if __name__ == '__main__':
