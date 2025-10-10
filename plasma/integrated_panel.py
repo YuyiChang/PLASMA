@@ -19,6 +19,9 @@ class IntegratedPanel():
         self.logger = get_logger(__data_dir__)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
+    # def visualizer_interface(self):
+    #     pass
+
     def interface(self):
         with gr.Row():
             with gr.Column():

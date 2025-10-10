@@ -10,6 +10,8 @@ def main():
     with gr.Blocks(title="PLASMA", theme=gr.themes.Ocean()) as app:
         with gr.Tab("Session dashboard"):
             ip.interface()
+        # with gr.Tab("Signal visualizer"):
+        #     ip.visualizer_interface()
         with gr.Tab("Configuration"):
             plasma_config.interface()
         # with gr.Tab("PL"):

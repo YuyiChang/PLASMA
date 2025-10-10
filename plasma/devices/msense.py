@@ -94,11 +94,10 @@ class MotionSenseHRV(PlasmaDevice):
                 p.set_callback_on_connected(lambda: self.info(f"{n} {p.identifier()} is connected"))
                 p.set_callback_on_disconnected(lambda: self.info(f"{n} {p.identifier()} is disconnected"))
                 p.connect()
-                self.active_devices[n] = p
-                self.active_outlets[n] = MsenseOutlet(n, p)
+                self.active_devices[name] = p
+                self.active_outlets[name] = MsenseOutlet(n, p)
             else:
                 self.memo[name].sts = "⛔ device not found"
-                # a =  
 
         # self.info(f"All target devices connected")
         # self.ctl_state = "Device(s) connected"
@@ -187,6 +186,7 @@ class MotionSenseHRV(PlasmaDevice):
         # print(f"{name}: package counter", horizontal_array)
 
         self.active_outlets[name].push_sample([ENMO[0], packet_counter[0]])
+        # print(f"{ENMO[0]} {packet_counter[0]}", self.memo.keys(), name)
         self.memo[name].set_latest(f"{ENMO[0]} {packet_counter[0]}")
 
 
