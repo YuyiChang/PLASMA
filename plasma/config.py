@@ -35,44 +35,44 @@ __data_dir__ = "data"
 # }
 
 device_table = {
-    #  'IMU': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # },
-    # 'Camera recorder': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # },
-    # 'Eye tracking': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # },
-    'MotionSENSE PPG wristband': {
-        'module': 'plasma.devices.msense',
-        'class': 'MotionSenseHRV'
+     'Wristband': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
     },
-    # 'Skin conductance': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
+    'Camera recorder': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    },
+    'Eye tracking': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    },
+    # 'MotionSENSE HRV wristband': {
+    #     'module': 'plasma.devices.msense',
+    #     'class': 'MotionSenseHRV'
     # },
-    # 'LiDAR': {
-    #     'module': 'plasma.devices.qb2',
-    #     'class': 'Qb2'
-    # },
-    # 'Camera Recorder 2': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # }
+    'Skin conductance': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    },
+    'LiDAR': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    },
+    'Camera Recorder 2': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    }
 }
 
 MSENSE_DEV = {
     # "MSense Left 74N": "D3:54:EB:A4:9B:82",
     # "Msense Right 70N": "FF:7D:06:B4:51:98",
     "MSense Left 01S": "2104F8E3-D94A-1DF7-691E-9491AE431DC1", 
-    # "MSense Right 4BH100": "51972CC5-950C-43EA-4E18-163275824EFE",
+    "MSense Right 4BH100": "51972CC5-950C-43EA-4E18-163275824EFE",
 }
 
-IP_QB2_LIDAR = "192.168.50.35"
+IP_QB2_LIDAR = "192.168.0.35"
 IP_PUPIL_LABS = "192.168.50.167"
 
 

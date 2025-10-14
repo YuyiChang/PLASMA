@@ -6,6 +6,8 @@ import importlib
 import logging, datetime
 from logging import Logger
 from plasma.config import device_table, __data_dir__, __version__
+import pandas as pd
+import numpy as np
 
 class IntegratedPanel():
     def __init__(self):
@@ -19,8 +21,32 @@ class IntegratedPanel():
         self.logger = get_logger(__data_dir__)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
-    # def visualizer_interface(self):
-    #     pass
+    def visualizer_interface(self):
+        # refresh = gr.Button("Refresh available devices")
+        # checkbox_group = gr.CheckboxGroup()
+        # refresh.click(self.update_devices, outputs=checkbox_group)
+        gr.LinePlot(value=self.update_data, x='index', y='data', every=0.5)
+
+    def update_data(self):
+        # very dummy way of pulling data to be visualized
+        sel_dev = None
+        data = np.arange(100) / 100
+        for dev in self.available_devices:
+            if "SENSE" in dev.tag:
+                sel_dev = dev
+                data = np.array(sel_dev.memo['MSense Left 01S'].data)
+                print('=====', data.shape)
+                break
+
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': data
+        })
+        return df
+
+    def update_devices(self):
+        aa = [dev.tag for dev in self.available_devices]
+        return gr.CheckboxGroup(choices=aa)
 
     def interface(self):
         with gr.Row():

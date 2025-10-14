@@ -8,6 +8,7 @@ class PlasmaMemo():
         self.name = name
         self.sts = "🟦" # status
         self.set_latest("initialized")
+        self.data = [0] * 100
 
     def get_sts(self):
         return {
@@ -18,6 +19,11 @@ class PlasmaMemo():
     def set_latest(self, msg):
         now = datetime.datetime.now().strftime("%H:%M:%S")
         self.latest = f"{now} {msg}"
+
+    def set_data(self, data):
+        print('=========', data)
+        self.data.append(data)
+        self.data.pop(0)
 
 
 class PlasmaDevice:

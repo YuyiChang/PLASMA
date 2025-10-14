@@ -188,6 +188,7 @@ class MotionSenseHRV(PlasmaDevice):
         self.active_outlets[name].push_sample([ENMO[0], packet_counter[0]])
         # print(f"{ENMO[0]} {packet_counter[0]}", self.memo.keys(), name)
         self.memo[name].set_latest(f"{ENMO[0]} {packet_counter[0]}")
+        self.memo[name].set_data(ENMO[0])
 
 
 class MsenseOutlet(StreamOutlet):
