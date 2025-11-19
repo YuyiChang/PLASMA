@@ -35,34 +35,38 @@ __data_dir__ = "data"
 # }
 
 device_table = {
-     'Wristband': {
-        'module': 'plasma.devices.template',
-        'class': 'PlasmaDemoDevice'
-    },
-    'Camera recorder': {
-        'module': 'plasma.devices.template',
-        'class': 'PlasmaDemoDevice'
-    },
-    'Eye tracking': {
-        'module': 'plasma.devices.template',
-        'class': 'PlasmaDemoDevice'
-    },
-    # 'MotionSENSE HRV wristband': {
-    #     'module': 'plasma.devices.msense',
-    #     'class': 'MotionSenseHRV'
+    #  'Wristband': {
+    #     'module': 'plasma.devices.template',
+    #     'class': 'PlasmaDemoDevice'
     # },
-    'Skin conductance': {
-        'module': 'plasma.devices.template',
-        'class': 'PlasmaDemoDevice'
+    # 'Camera recorder': {
+    #     'module': 'plasma.devices.template',
+    #     'class': 'PlasmaDemoDevice'
+    # },
+    # 'Eye tracking': {
+    #     'module': 'plasma.devices.template',
+    #     'class': 'PlasmaDemoDevice'
+    # },
+    'MotionSENSE HRV wristband': {
+        'module': 'plasma.devices.msense',
+        'class': 'MotionSenseHRV'
     },
-    'LiDAR': {
-        'module': 'plasma.devices.template',
-        'class': 'PlasmaDemoDevice'
+    'Bitalino': {
+        'module': 'plasma.devices.bitalino',
+        'class': 'PlasmaBitalino'
     },
-    'Camera Recorder 2': {
-        'module': 'plasma.devices.template',
-        'class': 'PlasmaDemoDevice'
-    }
+    # 'Skin conductance': {
+    #     'module': 'plasma.devices.template',
+    #     'class': 'PlasmaDemoDevice'
+    # },
+    # 'LiDAR': {
+    #     'module': 'plasma.devices.template',
+    #     'class': 'PlasmaDemoDevice'
+    # },
+    # 'Camera Recorder 2': {
+    #     'module': 'plasma.devices.template',
+    #     'class': 'PlasmaDemoDevice'
+    # }
 }
 
 MSENSE_DEV = {
