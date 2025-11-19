@@ -2,8 +2,8 @@ from plasma.devices.template import PlasmaDevice, PlasmaMemo
 import time
 from serial import Serial
 from pylsl import StreamInfo, StreamOutlet
-# from bitalino import BITalino
-from lib.revolution_python_api.bitalino import BITalino
+from bitalino import BITalino
+# from lib.revolution_python_api.bitalino import BITalino
 import numpy as np
 
 # def handler(pkt: DataPacket) -> None:
@@ -34,10 +34,10 @@ class PlasmaBitalino(PlasmaDevice):
         # This example will collect data for 5 sec.
         running_time = 5
 
-        # try:
-        self.device = BITalino(mac_addr)
-        # except Exception as e:
-        #     self.memo.sts = f"❌ Fault {str(e)}"
+        try:
+            self.device = BITalino(mac_addr)
+        except Exception as e:
+            self.memo.sts = f"❌ Fault {str(e)}"
 
 
     # def start(self):
@@ -49,7 +49,7 @@ class PlasmaBitalino(PlasmaDevice):
         # your custom sensor callback goes here
         while not self._stop_event.is_set():
             data = self.device.read(self.n_samples)
-            self.outlet.push_chunk(data)
+            self.outlet.push_sample(data[0, :])
             self.last_data = (f"{self.tag} reading at {time.time()}", np.shape(data))
             self.memo.set_latest(f"{self.tag} reading at {time.time()}")
 
