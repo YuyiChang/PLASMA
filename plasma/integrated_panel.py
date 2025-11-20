@@ -22,10 +22,11 @@ class IntegratedPanel():
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
     def visualizer_interface(self):
-        # refresh = gr.Button("Refresh available devices")
-        # checkbox_group = gr.CheckboxGroup()
-        # refresh.click(self.update_devices, outputs=checkbox_group)
-        gr.LinePlot(value=self.update_data, x='index', y='data', every=0.5)
+        with gr.Row():
+            # refresh = gr.Button("Refresh available devices")
+            checkbox_group = gr.CheckboxGroup(self.device_list, label="devices", scale=1)
+            # refresh.click(self.update_devices, outputs=checkbox_group)
+            gr.LinePlot(value=self.update_data, x='index', y='data', every=0.5, scale=4)
 
     def update_data(self):
         # very dummy way of pulling data to be visualized
