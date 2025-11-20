@@ -12,13 +12,20 @@ import numpy as np
 class UpdateFunction():
     def __init__(self):
         self.fn = self.default_fn
+        self. available_devices = []
         self.available_fns = {
             'Bitalino' : self.bitalino_update_data, 
             'MotionSENSE HRV wristband' : self.MotionSENSE_HRV_wristband_update_data
             }
+    def init_update_fn(available_devices):
+        self.available_devices=available_devices
 
     def switch_device(self, device):
-        self.fn = self.available_fns[device] #temp solution
+        try:
+            self.fn = self.available_fns[device] 
+        except:
+            self.fn = self.default_fn
+            print("device not supported or not initalized yet")
     
     def default_fn(self):
         
@@ -42,12 +49,12 @@ class UpdateFunction():
         sel_dev = None
         data = np.arange(100) / 100
 
-        # for dev in self.available_devices:
-        #     if "SENSE" in dev.tag:
-        #         sel_dev = dev
-        #         data = np.array(sel_dev.memo['MSense Left 01S'].data)
-        #         print('=====', data.shape)
-        #         break
+        for dev in self.available_devices:
+            if "SENSE" in dev.tag:
+                sel_dev = dev
+                data = np.array(sel_dev.memo['MSense Left 01S'].data)
+                print('=====', data.shape)
+                break
 
         df = pd.DataFrame(data={
             'index': np.arange(100),
@@ -141,7 +148,8 @@ class IntegratedPanel():
             Device = getattr(module, cls['class'])
             device_instance = Device(self.session_info, self.logger, tag=dev)
             self.available_devices.append(device_instance)
-
+        
+        self.update.init_update_fn(self.available_devices)
         self.sts = "Ready to start"
 
 
