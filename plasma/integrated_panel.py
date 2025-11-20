@@ -9,91 +9,52 @@ from plasma.config import device_config, __data_dir__, __version__
 import pandas as pd
 import numpy as np
 
-# class UpdateFunction():
-#     def __init__(self):
-#         self.fn = self.default_fn
-#         self.max_channels = 6
-#         self.channels = [f"ch{i+1}" for i in range(self.max_channels)]
-#         self. available_devices = []
-#         self.available_fns = {
-#             'Bitalino' : self.bitalino_update_data, 
-#             'MotionSENSE HRV wristband' : self.MotionSENSE_HRV_wristband_update_data
-#             }
-#     def init_update_fn(self, available_devices):
-#         self.available_devices=available_devices
+class UpdateFunction():
+    def __init__(self):
+        self.fn = self.default_fn
+        self.available_fns = {
+            'Bitalino' : self.bitalino_update_data, 
+            'MotionSENSE HRV wristband' : self.MotionSENSE_HRV_wristband_update_data
+            }
 
-#     def switch_device(self, device):
-#         try:
-#             self.fn = self.available_fns[device] 
-#         except:
-#             self.fn = self.default_fn
-#             print("device not supported or not initalized yet")
+    def switch_device(self, device):
+        self.fn = self.available_fns[device] #temp solution
     
-#     def default_fn(self):
-
-#         samples = 100
-#         print("running default update function")
-
-#         # Construct long-form dataframe
-#         df = pd.DataFrame({
-#             "index": np.tile(np.arange(samples), self.max_channels),
-#             "data": np.concatenate([
-#                 np.sin(np.linspace(0, np.pi * 2, samples) + i) * 0.5 + i
-#                 for i in range(self.max_channels)
-#             ]),
-#             "channel": np.repeat(self.channels, samples)
-#         })
-
-#         return df
-
-#     def bitalino_update_data(self):
-
-#         print("running bitalino update function")
-
-#         length = 0
-#         readings = np.zeros(0, dtype=np.int64)
-
-#         for dev in self.available_devices:
-#             if 'Bitalino' in dev.tag:
-#                 length = dev.n_samples
-#                 for reading in dev.memo.data:
-#                     data = np.zeros((dev.n_samples, self.max_channels), dtype = np.int64)
-#                     if isinstance(reading, np.ndarray):
-#                         data = reading[:, 5:11]        
-#                     data = data.flatten(order='F')
-#                     readings = np.concatenate((readings, data))
-#                 break
+    def default_fn(self):
         
-#         df = pd.DataFrame(data={
-#             'index': np.tile(np.arange(100 * length), self.max_channels),
-#             'data': readings,
-#             'channel': np.tile(np.repeat(self.channels, length), 100)
-#         })
-        
-#         return df
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': np.arange(100)/100
+        })
+        return df
+
+    def bitalino_update_data(self):
+
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': np.zeros(100)
+        })
+        return df
         
 
-#     def MotionSENSE_HRV_wristband_update_data(self):
-#         # very dummy way of pulling data to be visualized
+    def MotionSENSE_HRV_wristband_update_data(self):
+        # very dummy way of pulling data to be visualized
+        sel_dev = None
+        data = np.arange(100) / 100
 
-#         print("running Motion sense update function")
+        # for dev in self.available_devices:
+        #     if "SENSE" in dev.tag:
+        #         sel_dev = dev
+        #         data = np.array(sel_dev.memo['MSense Left 01S'].data)
+        #         print('=====', data.shape)
+        #         break
 
-#         sel_dev = None
-#         data = np.arange(100) / 100
-
-#         for dev in self.available_devices:
-#             if "SENSE" in dev.tag:
-#                 sel_dev = dev
-#                 data = np.array(sel_dev.memo['MSense Left 01S'].data)
-#                 print('=====', data.shape)
-#                 break
-
-#         df = pd.DataFrame(data={
-#             'index': np.arange(100),
-#             'data': data,
-#             'channel' : ['ch1'] * 100
-#         })
-#         return df
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': data
+        })
+        return df
+>>>>>>> 389e8f3 (added feature to switch update function through check box)
         
 
 class IntegratedPanel():
@@ -108,8 +69,7 @@ class IntegratedPanel():
         self.logger = get_logger(__data_dir__)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
-        #self.update = UpdateFunction()
-        self.current_dev = None
+        self.update = UpdateFunction()
         
 
     def visualizer_interface(self):
@@ -156,6 +116,10 @@ class IntegratedPanel():
         })
         
         return df
+    
+    def select_device(self, evt: gr.SelectData):
+        self.update.switch_device(evt.value)
+        return self.update.fn()
 
     def dummy_update(self):
         """
