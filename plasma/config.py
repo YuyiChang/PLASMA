@@ -49,11 +49,11 @@ device_table = {
     # },
     'MotionSENSE HRV wristband': {
         'module': 'plasma.devices.msense',
-        'class': 'MotionSenseHRV'
+        'class': 'MotionSenseHRV',
     },
     'Bitalino': {
         'module': 'plasma.devices.bitalino',
-        'class': 'PlasmaBitalino'
+        'class': 'PlasmaBitalino',
     },
     # 'Skin conductance': {
     #     'module': 'plasma.devices.template',

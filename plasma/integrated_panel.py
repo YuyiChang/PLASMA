@@ -9,6 +9,53 @@ from plasma.config import device_table, __data_dir__, __version__
 import pandas as pd
 import numpy as np
 
+class UpdateFunction():
+    def __init__(self):
+        self.fn = self.default_fn
+        self.available_fns = {
+            'Bitalino' : self.bitalino_update_data, 
+            'MotionSENSE HRV wristband' : self.MotionSENSE_HRV_wristband_update_data
+            }
+
+    def switch_device(self, device):
+        self.fn = self.available_fns[device] #temp solution
+    
+    def default_fn(self):
+        
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': np.arange(100)/100
+        })
+        return df
+
+    def bitalino_update_data(self):
+
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': np.zeros(100)
+        })
+        return df
+        
+
+    def MotionSENSE_HRV_wristband_update_data(self):
+        # very dummy way of pulling data to be visualized
+        sel_dev = None
+        data = np.arange(100) / 100
+
+        # for dev in self.available_devices:
+        #     if "SENSE" in dev.tag:
+        #         sel_dev = dev
+        #         data = np.array(sel_dev.memo['MSense Left 01S'].data)
+        #         print('=====', data.shape)
+        #         break
+
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': data
+        })
+        return df
+        
+
 class IntegratedPanel():
     def __init__(self):
         self.device_list = list(device_table.keys())
@@ -21,29 +68,21 @@ class IntegratedPanel():
         self.logger = get_logger(__data_dir__)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
+        self.update = UpdateFunction()
+        
+
     def visualizer_interface(self):
         with gr.Row():
             # refresh = gr.Button("Refresh available devices")
             checkbox_group = gr.CheckboxGroup(self.device_list, label="devices", scale=1)
             # refresh.click(self.update_devices, outputs=checkbox_group)
-            gr.LinePlot(value=self.update_data, x='index', y='data', every=0.5, scale=4)
+            plot = gr.LinePlot(value=self.update.fn(), x='index', y='data', every=0.5, scale=4)
 
-    def update_data(self):
-        # very dummy way of pulling data to be visualized
-        sel_dev = None
-        data = np.arange(100) / 100
-        for dev in self.available_devices:
-            if "SENSE" in dev.tag:
-                sel_dev = dev
-                data = np.array(sel_dev.memo['MSense Left 01S'].data)
-                print('=====', data.shape)
-                break
+            checkbox_group.select(self.select_device, outputs=plot)
 
-        df = pd.DataFrame(data={
-            'index': np.arange(100),
-            'data': data
-        })
-        return df
+    def select_device(self, evt: gr.SelectData):
+        self.update.switch_device(evt.value)
+        return self.update.fn()
 
     def update_devices(self):
         aa = [dev.tag for dev in self.available_devices]
