@@ -32,29 +32,9 @@ DEVICE_CATALOG = {
         'module': 'plasma.devices.obs',
         'class': 'ObsRecorder'
     },
-    'qb2 LiDAR': {
-        'module': 'plasma.devices.qb2',
-        'class': 'Qb2'
-    },
-    'Pupil Lab IMU': {
-        'module': 'plasma.devices.pupil_labs',
-        'class': 'PupilLabsIMU'
-    },
-    'Pupil Lab Eye Event Blink': {
-        'module': 'plasma.devices.pupil_labs',
-        'class': 'PupilLabsEyeEventBlink'
-    },
-    'ShimmerGSR': {
-        'module': 'plasma.devices.shimmer',
-        'class': 'ShimmerGSR'
-    },
-    'OBS Recorder': {
-        'module': 'plasma.devices.obs',
-        'class': 'ObsRecorder'
-    },
     'Bitalino': {
         'module': 'plasma.devices.bitalino',
-        'class': 'PlasmaBitalino'
+        'class': 'PlasmaBitalino',
     },
 }
 
