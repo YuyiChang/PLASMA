@@ -81,11 +81,11 @@ class IntegratedPanel():
     def visualizer_interface(self):
         with gr.Row():
             # refresh = gr.Button("Refresh available devices")
-            checkbox_group = gr.CheckboxGroup(self.device_list, label="devices", scale=1)
+            radio = gr.Radio(self.device_list, label="devices", scale=1)
             # refresh.click(self.update_devices, outputs=checkbox_group)
             plot = gr.LinePlot(value=self.update.fn(), x='index', y='data', every=0.5, scale=4)
 
-            checkbox_group.select(self.select_device, outputs=plot)
+            radio.select(self.select_device, outputs=plot)
 
     def select_device(self, evt: gr.SelectData):
         self.update.switch_device(evt.value)
