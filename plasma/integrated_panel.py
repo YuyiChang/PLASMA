@@ -56,16 +56,17 @@ class UpdateFunction():
                 for reading in dev.memo.data:
                     data = np.zeros((dev.n_samples, self.max_channels), dtype = np.int64)
                     if isinstance(reading, np.ndarray):
-                        data = reading[:, 5:11]           
-                    data = data.flatten()
+                        data = reading[:, 5:11]        
+                    data = data.flatten(order='F')
                     readings = np.concatenate((readings, data))
                 break
-
+        
         df = pd.DataFrame(data={
             'index': np.tile(np.arange(100 * length), self.max_channels),
             'data': readings,
-            'channel': np.repeat(self.channels, 100 * length)
+            'channel': np.tile(np.repeat(self.channels, length), 100)
         })
+        
         return df
         
 
