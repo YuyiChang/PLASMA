@@ -17,7 +17,7 @@ import numpy as np
 class PlasmaBitalino(PlasmaDevice):
     def __init__(self, session_info, logger=None, tag=None):
         super().__init__(session_info, logger, tag)
-        self.memo = PlasmaMemo("BITalino")
+        self.memo = PlasmaMemo("Bitalino")
 
         batteryThreshold = 30
         self.channels = [0, 1, 2, 3, 4, 5]
@@ -26,7 +26,7 @@ class PlasmaBitalino(PlasmaDevice):
         digitalOutput_on = [1, 1]
         digitalOutput_off = [0, 0]
 
-        info = StreamInfo('BITalino', 'bitalino', 11, self.fs, 'int64')
+        info = StreamInfo('Bitalino', 'bitalino', 11, self.fs, 'int64')
         self.outlet = StreamOutlet(info)
 
         mac_addr = "98:D3:41:FE:16:F7"
@@ -52,6 +52,7 @@ class PlasmaBitalino(PlasmaDevice):
             self.outlet.push_sample(data[0, :])
             self.last_data = (f"{self.tag} reading at {time.time()}", np.shape(data))
             self.memo.set_latest(f"{self.tag} reading at {time.time()}")
+            self.memo.set_data(data)
 
     # def stop(self):
     #     self.device.stop()

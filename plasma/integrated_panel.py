@@ -12,12 +12,14 @@ import numpy as np
 class UpdateFunction():
     def __init__(self):
         self.fn = self.default_fn
+        self.max_channels = 6
+        self.channels = [f"ch{i+1}" for i in range(self.max_channels)]
         self. available_devices = []
         self.available_fns = {
             'Bitalino' : self.bitalino_update_data, 
             'MotionSENSE HRV wristband' : self.MotionSENSE_HRV_wristband_update_data
             }
-    def init_update_fn(available_devices):
+    def init_update_fn(self, available_devices):
         self.available_devices=available_devices
 
     def switch_device(self, device):
@@ -28,18 +30,41 @@ class UpdateFunction():
             print("device not supported or not initalized yet")
     
     def default_fn(self):
-        
-        df = pd.DataFrame(data={
-            'index': np.arange(100),
-            'data': np.arange(100)/100
+
+        samples = 100
+
+        # Construct long-form dataframe
+        df = pd.DataFrame({
+            "index": np.tile(np.arange(samples), self.max_channels),
+            "data": np.concatenate([
+                np.sin(np.linspace(0, np.pi * 2, samples) + i) * 0.5 + i
+                for i in range(self.max_channels)
+            ]),
+            "channel": np.repeat(self.channels, samples)
         })
+
         return df
 
     def bitalino_update_data(self):
 
+        length = 0
+        readings = np.zeros(0, dtype=np.int64)
+
+        for dev in self.available_devices:
+            if 'Bitalino' in dev.tag:
+                length = dev.n_samples
+                for reading in dev.memo.data:
+                    data = np.zeros((dev.n_samples, self.max_channels), dtype = np.int64)
+                    if isinstance(reading, np.ndarray):
+                        data = reading[:, 5:11]           
+                    data = data.flatten()
+                    readings = np.concatenate((readings, data))
+                break
+
         df = pd.DataFrame(data={
-            'index': np.arange(100),
-            'data': np.zeros(100)
+            'index': np.tile(np.arange(100 * length), self.max_channels),
+            'data': readings,
+            'channel': np.repeat(self.channels, 100 * length)
         })
         return df
         
@@ -58,7 +83,8 @@ class UpdateFunction():
 
         df = pd.DataFrame(data={
             'index': np.arange(100),
-            'data': data
+            'data': data,
+            'channel' : ['ch1'] * 100
         })
         return df
         
@@ -83,13 +109,14 @@ class IntegratedPanel():
             # refresh = gr.Button("Refresh available devices")
             radio = gr.Radio(self.device_list, label="devices", scale=1)
             # refresh.click(self.update_devices, outputs=checkbox_group)
-            plot = gr.LinePlot(value=self.update.fn(), x='index', y='data', every=0.5, scale=4)
+            plot = gr.LinePlot(value=self.update.fn(), x='index', y='data', color='channel', every=0.5, scale=4)
 
             radio.select(self.select_device, outputs=plot)
 
     def select_device(self, evt: gr.SelectData):
         self.update.switch_device(evt.value)
         return self.update.fn()
+        
 
     def update_devices(self):
         aa = [dev.tag for dev in self.available_devices]

@@ -21,7 +21,7 @@ class PlasmaMemo():
         self.latest = f"{now} {msg}"
 
     def set_data(self, data):
-        print('=========', data)
+        #print('=========', data)
         self.data.append(data)
         self.data.pop(0)
 
