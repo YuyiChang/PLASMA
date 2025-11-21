@@ -109,10 +109,12 @@ class IntegratedPanel():
         with gr.Row():
             # refresh = gr.Button("Refresh available devices")
             radio = gr.Radio(self.device_list, label="devices", scale=1)
+            timer = gr.Timer(0.5)  # seconds
             # refresh.click(self.update_devices, outputs=checkbox_group)
             plot = gr.LinePlot(value=self.update.fn(), x='index', y='data', color='channel', every=0.5, scale=4)
 
             radio.select(self.select_device, outputs=plot)
+            timer.tick(fn=lambda:self.update.fn, outputs=plot)
 
     def select_device(self, evt: gr.SelectData):
         self.update.switch_device(evt.value)
