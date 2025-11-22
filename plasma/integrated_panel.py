@@ -32,6 +32,7 @@ class UpdateFunction():
     def default_fn(self):
 
         samples = 100
+        print("running default update function")
 
         # Construct long-form dataframe
         df = pd.DataFrame({
@@ -46,6 +47,8 @@ class UpdateFunction():
         return df
 
     def bitalino_update_data(self):
+
+        print("running bitalino update function")
 
         length = 0
         readings = np.zeros(0, dtype=np.int64)
@@ -72,6 +75,9 @@ class UpdateFunction():
 
     def MotionSENSE_HRV_wristband_update_data(self):
         # very dummy way of pulling data to be visualized
+
+        print("running Motion sense update function")
+
         sel_dev = None
         data = np.arange(100) / 100
 
@@ -111,14 +117,15 @@ class IntegratedPanel():
             radio = gr.Radio(self.device_list, label="devices", scale=1)
             timer = gr.Timer(0.5)  # seconds
             # refresh.click(self.update_devices, outputs=checkbox_group)
-            plot = gr.LinePlot(value=self.update.fn(), x='index', y='data', color='channel', every=0.5, scale=4)
+            plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer, scale=4)
 
-            radio.select(self.select_device, outputs=plot)
-            timer.tick(fn=lambda:self.update.fn, outputs=plot)
+            radio.select(self.select_device)
+    
+    def dynamic_update(self):
+        return self.update.fn()
 
     def select_device(self, evt: gr.SelectData):
         self.update.switch_device(evt.value)
-        return self.update.fn()
         
 
     def update_devices(self):
