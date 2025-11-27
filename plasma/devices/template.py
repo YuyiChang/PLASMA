@@ -112,4 +112,5 @@ class PlasmaDemoDevice(PlasmaDevice):
             reading = self.demo()
             self.last_data = (f"{self.tag} reading at {reading}")
             self.memo.set_latest(f"{self.tag} reading at {reading}")
+            self.memo.set_data(reading)
             time.sleep(1)

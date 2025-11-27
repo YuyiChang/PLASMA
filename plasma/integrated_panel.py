@@ -8,19 +8,24 @@ from logging import Logger
 from plasma.config import device_table, __data_dir__, __version__
 import pandas as pd
 import numpy as np
+import time
 
 class UpdateFunction():
     def __init__(self):
         self.fn = self.default_fn
         self.max_channels = 6
         self.channels = [f"ch{i+1}" for i in range(self.max_channels)]
-        self. available_devices = []
+        self.available_devices = []
         self.available_fns = {
             'Bitalino' : self.bitalino_update_data, 
             'MotionSENSE HRV wristband' : self.MotionSENSE_HRV_wristband_update_data
             }
+        
     def init_update_fn(self, available_devices):
         self.available_devices=available_devices
+        # print(self.available_devices, len(self.available_devices))
+        # self.max_channels = len(self.available_devices)
+        # self.channels = [dev.name for dev in available_devices]
 
     def switch_device(self, device):
         try:
@@ -34,11 +39,13 @@ class UpdateFunction():
         samples = 100
         print("running default update function")
 
+        delta_t = time.time()
+
         # Construct long-form dataframe
         df = pd.DataFrame({
             "index": np.tile(np.arange(samples), self.max_channels),
             "data": np.concatenate([
-                np.sin(np.linspace(0, np.pi * 2, samples) + i) * 0.5 + i
+                np.sin(np.linspace(0, np.pi * 2, samples) + i + delta_t) * 0.5 + i
                 for i in range(self.max_channels)
             ]),
             "channel": np.repeat(self.channels, samples)
@@ -114,7 +121,7 @@ class IntegratedPanel():
     def visualizer_interface(self):
         with gr.Row():
             # refresh = gr.Button("Refresh available devices")
-            radio = gr.Radio(self.device_list, label="devices", scale=1)
+            radio = gr.Radio(self.device_list, label="devices", scale=1, interactive=False)
             timer = gr.Timer(0.5)  # seconds
             # refresh.click(self.update_devices, outputs=checkbox_group)
             plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer, scale=4)

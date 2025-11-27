@@ -47,26 +47,26 @@ device_table = {
     #     'module': 'plasma.devices.template',
     #     'class': 'PlasmaDemoDevice'
     # },
-    'MotionSENSE HRV wristband': {
-        'module': 'plasma.devices.msense',
-        'class': 'MotionSenseHRV',
-    },
-    'Bitalino': {
-        'module': 'plasma.devices.bitalino',
-        'class': 'PlasmaBitalino',
-    },
-    # 'Skin conductance': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
+    # 'MotionSENSE HRV wristband': {
+    #     'module': 'plasma.devices.msense',
+    #     'class': 'MotionSenseHRV',
     # },
-    # 'LiDAR': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
+    # 'Bitalino': {
+    #     'module': 'plasma.devices.bitalino',
+    #     'class': 'PlasmaBitalino',
     # },
-    # 'Camera Recorder 2': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # }
+    'Skin conductance': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    },
+    'LiDAR': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    },
+    'Camera Recorder 2': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    }
 }
 
 MSENSE_DEV = {

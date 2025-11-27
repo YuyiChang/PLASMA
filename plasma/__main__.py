@@ -28,7 +28,7 @@ def main():
         # with gr.Tab("PL"):
         #     pl.interface()
 
-    app.launch(inbrowser=True, share=False)
+    app.launch(inbrowser=True, share=True)
 
 
 if __name__ == '__main__':
