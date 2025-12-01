@@ -145,7 +145,6 @@ class IntegratedPanel():
                 length = dev.data_length
                 num_channel = dev.num_channel
                 break
-        
         #creating the channels every 5 sec is not efficient 
         #optimize if possible
         channels = [f"ch{i+1}" for i in range(num_channel)]
@@ -165,7 +164,7 @@ class IntegratedPanel():
         """
         samples = 100
         max_channels = 6
-        channels = [f"ch{i+1}" for i in range(num_channel)]
+        channels = [f"ch{i+1}" for i in range(max_channels)]
         #print("running default update function")
 
         # Construct long-form dataframe
