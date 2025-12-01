@@ -39,6 +39,7 @@ class PlasmaDevice:
 
         self.data_length = 1
         self.num_channel = 1
+        self.memo2read = None #must have one the instace have multiple memo
 
     def info(self, msg):
         if self.logger is None:

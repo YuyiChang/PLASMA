@@ -30,6 +30,8 @@ class MotionSenseHRV(PlasmaDevice):
 
         self.scan_devices()
         self.connect_devices()
+
+        self.memo2read = 'MSense Left 01S'
         
     def init_adapter(self):
         adapters = simplepyble.Adapter.get_adapters()
