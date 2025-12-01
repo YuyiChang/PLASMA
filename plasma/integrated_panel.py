@@ -121,6 +121,9 @@ class IntegratedPanel():
             plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer, scale=4)
 
             radio.select(self.select_device)
+
+    def select_device(self, evt: gr.SelectData):
+        self.current_dev = evt.value
     
     def dynamic_update(self):
         if not self.current_dev:
@@ -171,10 +174,6 @@ class IntegratedPanel():
         })
 
         return df
-
-
-    def select_device(self, evt: gr.SelectData):
-        self.update.switch_device(evt.value)
         
 
     def update_devices(self):
