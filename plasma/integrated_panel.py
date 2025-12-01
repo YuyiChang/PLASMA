@@ -164,16 +164,18 @@ class IntegratedPanel():
         DO NOT DELETE until a better solution is found
         """
         samples = 100
+        max_channels = 6
+        channels = [f"ch{i+1}" for i in range(num_channel)]
         #print("running default update function")
 
         # Construct long-form dataframe
         df = pd.DataFrame({
-            "index": np.tile(np.arange(samples), self.max_channels),
+            "index": np.tile(np.arange(samples), max_channels),
             "data": np.concatenate([
                 np.sin(np.linspace(0, np.pi * 2, samples) + i) * 0.5 + i
-                for i in range(self.max_channels)
+                for i in range(max_channels)
             ]),
-            "channel": np.repeat(self.channels, samples)
+            "channel": np.repeat(channels, samples)
         })
 
         return df
