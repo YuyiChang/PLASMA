@@ -149,7 +149,7 @@ class IntegratedPanel():
 
         df = pd.DataFrame(data={
             'index': np.tile(np.arange(100 * length), num_channel),
-            'data': readings,
+            'data': np.array(data),
             'channel': np.tile(np.repeat(channels, length), 100)
         })
         

@@ -37,8 +37,8 @@ class PlasmaDevice:
         self.memo = PlasmaMemo(tag)
         self.tag = tag
 
-        self.data_length = 0
-        self.num_channel = 0
+        self.data_length = 1
+        self.num_channel = 1
 
     def info(self, msg):
         if self.logger is None:
