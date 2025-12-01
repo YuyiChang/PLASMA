@@ -34,6 +34,9 @@ class PlasmaBitalino(PlasmaDevice):
         # This example will collect data for 5 sec.
         running_time = 5
 
+        self.data_length = 10
+        self.num_channel = 6
+
         try:
             self.device = BITalino(mac_addr)
         except Exception as e:
@@ -44,7 +47,9 @@ class PlasmaBitalino(PlasmaDevice):
     #     self.device.start(self.fs, self.channels)
     #     self.memo.sts = "🟢"  
     def processing_data(data):
-        pass      
+        readings = data[:, 5:11]
+        readings = readings.flatten(order='F')
+        return readings      
 
     def streaming(self):
         self.device.start(self.fs, self.channels)
@@ -54,7 +59,7 @@ class PlasmaBitalino(PlasmaDevice):
             self.outlet.push_sample(data[0, :])
             self.last_data = (f"{self.tag} reading at {time.time()}", np.shape(data))
             self.memo.set_latest(f"{self.tag} reading at {time.time()}")
-            self.memo.set_data(data)
+            self.memo.set_data(self.processing_data(data))
 
     # def stop(self):
     #     self.device.stop()
