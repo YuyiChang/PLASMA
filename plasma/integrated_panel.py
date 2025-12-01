@@ -109,6 +109,7 @@ class IntegratedPanel():
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
         #self.update = UpdateFunction()
+        self.current_dev = None
         
 
     def visualizer_interface(self):
@@ -122,7 +123,55 @@ class IntegratedPanel():
             radio.select(self.select_device)
     
     def dynamic_update(self):
-        return self.update.fn()
+        if not self.current_dev:
+            return self.dummy_update()
+        
+        data = []
+        length = 1
+        num_channel = 1
+
+        #linear search is not efficient
+        #change to dictionary if there are time to do it
+        #be sure to change all other code that uses available_devices if it was changed to dictionary 
+        for dev in self.available_devices:
+            if dev.tag == self.current_dev:
+                data = dev.memo.data
+                length = dev.data_length
+                num_channel = dev.num_channel
+                break
+        
+        #creating the channels every 5 sec is not efficient 
+        #optimize if possible
+        channels = [f"ch{i+1}" for i in range(num_channel)]
+
+        df = pd.DataFrame(data={
+            'index': np.tile(np.arange(100 * length), num_channel),
+            'data': readings,
+            'channel': np.tile(np.repeat(channels, length), 100)
+        })
+        
+        return df
+
+    def dummy_update(self):
+        """
+        This dummpy update function is NECESSARY for initalizing all channels at the beginning of the app
+        DO NOT DELETE until a better solution is found
+        """
+        samples = 100
+        #print("running default update function")
+
+        # Construct long-form dataframe
+        df = pd.DataFrame({
+            "index": np.tile(np.arange(samples), self.max_channels),
+            "data": np.concatenate([
+                np.sin(np.linspace(0, np.pi * 2, samples) + i) * 0.5 + i
+                for i in range(self.max_channels)
+            ]),
+            "channel": np.repeat(self.channels, samples)
+        })
+
+        return df
+
 
     def select_device(self, evt: gr.SelectData):
         self.update.switch_device(evt.value)
