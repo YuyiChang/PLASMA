@@ -42,7 +42,9 @@ class PlasmaBitalino(PlasmaDevice):
 
     # def start(self):
     #     self.device.start(self.fs, self.channels)
-    #     self.memo.sts = "🟢"        
+    #     self.memo.sts = "🟢"  
+    def processing_data(data):
+        pass      
 
     def streaming(self):
         self.device.start(self.fs, self.channels)

@@ -108,7 +108,7 @@ class IntegratedPanel():
         self.logger = get_logger(__data_dir__)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
-        self.update = UpdateFunction()
+        #self.update = UpdateFunction()
         
 
     def visualizer_interface(self):
