@@ -49,7 +49,7 @@ class PlasmaBitalino(PlasmaDevice):
     # def start(self):
     #     self.device.start(self.fs, self.channels)
     #     self.memo.sts = "🟢"  
-    def processing_data(data):
+    def processing_data(self, data):
         readings = data[:, 5:11]
         readings = readings.flatten(order='F')
         readings = readings.tolist()
@@ -64,9 +64,9 @@ class PlasmaBitalino(PlasmaDevice):
             self.last_data = (f"{self.tag} reading at {time.time()}", np.shape(data))
             self.memo.set_latest(f"{self.tag} reading at {time.time()}")
             #self.memo.set_data(self.processing_data(data))
-            #uses custom set data because of the data shape 
-            self.memo.data.append(self.processing_data(data))
-            self.memo.data = self.memo.data[100 * self.num_channel *self.data_length:]
+            #uses custom set data because of the data shape
+            self.memo.data += self.processing_data(data)
+            self.memo.data = self.memo.data[self.num_channel *self.data_length:]
 
     # def stop(self):
     #     self.device.stop()

@@ -238,7 +238,7 @@ class IntegratedPanel():
             device_instance = Device(self.session_info, self.logger, tag=dev)
             self.available_devices.append(device_instance)
         
-        self.update.init_update_fn(self.available_devices)
+        #self.update.init_update_fn(self.available_devices)
         self.sts = "Ready to start"
 
 
