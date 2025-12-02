@@ -42,6 +42,9 @@ class PlasmaBitalino(PlasmaDevice):
         except Exception as e:
             self.memo.sts = f"❌ Fault {str(e)}"
 
+        #uses custom initialization for data because of the data shape 
+        self.memo.data = [0] * 100 *self.data_length * self.num_channel
+
 
     # def start(self):
     #     self.device.start(self.fs, self.channels)
@@ -49,6 +52,7 @@ class PlasmaBitalino(PlasmaDevice):
     def processing_data(data):
         readings = data[:, 5:11]
         readings = readings.flatten(order='F')
+        readings = readings.tolist()
         return readings      
 
     def streaming(self):
@@ -59,7 +63,10 @@ class PlasmaBitalino(PlasmaDevice):
             self.outlet.push_sample(data[0, :])
             self.last_data = (f"{self.tag} reading at {time.time()}", np.shape(data))
             self.memo.set_latest(f"{self.tag} reading at {time.time()}")
-            self.memo.set_data(self.processing_data(data))
+            #self.memo.set_data(self.processing_data(data))
+            #uses custom set data because of the data shape 
+            self.memo.data.append(self.processing_data(data))
+            self.memo.data = self.memo.data[100 * self.num_channel *self.data_length:]
 
     # def stop(self):
     #     self.device.stop()
