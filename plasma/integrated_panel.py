@@ -111,6 +111,8 @@ class IntegratedPanel():
 
         #self.update = UpdateFunction()
         self.current_dev = None
+        self.channel = None
+        self.index = None
         
 
     def visualizer_interface(self):
@@ -125,14 +127,32 @@ class IntegratedPanel():
 
     def select_device(self, evt: gr.SelectData):
         self.current_dev = evt.value
+        self.init_update_fn()
+
+    def init_update_fn(self):
+        
+        length = 1
+        num_channel = 1
+
+        for dev in self.available_devices:
+            if self.current_dev in dev.tag:
+                length = dev.data_length
+                num_channel = dev.num_channel
+                break
+        
+        self.channel = [f"ch{i+1}" for i in range(num_channel)]
+        self.channel = np.tile(np.repeat(self.channel, length), 100)
+
+        chunks = np.array_split(np.arange(100 * length), 100)
+        self.index = [np.tile(section, num_channel) for section in chunks]
+        self.index = np.concatenate(self.index)
+
     
     def dynamic_update(self):
         if not self.current_dev:
             return self.dummy_update()
         
         data = np.arange(100) / 100
-        length = 1
-        num_channel = 1
 
         #linear search is not efficient
         #change to dictionary if there are time to do it
@@ -143,17 +163,16 @@ class IntegratedPanel():
                 if isinstance(memo, dict):
                     memo = memo[dev.memo2read]
                 data = np.array(memo.data)
-                length = dev.data_length
-                num_channel = dev.num_channel
                 break
-        #creating the channels every 5 sec is not efficient 
-        #optimize if possible
-        channels = [f"ch{i+1}" for i in range(num_channel)]
+
+        # print(self.index)
+        # print(data)
+        # print(self.channel)
 
         df = pd.DataFrame(data={
-            'index': np.tile(np.arange(100 * length), num_channel),
+            'index': self.index,
             'data': data,
-            'channel': np.tile(np.repeat(channels, length), 100)
+            'channel': self.channel
         })
         
         return df
