@@ -164,16 +164,21 @@ class IntegratedPanel():
                     memo = memo[dev.memo2read]
                 data = np.array(memo.data)
                 break
-
-        # print(self.index)
-        # print(data)
-        # print(self.channel)
-
-        df = pd.DataFrame(data={
-            'index': self.index,
-            'data': data,
-            'channel': self.channel
-        })
+        
+        try:
+            df = pd.DataFrame(data={
+                'index': self.index,
+                'data': data,
+                'channel': self.channel
+            })
+        except:
+            #redo initialization if the user initalizes device after they initialize update function
+            self.init_update_fn()
+            df = pd.DataFrame(data={
+                'index': self.index,
+                'data': data,
+                'channel': self.channel
+            })
         
         return df
 
