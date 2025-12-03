@@ -10,97 +10,91 @@ import pandas as pd
 import numpy as np
 import time
 
-class UpdateFunction():
-    def __init__(self):
-        self.fn = self.default_fn
-        self.max_channels = 6
-        self.channels = [f"ch{i+1}" for i in range(self.max_channels)]
-        self.available_devices = []
-        self.available_fns = {
-            'Bitalino' : self.bitalino_update_data, 
-            'MotionSENSE HRV wristband' : self.MotionSENSE_HRV_wristband_update_data
-            }
-        
-    def init_update_fn(self, available_devices):
-        self.available_devices=available_devices
-        # print(self.available_devices, len(self.available_devices))
-        # self.max_channels = len(self.available_devices)
-        # self.channels = [dev.name for dev in available_devices]
+# class UpdateFunction():
+#     def __init__(self):
+#         self.fn = self.default_fn
+#         self.max_channels = 6
+#         self.channels = [f"ch{i+1}" for i in range(self.max_channels)]
+#         self. available_devices = []
+#         self.available_fns = {
+#             'Bitalino' : self.bitalino_update_data, 
+#             'MotionSENSE HRV wristband' : self.MotionSENSE_HRV_wristband_update_data
+#             }
+#     def init_update_fn(self, available_devices):
+#         self.available_devices=available_devices
 
-    def switch_device(self, device):
-        try:
-            self.fn = self.available_fns[device] 
-        except:
-            self.fn = self.default_fn
-            print("device not supported or not initalized yet")
+#     def switch_device(self, device):
+#         try:
+#             self.fn = self.available_fns[device] 
+#         except:
+#             self.fn = self.default_fn
+#             print("device not supported or not initalized yet")
     
-    def default_fn(self):
+#     def default_fn(self):
 
-        samples = 100
-        print("running default update function")
+#         samples = 100
+#         print("running default update function")
 
-        delta_t = time.time()
+#         # Construct long-form dataframe
+#         df = pd.DataFrame({
+#             "index": np.tile(np.arange(samples), self.max_channels),
+#             "data": np.concatenate([
+#                 np.sin(np.linspace(0, np.pi * 2, samples) + i) * 0.5 + i
+#                 for i in range(self.max_channels)
+#             ]),
+#             "channel": np.repeat(self.channels, samples)
+#         })
 
-        # Construct long-form dataframe
-        df = pd.DataFrame({
-            "index": np.tile(np.arange(samples), self.max_channels),
-            "data": np.concatenate([
-                np.sin(np.linspace(0, np.pi * 2, samples) + i + delta_t) * 0.5 + i
-                for i in range(self.max_channels)
-            ]),
-            "channel": np.repeat(self.channels, samples)
-        })
+#         return df
 
-        return df
+#     def bitalino_update_data(self):
 
-    def bitalino_update_data(self):
+#         print("running bitalino update function")
 
-        print("running bitalino update function")
+#         length = 0
+#         readings = np.zeros(0, dtype=np.int64)
 
-        length = 0
-        readings = np.zeros(0, dtype=np.int64)
-
-        for dev in self.available_devices:
-            if 'Bitalino' in dev.tag:
-                length = dev.n_samples
-                for reading in dev.memo.data:
-                    data = np.zeros((dev.n_samples, self.max_channels), dtype = np.int64)
-                    if isinstance(reading, np.ndarray):
-                        data = reading[:, 5:11]        
-                    data = data.flatten(order='F')
-                    readings = np.concatenate((readings, data))
-                break
+#         for dev in self.available_devices:
+#             if 'Bitalino' in dev.tag:
+#                 length = dev.n_samples
+#                 for reading in dev.memo.data:
+#                     data = np.zeros((dev.n_samples, self.max_channels), dtype = np.int64)
+#                     if isinstance(reading, np.ndarray):
+#                         data = reading[:, 5:11]        
+#                     data = data.flatten(order='F')
+#                     readings = np.concatenate((readings, data))
+#                 break
         
-        df = pd.DataFrame(data={
-            'index': np.tile(np.arange(100 * length), self.max_channels),
-            'data': readings,
-            'channel': np.tile(np.repeat(self.channels, length), 100)
-        })
+#         df = pd.DataFrame(data={
+#             'index': np.tile(np.arange(100 * length), self.max_channels),
+#             'data': readings,
+#             'channel': np.tile(np.repeat(self.channels, length), 100)
+#         })
         
-        return df
+#         return df
         
 
-    def MotionSENSE_HRV_wristband_update_data(self):
-        # very dummy way of pulling data to be visualized
+#     def MotionSENSE_HRV_wristband_update_data(self):
+#         # very dummy way of pulling data to be visualized
 
-        print("running Motion sense update function")
+#         print("running Motion sense update function")
 
-        sel_dev = None
-        data = np.arange(100) / 100
+#         sel_dev = None
+#         data = np.arange(100) / 100
 
-        for dev in self.available_devices:
-            if "SENSE" in dev.tag:
-                sel_dev = dev
-                data = np.array(sel_dev.memo['MSense Left 01S'].data)
-                print('=====', data.shape)
-                break
+#         for dev in self.available_devices:
+#             if "SENSE" in dev.tag:
+#                 sel_dev = dev
+#                 data = np.array(sel_dev.memo['MSense Left 01S'].data)
+#                 print('=====', data.shape)
+#                 break
 
-        df = pd.DataFrame(data={
-            'index': np.arange(100),
-            'data': data,
-            'channel' : ['ch1'] * 100
-        })
-        return df
+#         df = pd.DataFrame(data={
+#             'index': np.arange(100),
+#             'data': data,
+#             'channel' : ['ch1'] * 100
+#         })
+#         return df
         
 
 class IntegratedPanel():
@@ -115,7 +109,8 @@ class IntegratedPanel():
         self.logger = get_logger(__data_dir__)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
-        self.update = UpdateFunction()
+        #self.update = UpdateFunction()
+        self.current_dev = None
         
 
     def visualizer_interface(self):
@@ -127,12 +122,63 @@ class IntegratedPanel():
             plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer, scale=4)
 
             radio.select(self.select_device)
-    
-    def dynamic_update(self):
-        return self.update.fn()
 
     def select_device(self, evt: gr.SelectData):
-        self.update.switch_device(evt.value)
+        self.current_dev = evt.value
+    
+    def dynamic_update(self):
+        if not self.current_dev:
+            return self.dummy_update()
+        
+        data = np.arange(100) / 100
+        length = 1
+        num_channel = 1
+
+        #linear search is not efficient
+        #change to dictionary if there are time to do it
+        #be sure to change all other code that uses available_devices if it was changed to dictionary 
+        for dev in self.available_devices:
+            if self.current_dev in dev.tag:
+                memo = dev.memo
+                if isinstance(memo, dict):
+                    memo = memo[dev.memo2read]
+                data = np.array(memo.data)
+                length = dev.data_length
+                num_channel = dev.num_channel
+                break
+        #creating the channels every 5 sec is not efficient 
+        #optimize if possible
+        channels = [f"ch{i+1}" for i in range(num_channel)]
+
+        df = pd.DataFrame(data={
+            'index': np.tile(np.arange(100 * length), num_channel),
+            'data': data,
+            'channel': np.tile(np.repeat(channels, length), 100)
+        })
+        
+        return df
+
+    def dummy_update(self):
+        """
+        This dummpy update function is NECESSARY for initalizing all channels at the beginning of the app
+        DO NOT DELETE until a better solution is found
+        """
+        samples = 100
+        max_channels = 6
+        channels = [f"ch{i+1}" for i in range(max_channels)]
+        #print("running default update function")
+
+        # Construct long-form dataframe
+        df = pd.DataFrame({
+            "index": np.tile(np.arange(samples), max_channels),
+            "data": np.concatenate([
+                np.sin(np.linspace(0, np.pi * 2, samples) + i) * 0.5 + i
+                for i in range(max_channels)
+            ]),
+            "channel": np.repeat(channels, samples)
+        })
+
+        return df
         
 
     def update_devices(self):
@@ -193,7 +239,7 @@ class IntegratedPanel():
             device_instance = Device(self.session_info, self.logger, tag=dev)
             self.available_devices.append(device_instance)
         
-        self.update.init_update_fn(self.available_devices)
+        #self.update.init_update_fn(self.available_devices)
         self.sts = "Ready to start"
 
 
