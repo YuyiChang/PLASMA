@@ -51,10 +51,10 @@ device_table = {
     #     'module': 'plasma.devices.msense',
     #     'class': 'MotionSenseHRV',
     # },
-    # 'Bitalino': {
-    #     'module': 'plasma.devices.bitalino',
-    #     'class': 'PlasmaBitalino',
-    # },
+    'Bitalino': {
+        'module': 'plasma.devices.bitalino',
+        'class': 'PlasmaBitalino',
+    },
     'Skin conductance': {
         'module': 'plasma.devices.template',
         'class': 'PlasmaDemoDevice'

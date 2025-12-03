@@ -116,7 +116,7 @@ class IntegratedPanel():
     def visualizer_interface(self):
         with gr.Row():
             # refresh = gr.Button("Refresh available devices")
-            radio = gr.Radio(self.device_list, label="devices", scale=1, interactive=False)
+            radio = gr.Radio(self.device_list, label="devices", scale=1)
             timer = gr.Timer(0.5)  # seconds
             # refresh.click(self.update_devices, outputs=checkbox_group)
             plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer, scale=4)
