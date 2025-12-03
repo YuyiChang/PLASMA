@@ -134,15 +134,19 @@ class IntegratedPanel():
         length = 1
         num_channel = 1
 
+        #get information that are specific to the device 
         for dev in self.available_devices:
             if self.current_dev in dev.tag:
                 length = dev.data_length
                 num_channel = dev.num_channel
                 break
         
+        #ensures channel is [ch1, ch1, ..., ch1, ch2, ch2, ..., ch2, ch3...] * 100
         self.channel = [f"ch{i+1}" for i in range(num_channel)]
         self.channel = np.tile(np.repeat(self.channel, length), 100)
 
+        #Example: length = 3, num_channel = 2
+        #ensures index is [1, 2, 3, 1, 2, 3, 4, 5, 6, 4, 5, 6, ..., 97,98,100,97,98,100]
         chunks = np.array_split(np.arange(100 * length), 100)
         self.index = [np.tile(section, num_channel) for section in chunks]
         self.index = np.concatenate(self.index)
