@@ -21,9 +21,11 @@ class PlasmaMemo():
         self.latest = f"{now} {msg}"
 
     def set_data(self, data):
+        if not isinstance(data, list):
+            data = [data]
         #print('=========', data)
-        self.data.append(data)
-        self.data.pop(0)
+        self.data += data
+        self.data = self.data[len(data):]
 
 
 class PlasmaDevice:

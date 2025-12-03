@@ -63,10 +63,7 @@ class PlasmaBitalino(PlasmaDevice):
             self.outlet.push_sample(data[0, :])
             self.last_data = (f"{self.tag} reading at {time.time()}", np.shape(data))
             self.memo.set_latest(f"{self.tag} reading at {time.time()}")
-            #self.memo.set_data(self.processing_data(data))
-            #uses custom set data because of the data shape
-            self.memo.data += self.processing_data(data)
-            self.memo.data = self.memo.data[self.num_channel *self.data_length:]
+            self.memo.set_data(self.processing_data(data))
 
     # def stop(self):
     #     self.device.stop()
