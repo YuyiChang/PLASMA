@@ -2,9 +2,10 @@ from plasma.devices.template import PlasmaDevice, PlasmaMemo
 import time
 from serial import Serial
 from pylsl import StreamInfo, StreamOutlet
-from bitalino import BITalino
-# from lib.revolution_python_api.bitalino import BITalino
+# from bitalino import BITalino
+from lib.revolution_python_api.bitalino import BITalino
 import numpy as np
+import platform
 
 # def handler(pkt: DataPacket) -> None:
 #     # Access the GSR raw data channel
@@ -29,7 +30,10 @@ class PlasmaBitalino(PlasmaDevice):
         info = StreamInfo('Bitalino', 'bitalino', 11, self.fs, 'int64')
         self.outlet = StreamOutlet(info)
 
-        mac_addr = "98:D3:41:FE:16:F7"
+        if platform.system() in ["Windows", "linux"]:
+            mac_addr = "98:D3:41:FE:16:F7"
+        else:
+            mac_addr = "/dev/tty.BITalino-16-F7"
 
         # This example will collect data for 5 sec.
         running_time = 5
@@ -37,10 +41,14 @@ class PlasmaBitalino(PlasmaDevice):
         self.data_length = 10
         self.num_channel = 6
 
+        print("======= start dev")
+
         try:
             self.device = BITalino(mac_addr)
+            print("============ Bitalino init complete")
         except Exception as e:
             self.memo.sts = f"❌ Fault {str(e)}"
+            print("============", str(e))
 
         #uses custom initialization for data because of the data shape 
         self.memo.data = [0] * 100 *self.data_length * self.num_channel
@@ -65,11 +73,12 @@ class PlasmaBitalino(PlasmaDevice):
             self.memo.set_latest(f"{self.tag} reading at {time.time()}")
             self.memo.set_data(self.processing_data(data))
 
-    # def stop(self):
-    #     self.device.stop()
-    #     self.memo.sts = "🟥"
+    def stop(self):
+        self._stop_event.set()
+        self.device.stop()
+        self.memo.sts = "🟥"
 
-    #     self.device.close()
+        self.device.close()
             
 
 if __name__ == '__main__':
