@@ -111,19 +111,32 @@ class IntegratedPanel():
 
         #self.update = UpdateFunction()
         self.current_dev = None
-        self.channel = None
+        self.channel = []
         self.index = None
         
 
     def visualizer_interface(self):
         with gr.Row():
-            # refresh = gr.Button("Refresh available devices")
-            radio = gr.Radio(self.device_list, label="devices", scale=1)
-            timer = gr.Timer(0.5)  # seconds
-            # refresh.click(self.update_devices, outputs=checkbox_group)
-            plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer, scale=4)
+            with gr.Column(scale=1):
+                # refresh = gr.Button("Refresh available devices")
+                radio = gr.Radio(self.device_list, label="devices")
+                timer = gr.Timer(0.5)  # seconds
+                radio.select(self.select_device)
+ 
+                @gr.render(inputs = radio)
+                def draw_checkboxes(dev):
+                    if not dev:
+                        gr.Markdown("## no channels availble")
+                    else:
+                        for i in self.available_devices:
+                            if dev in i.tag:
+                                channel = [f"ch{j+1}" for j in range(i.num_channel)]
+                                gr.CheckboxGroup(channel)
 
-            radio.select(self.select_device)
+                                break
+            # refresh.click(self.update_devices, outputs=checkbox_group)
+            with gr.Column(scale=4):
+                plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer)
 
     def select_device(self, evt: gr.SelectData):
         self.current_dev = evt.value
