@@ -2,13 +2,14 @@ import threading
 import time
 import datetime
 import numpy as np
+import random
 
 class PlasmaMemo():
     def __init__(self, name, num_channel):
         self.name = name
         self.sts = "🟦" # status
         self.set_latest("initialized")
-        self.data = {f"ch{i+1}" : [0] *100 for i in range(num_channel)}
+        self.data = {f"ch{i+1}" : [0]*100 for i in range(num_channel)}
 
     def get_sts(self):
         return {
@@ -91,7 +92,7 @@ class PlasmaDevice:
 
 class PlasmaDemoDevice(PlasmaDevice):
     def __init__(self, session_info, logger=None, tag=None):
-        super().__init__(session_info, logger, tag)
+        super().__init__(session_info, logger, tag, 2)
 
         self.curr_fid = np.random.randint(0, 10000)
         
@@ -111,6 +112,9 @@ class PlasmaDemoDevice(PlasmaDevice):
             self.demo = self.demo_default
 
     # device specific behavior
+    def demo(self):
+        return random.randint(10)
+
     def demo_imu(self):
         return np.random.randn(6)
     
@@ -133,8 +137,8 @@ class PlasmaDemoDevice(PlasmaDevice):
     # demo with customized streaming behavior
     def streaming(self):
         while not self._stop_event.is_set():
-            ch1 = self.demo_imu()
-            ch2 = self.demo_ppg()
+            ch1 = random.randint(0,10)
+            ch2 = random.randint(0,10)
             reading = 1
             
             self.last_data = (f"{self.tag} reading at {reading}")
