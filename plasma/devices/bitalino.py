@@ -17,7 +17,7 @@ import platform
 
 class PlasmaBitalino(PlasmaDevice):
     def __init__(self, session_info, logger=None, tag=None):
-        super().__init__(session_info, logger, tag)
+        super().__init__(session_info, logger, tag, 6)
         self.memo = PlasmaMemo("Bitalino")
 
         batteryThreshold = 30
@@ -68,7 +68,7 @@ class PlasmaBitalino(PlasmaDevice):
         # your custom sensor callback goes here
         while not self._stop_event.is_set():
             data = self.device.read(self.n_samples)
-            self.outlet.push_sample(data[0, :])
+            self.outlet.push_chunk(data)
             self.last_data = (f"{self.tag} reading at {time.time()}", np.shape(data))
             self.memo.set_latest(f"{self.tag} reading at {time.time()}")
             self.memo.set_data(self.processing_data(data))

@@ -2,13 +2,14 @@ import threading
 import time
 import datetime
 import numpy as np
+import random
 
 class PlasmaMemo():
-    def __init__(self, name):
+    def __init__(self, name, num_channel):
         self.name = name
         self.sts = "🟦" # status
         self.set_latest("initialized")
-        self.data = [0] * 100
+        self.data = {f"ch{i+1}" : [0]*100 for i in range(num_channel)}
 
     def get_sts(self):
         return {
@@ -20,27 +21,36 @@ class PlasmaMemo():
         now = datetime.datetime.now().strftime("%H:%M:%S")
         self.latest = f"{now} {msg}"
 
-    def set_data(self, data):
-        if not isinstance(data, list):
-            data = [data]
-        #print('=========', data)
-        self.data += data
-        self.data = self.data[len(data):]
+    # def set_data_helper(self, memo, data):
+    #     if not isinstance(data, list):
+    #         data = [data]
+    #     #print('=========', data)
+    #     memo += data
+    #     memo = self.data[len(data):]
+
+    def set_data(self, **kwargs):
+        for k,v in kwargs.items():
+            if k in self.data:
+                if not isinstance(v, list):
+                    v = [v]
+                self.data[k] += v
+                self.data[k] = self.data[k][len(v):]
+
 
 
 class PlasmaDevice:
-    def __init__(self, session_info, logger=None, tag=None):
+    def __init__(self, session_info, logger=None, tag=None, num_channel=1):
         self.session_info = session_info
         self.logger = logger
         self.last_data = []
         self._thread = None
         self._stop_event = threading.Event()
+        self.num_channel = num_channel
 
-        self.memo = PlasmaMemo(tag)
+        self.memo = PlasmaMemo(tag, num_channel)
         self.tag = tag
 
         self.data_length = 1
-        self.num_channel = 1
         self.memo2read = None #must have one if the instance has multiple memo
 
     def info(self, msg):
@@ -82,7 +92,7 @@ class PlasmaDevice:
 
 class PlasmaDemoDevice(PlasmaDevice):
     def __init__(self, session_info, logger=None, tag=None):
-        super().__init__(session_info, logger, tag)
+        super().__init__(session_info, logger, tag, 3)
 
         self.curr_fid = np.random.randint(0, 10000)
         
@@ -102,6 +112,9 @@ class PlasmaDemoDevice(PlasmaDevice):
             self.demo = self.demo_default
 
     # device specific behavior
+    def demo(self):
+        return random.randint(10)
+
     def demo_imu(self):
         return np.random.randn(6)
     
@@ -124,8 +137,13 @@ class PlasmaDemoDevice(PlasmaDevice):
     # demo with customized streaming behavior
     def streaming(self):
         while not self._stop_event.is_set():
-            reading = self.demo()
+            ch1 = random.randint(0,10)
+            ch2 = random.randint(0,10)
+            ch3 = random.randint(0,10)
+            reading = 1
+            
             self.last_data = (f"{self.tag} reading at {reading}")
             self.memo.set_latest(f"{self.tag} reading at {reading}")
-            self.memo.set_data(reading)
+            
+            self.memo.set_data(ch1 = ch1, ch2 = ch2, ch3 = ch3)
             time.sleep(1)

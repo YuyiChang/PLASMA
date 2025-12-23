@@ -111,49 +111,77 @@ class IntegratedPanel():
 
         #self.update = UpdateFunction()
         self.current_dev = None
-        self.channel = None
-        self.index = None
+        self.channel = np.array(['ch1'] * 100)
+        self.selected_channel = []
+        self.index = np.arange(100)
         
 
     def visualizer_interface(self):
         with gr.Row():
-            # refresh = gr.Button("Refresh available devices")
-            radio = gr.Radio(self.device_list, label="devices", scale=1)
-            timer = gr.Timer(0.5)  # seconds
-            # refresh.click(self.update_devices, outputs=checkbox_group)
-            plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer, scale=4)
+            with gr.Column(scale=1):
+                # refresh = gr.Button("Refresh available devices")
+                radio = gr.Radio(self.device_list, label="devices")
+                timer = gr.Timer(0.5)  # seconds
+                radio.select(self.select_device)
 
-            radio.select(self.select_device)
+                # allows the page to appear with the number of available channels for the device
+                @gr.render(inputs = radio)
+                def draw_checkboxes(dev):
+                    if not dev:
+                        gr.Markdown("## no channels available")
+                    else:
+                        #find the dev in available devices and read the number of channels they have 
+                        #TODO: this code could replace some other functions, optimize if possible
+                        for i in self.available_devices:
+                            if dev in i.tag:
+                                select_channel = gr.CheckboxGroup([f"ch{j+1}" for j in range(i.num_channel)], label="available channels")
+                                select_channel.select(self.select_channel)
+                                break
+                
+            # refresh.click(self.update_devices, outputs=checkbox_group)
+            with gr.Column(scale=4):
+                plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer)
 
     def select_device(self, evt: gr.SelectData):
         self.current_dev = evt.value
         self.init_update_fn()
+    
+    def select_channel(self, evt: gr.SelectData):
+        if evt.value not in self.selected_channel:
+            self.selected_channel.append(evt.value)
+        else:
+            self.selected_channel.remove(evt.value)
+        self.init_update_fn()
 
     def init_update_fn(self):
+        if len(self.selected_channel) > 0:
+            self.index = np.tile(np.arange(100), len(self.selected_channel))
+            self.channel = np.concatenate([np.tile(ch, 100) for ch in self.selected_channel])
+            
         
-        length = 1
-        num_channel = 1
+        # length = 1
+        # num_channel = 1
 
-        #get information that are specific to the device 
-        for dev in self.available_devices:
-            if self.current_dev in dev.tag:
-                length = dev.data_length
-                num_channel = dev.num_channel
-                break
+        # #get information that are specific to the device 
+        # for dev in self.available_devices:
+        #     if self.current_dev in dev.tag:
+        #         length = dev.data_length
+        #         num_channel = dev.num_channel
+        #         break
         
-        #ensures channel is [ch1, ch1, ..., ch1, ch2, ch2, ..., ch2, ch3...] * 100
-        self.channel = [f"ch{i+1}" for i in range(num_channel)]
-        self.channel = np.tile(np.repeat(self.channel, length), 100)
+        # #ensures channel is [ch1, ch1, ..., ch1, ch2, ch2, ..., ch2, ch3...] * 100
+        # self.channel = [f"ch{i+1}" for i in range(num_channel)]
+        # self.channel = np.tile(np.repeat(self.channel, length), 100)
 
-        #Example: length = 3, num_channel = 2
-        #ensures index is [1, 2, 3, 1, 2, 3, 4, 5, 6, 4, 5, 6, ..., 97,98,100,97,98,100]
-        chunks = np.array_split(np.arange(100 * length), 100)
-        self.index = [np.tile(section, num_channel) for section in chunks]
-        self.index = np.concatenate(self.index)
+        # #Example: length = 3, num_channel = 2
+        # #ensures index is [1, 2, 3, 1, 2, 3, 4, 5, 6, 4, 5, 6, ..., 97,98,100,97,98,100]
+        # chunks = np.array_split(np.arange(100 * length), 100)
+        # self.index = [np.tile(section, num_channel) for section in chunks]
+        # self.index = np.concatenate(self.index)
 
     
     def dynamic_update(self):
-        if not self.current_dev:
+        if not self.current_dev or len(self.selected_channel) <= 0:
             return self.dummy_update()
         
         data = np.arange(100) / 100
@@ -163,12 +191,10 @@ class IntegratedPanel():
         #be sure to change all other code that uses available_devices if it was changed to dictionary 
         for dev in self.available_devices:
             if self.current_dev in dev.tag:
-                memo = dev.memo
-                if isinstance(memo, dict):
-                    memo = memo[dev.memo2read]
-                data = np.array(memo.data)
+                data = [np.array(v) for k,v in dev.memo.data.items() if k in self.selected_channel]
+                data = np.concatenate(data)
                 break
-        
+
         try:
             df = pd.DataFrame(data={
                 'index': self.index,
