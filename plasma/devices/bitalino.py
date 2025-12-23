@@ -38,8 +38,8 @@ class PlasmaBitalino(PlasmaDevice):
         # This example will collect data for 5 sec.
         running_time = 5
 
-        self.data_length = 10
-        self.num_channel = 6
+        # self.data_length = 10
+        # self.num_channel = 6
 
         print("======= start dev")
 
@@ -50,18 +50,18 @@ class PlasmaBitalino(PlasmaDevice):
             self.memo.sts = f"❌ Fault {str(e)}"
             print("============", str(e))
 
-        #uses custom initialization for data because of the data shape 
-        self.memo.data = [0] * 100 *self.data_length * self.num_channel
+        # #uses custom initialization for data because of the data shape 
+        # self.memo.data = [0] * 100 *self.data_length * self.num_channel
 
 
     # def start(self):
     #     self.device.start(self.fs, self.channels)
     #     self.memo.sts = "🟢"  
-    def processing_data(self, data):
-        readings = data[:, 5:11]
-        readings = readings.flatten(order='F')
-        readings = readings.tolist()
-        return readings      
+    # def processing_data(self, data):
+    #     readings = data[:, 5:11]
+    #     readings = readings.flatten(order='F')
+    #     readings = readings.tolist()
+    #     return readings      
 
     def streaming(self):
         self.device.start(self.fs, self.channels)
@@ -71,7 +71,14 @@ class PlasmaBitalino(PlasmaDevice):
             self.outlet.push_chunk(data)
             self.last_data = (f"{self.tag} reading at {time.time()}", np.shape(data))
             self.memo.set_latest(f"{self.tag} reading at {time.time()}")
-            self.memo.set_data(self.processing_data(data))
+            self.memo.set_data(
+                ch1 = np.transpose(data[:, 5]),
+                ch2 = np.transpose(data[:, 6]),
+                ch3 = np.transpose(data[:, 7]),
+                ch4 = np.transpose(data[:, 8]),
+                ch5 = np.transpose(data[:, 9]),
+                ch6 = np.transpose(data[:, 10]),
+            )
 
     def stop(self):
         self._stop_event.set()

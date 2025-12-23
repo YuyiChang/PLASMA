@@ -33,6 +33,8 @@ class PlasmaMemo():
             if k in self.data:
                 if not isinstance(v, list):
                     v = [v]
+                elif isinstance(v, np.ndarray):
+                    v = v.tolist()
                 self.data[k] += v
                 self.data[k] = self.data[k][len(v):]
 
