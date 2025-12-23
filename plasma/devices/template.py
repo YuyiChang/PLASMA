@@ -92,7 +92,7 @@ class PlasmaDevice:
 
 class PlasmaDemoDevice(PlasmaDevice):
     def __init__(self, session_info, logger=None, tag=None):
-        super().__init__(session_info, logger, tag, 2)
+        super().__init__(session_info, logger, tag, 3)
 
         self.curr_fid = np.random.randint(0, 10000)
         
@@ -139,10 +139,11 @@ class PlasmaDemoDevice(PlasmaDevice):
         while not self._stop_event.is_set():
             ch1 = random.randint(0,10)
             ch2 = random.randint(0,10)
+            ch3 = random.randint(0,10)
             reading = 1
             
             self.last_data = (f"{self.tag} reading at {reading}")
             self.memo.set_latest(f"{self.tag} reading at {reading}")
             
-            self.memo.set_data(ch1 = ch1, ch2 = ch2)
+            self.memo.set_data(ch1 = ch1, ch2 = ch2, ch3 = ch3)
             time.sleep(1)
