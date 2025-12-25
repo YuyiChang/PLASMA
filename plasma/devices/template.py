@@ -52,9 +52,6 @@ class PlasmaDevice:
         self.memo = PlasmaMemo(tag, num_channel)
         self.tag = tag
 
-        self.data_length = 1
-        self.memo2read = None #must have one if the instance has multiple memo
-
     def info(self, msg):
         if self.logger is None:
             pass
@@ -67,15 +64,6 @@ class PlasmaDevice:
             self._stop_event.clear()
             self._thread = threading.Thread(target=self.streaming, daemon=True)
             self._thread.start()
-
-    def processing_data(self, data):
-        """
-        Each sensor must have their own processing_data function that 
-        ensures the data is pushed into Memo is in the following format:
-        [ch1_data, ch1_data,..., ch1_data, ch2_data, ch2_data, ... , ch2_data, ch3_data,...]
-        where each channel's data must have the same fixed length
-        """
-        return data
 
     def streaming(self):
         # your custom sensor callback goes here
