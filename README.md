@@ -34,6 +34,34 @@ PLASMA: Platform for LSL-based Acquisition of Sensor Metrics and Analytics
     - `python -m plasma`
     - Visit http://127.0.0.1:7860 (by default, check on-screen prompt)
 
+### Use the app 
+1. Enter your session info
+![Alt text](img/session_info.png "eneter session info")
+
+2. Initalize the device(s) you need
+![Alt text](img/init_dev.png "init dev")
+
+    Blue square will appear if the device(s) are successfully initalized
+![Alt text](img/init_success.png "init success")
+
+3. Start data collection
+![Alt text](img/start.png "start collecting")
+
+    green circle will appear if the device(s) begins collecting data
+![Alt text](img/start_success.png "start success")
+
+4. Visualization
+![Alt text](img/visulization.png "visualize")
+
+5. Select device to visualize
+![Alt text](img/select_dev.png "select dev to visualize")
+
+6. Select channel(s) to visualize
+![Alt text](img/select_channel.png "select channel to visualize")
+
+7. Stop data collection 
+![Alt text](img/stop.png "stop collection")
+
 ### Use your custom device
 1. create a new file under `plasma/devices/` folder
     - In this example we will call it `custom.py`
