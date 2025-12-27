@@ -114,6 +114,7 @@ PLASMA: Platform for LSL-based Acquisition of Sensor Metrics and Analytics
                 # self.memo.set_data takes in ch1, ch2, ..., ch6
                 # each parameter can be:
                 #    - int
+                #    - float
                 #    - list
                 #    - numpy array
                 self.memo.set_data(ch1 = data)
