@@ -98,6 +98,8 @@ class PlasmaDemoDevice(PlasmaDevice):
             self.demo = self.demo_eye_tracking
         elif "camera" in tag.lower():
             self.demo = self.demo_cam
+        elif "conductance" in tag.lower():
+            self.demo = self.demo_gsr
         else:
             self.demo = self.demo_default
 
@@ -107,6 +109,9 @@ class PlasmaDemoDevice(PlasmaDevice):
 
     def demo_imu(self):
         return np.random.randn(6)
+    
+    def demo_gsr(self):
+        return np.random.randn(1)
     
     def demo_ppg(self):
         return np.random.randn(4)

@@ -121,7 +121,7 @@ class IntegratedPanel():
             with gr.Column(scale=1):
                 # refresh = gr.Button("Refresh available devices")
                 radio = gr.Radio(self.device_list, label="devices")
-                timer = gr.Timer(0.5)  # seconds
+                timer = gr.Timer(0.1)  # seconds
                 radio.select(self.select_device)
 
                 # allows the page to appear with the number of available channels for the device
@@ -186,9 +186,6 @@ class IntegratedPanel():
         
         data = np.arange(100) / 100
 
-        #linear search is not efficient
-        #change to dictionary if there are time to do it
-        #be sure to change all other code that uses available_devices if it was changed to dictionary 
         for dev in self.available_devices:
             if self.current_dev in dev.tag:
                 data = [np.array(v) for k,v in dev.memo.data.items() if k in self.selected_channel]
@@ -201,6 +198,7 @@ class IntegratedPanel():
                 'data': data,
                 'channel': self.channel
             })
+
         except:
             #redo initialization if the user initalizes device after they initialize update function
             self.init_update_fn()

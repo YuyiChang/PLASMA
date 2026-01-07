@@ -13,6 +13,7 @@ import plasma.config as c
 import time
 import cv2
 from importlib import reload
+import numpy as np
 
 from plasma.devices import *
 
@@ -79,6 +80,9 @@ class PupilLabsIMU(PlasmaDevice):
                         imu.quaternion.w, imu.quaternion.x, imu.quaternion.y, imu.quaternion.z]
             self.outlet.push_sample(imu_data)
             self.memo.set_latest(str(imu_data))
+
+            tol_g = np.sqrt(np.sum(np.array(imu_data[1:4])**2))
+            self.memo.set_data(tol_g)
 
     def stop(self):
         self._stop_event.set()
