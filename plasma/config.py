@@ -3,81 +3,36 @@ import gradio as gr
 __version__ = "0.1.0-beta"
 __data_dir__ = "data"
 
-# device_table = {
-#     # 'test': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDevice'
-#     # },
-#      'MSense Wristbands': {
-#         'module': 'plasma.devices.msense',
-#         'class': 'MotionSenseHRV'
-#     },
-#     'qb2 LiDAR': {
-#         'module': 'plasma.devices.qb2',
-#         'class': 'Qb2'
-#     },
-#     'Pupil Lab IMU': {
-#         'module': 'plasma.devices.pupil_labs',
-#         'class': 'PupilLabsIMU'
-#     },
-#     'Pupil Lab Eye Event Blink': {
-#         'module': 'plasma.devices.pupil_labs',
-#         'class': 'PupilLabsEyeEventBlink'
-#     },
-#     'ShimmerGSR': {
-#         'module': 'plasma.devices.shimmer',
-#         'class': 'ShimmerGSR'
-#     },
-#     'OBS Recorder': {
-#         'module': 'plasma.devices.obs',
-#         'class': 'ObsRecorder'
-#     }
-# }
-
 device_table = {
-    #  'Wristband': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # },
-    # 'Camera recorder': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # },
-    # 'Eye tracking': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # },
-    # 'MotionSENSE HRV wristband': {
-    #     'module': 'plasma.devices.msense',
-    #     'class': 'MotionSenseHRV',
-    # },
-    'Bitalino': {
-        'module': 'plasma.devices.bitalino',
-        'class': 'PlasmaBitalino',
-    },
-    'Skin conductance': {
+     'ShimmerGSR skin conductance': {
         'module': 'plasma.devices.template',
         'class': 'PlasmaDemoDevice'
     },
-    'LiDAR': {
+    'Camera recorder': {
         'module': 'plasma.devices.template',
         'class': 'PlasmaDemoDevice'
     },
-    'Camera Recorder 2': {
+    'Pupil Labs eye event blink': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    },
+    'MotionSENSE HRV wristbands': {
+        'module': 'plasma.devices.template',
+        'class': 'PlasmaDemoDevice'
+    },
+    'mBrainTrainEEG': {
         'module': 'plasma.devices.template',
         'class': 'PlasmaDemoDevice'
     }
 }
 
 MSENSE_DEV = {
-    # "MSense Left 74N": "D3:54:EB:A4:9B:82",
-    # "Msense Right 70N": "FF:7D:06:B4:51:98",
-    "MSense Left 01S": "2104F8E3-D94A-1DF7-691E-9491AE431DC1", 
-    "MSense Right 4BH100": "51972CC5-950C-43EA-4E18-163275824EFE",
+    "MSense Left": "AA:AA:AA:AA:AA:AA", 
+    "MSense Right": "FF:FF:FF:FF:FF:FF",
 }
 
-IP_QB2_LIDAR = "192.168.0.35"
-IP_PUPIL_LABS = "192.168.50.167"
+IP_QB2_LIDAR = "192.168.0.100"
+IP_PUPIL_LABS = "192.168.0.101"
 
 
 class Config():

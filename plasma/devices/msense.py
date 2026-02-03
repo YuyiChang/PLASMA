@@ -21,7 +21,7 @@ class MotionSenseHRV(PlasmaDevice):
 
         self.memo = {}
         for k in device_list.keys():
-            self.memo[k] = PlasmaMemo(k)
+            self.memo[k] = PlasmaMemo(k, num_channel=1)
 
         self.init_adapter()
 
