@@ -120,6 +120,7 @@ class IntegratedPanel():
         with gr.Row():
             with gr.Column(scale=1):
                 # refresh = gr.Button("Refresh available devices")
+                print(self.device_list, '.............')
                 radio = gr.Radio(self.device_list, label="devices")
                 timer = gr.Timer(0.1)  # seconds
                 radio.select(self.select_device)
@@ -255,7 +256,7 @@ class IntegratedPanel():
 
 
                 with gr.Accordion(label="Device initialization", open=True):
-                    device_grp = gr.CheckboxGroup(choices=self.device_list, value=self.device_list, label="Select sensor(s)")
+                    device_grp = gr.CheckboxGroup(choices=self.device_list, label="Select sensor(s)")
                     btn_init = gr.Button("🚦Initialize selected device(s)")
 
                     btn_init.click(self.init_devices, inputs=device_grp)
