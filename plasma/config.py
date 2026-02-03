@@ -58,8 +58,8 @@ class Config():
         self.ip_pupil_labs = ip
 
     def _save_config(self):
-        print(f"IP of Qb2 LiDAR = {self.ip_lidar}")
-        print(f"IP of Pupil Labs = {self.ip_pupil_labs}")
+        print(f"IP of Camera = {self.ip_lidar}")
+        print(f"IP of EEG = {self.ip_pupil_labs}")
 
 
 ####

@@ -24,8 +24,6 @@ def main():
             ip.visualizer_interface()
         with gr.Tab("Configuration"):
             plasma_config.interface()
-        # with gr.Tab("PL"):
-        #     pl.interface()
 
     app.launch(inbrowser=True, share=False)
 
