@@ -1,0 +1,144 @@
+import threading
+import time
+import datetime
+import numpy as np
+import random
+
+class PlasmaMemo():
+    def __init__(self, name, num_channel):
+        self.name = name
+        self.sts = "🟦" # status
+        self.set_latest("initialized")
+        self.data = {f"ch{i+1}" : [0]*100 for i in range(num_channel)}
+
+    def get_sts(self):
+        return {
+            "type": self.sts,
+            "description": f"------ {self.latest}",
+        }
+    
+    def set_latest(self, msg):
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        self.latest = f"{now} {msg}"
+
+    # def set_data_helper(self, memo, data):
+    #     if not isinstance(data, list):
+    #         data = [data]
+    #     #print('=========', data)
+    #     memo += data
+    #     memo = self.data[len(data):]
+
+    def set_data(self, **kwargs):
+        for k,v in kwargs.items():
+            if k in self.data:
+                if not isinstance(v, list):
+                    v = [v]
+                elif isinstance(v, np.ndarray):
+                    v = v.tolist()
+                self.data[k] += v
+                self.data[k] = self.data[k][len(v):]
+
+
+
+class PlasmaDevice:
+    def __init__(self, session_info, logger=None, tag=None, num_channel=1):
+        self.session_info = session_info
+        self.logger = logger
+        self.last_data = []
+        self._thread = None
+        self._stop_event = threading.Event()
+        self.num_channel = num_channel
+
+        self.memo = PlasmaMemo(tag, num_channel)
+        self.tag = tag
+
+    def info(self, msg):
+        if self.logger is None:
+            pass
+        else:
+            self.logger.info(f"[{self.tag}] {msg}")
+
+    def start(self):
+        if self._thread is None or not self._thread.is_alive():
+            self.memo.sts = "🟢"
+            self._stop_event.clear()
+            self._thread = threading.Thread(target=self.streaming, daemon=True)
+            self._thread.start()
+
+    def streaming(self):
+        # your custom sensor callback goes here
+        while not self._stop_event.is_set():
+            self.last_data = (f"{self.tag} reading at {time.time()}")
+            self.memo.set_latest(f"{self.tag} reading at {time.time()}")
+            time.sleep(1)
+
+    def stop(self):
+        self._stop_event.set()
+        self.memo.sts = "🟥"
+
+    def latest(self):
+        return self.last_data if self.last_data else "N/A"
+
+
+class PlasmaDemoDevice(PlasmaDevice):
+    def __init__(self, session_info, logger=None, tag=None):
+        super().__init__(session_info, logger, tag, 3)
+
+        self.curr_fid = np.random.randint(0, 10000)
+        
+        # demo fault
+        if 'IMU' in tag:
+            self.memo.sts = "🚫 FAULT"
+
+        if "IMU" in tag:
+            self.demo = self.demo_imu
+        elif "PPG" in tag:
+            self.demo = self.demo_ppg
+        elif "eye" in tag:
+            self.demo = self.demo_eye_tracking
+        elif "camera" in tag.lower():
+            self.demo = self.demo_cam
+        elif "conductance" in tag.lower():
+            self.demo = self.demo_gsr
+        else:
+            self.demo = self.demo_default
+
+    # device specific behavior
+    def demo(self):
+        return random.randint(10)
+
+    def demo_imu(self):
+        return np.random.randn(6)
+    
+    def demo_gsr(self):
+        return np.random.randn(1)
+    
+    def demo_ppg(self):
+        return np.random.randn(4)
+    
+    def demo_cam(self):
+        self.curr_fid += 1
+        return self.curr_fid
+    
+    def demo_eye_tracking(self):
+        return np.random.randn(2)
+    
+    def demo_eda(self):
+        return np.random.randn(2)
+    
+    def demo_default(self):
+        return time.time()
+
+    # demo with customized streaming behavior
+    def streaming(self):
+        while not self._stop_event.is_set():
+            ch1 = random.randint(0,10)
+            ch2 = random.randint(0,10)
+            ch3 = random.randint(0,10)
+            reading = 1
+            
+            self.last_data = (f"{self.tag} reading at {reading}")
+            self.memo.set_latest(f"{self.tag} reading at {reading}")
+            
+            self.memo.set_data(ch1 = ch1, ch2 = ch2, ch3 = ch3)
+            time.sleep(1)
