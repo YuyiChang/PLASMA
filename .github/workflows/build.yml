@@ -6,9 +6,6 @@ on:
       - 'v*'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   build-macos:
     runs-on: macos-15
@@ -48,11 +45,6 @@ jobs:
           name: PLASMA-MacOS-arm64
           path: dist/PLASMA_MacOS_arm64
 
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: dist/PLASMA_MacOS_arm64
-
   build-windows:
     runs-on: windows-latest
     steps:
@@ -72,8 +64,3 @@ jobs:
         with:
           name: PLASMA-Windows-x64
           path: dist/PLASMA_Windows_x64.exe
-
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: dist/PLASMA_Windows_x64.exe
