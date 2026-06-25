@@ -7,12 +7,8 @@ import pandas as pd
 __version__ = "0.1.0-beta"
 __data_dir__ = "data"
 
-device_table = {
-    # 'test': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDevice'
-    # },
-     'MSense Wristbands': {
+DEVICE_CATALOG = {
+    'MSense Wristbands': {
         'module': 'plasma.devices.msense',
         'class': 'MotionSenseHRV',
     },
@@ -40,68 +36,37 @@ device_table = {
         'module': 'plasma.devices.qb2',
         'class': 'Qb2'
     },
-    # 'Pupil Lab IMU': {
-    #     'module': 'plasma.devices.pupil_labs',
-    #     'class': 'PupilLabsIMU'
-    # },
-    # 'Pupil Lab Eye Event Blink': {
-    #     'module': 'plasma.devices.pupil_labs',
-    #     'class': 'PupilLabsEyeEventBlink'
-    # },
-    # 'ShimmerGSR': {
-    #     'module': 'plasma.devices.shimmer',
-    #     'class': 'ShimmerGSR'
-    # },
-    # 'OBS Recorder': {
-    #     'module': 'plasma.devices.obs',
-    #     'class': 'ObsRecorder'
-    # }
+    'Pupil Lab IMU': {
+        'module': 'plasma.devices.pupil_labs',
+        'class': 'PupilLabsIMU'
+    },
+    'Pupil Lab Eye Event Blink': {
+        'module': 'plasma.devices.pupil_labs',
+        'class': 'PupilLabsEyeEventBlink'
+    },
+    'ShimmerGSR': {
+        'module': 'plasma.devices.shimmer',
+        'class': 'ShimmerGSR'
+    },
+    'OBS Recorder': {
+        'module': 'plasma.devices.obs',
+        'class': 'ObsRecorder'
+    },
+    'Bitalino': {
+        'module': 'plasma.devices.bitalino',
+        'class': 'PlasmaBitalino'
+    },
 }
 
-# device_table = {
-#     #  'Wristband': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'Camera recorder': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'Eye tracking': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     'MotionSENSE HRV wristband': {
-#         'module': 'plasma.devices.msense',
-#         'class': 'MotionSenseHRV'
-#     },
-#     'Bitalino': {
-#         'module': 'plasma.devices.bitalino',
-#         'class': 'PlasmaBitalino'
-#     },
-#     # 'Skin conductance': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'LiDAR': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'Camera Recorder 2': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # }
-# }
+_DEVICE_CONFIG_FILE = "plasma_device_config.json"
 
-MSENSE_DEV = {
-    # "MSense Left 74N": "D3:54:EB:A4:9B:82",
-    # "Msense Right 70N": "FF:7D:06:B4:51:98",
-    "MSense Left 01S": "2104F8E3-D94A-1DF7-691E-9491AE431DC1", 
-    "MSense Right 4BH100": "51972CC5-950C-43EA-4E18-163275824EFE",
+_DEFAULTS = {
+    "enabled_devices": list(DEVICE_CATALOG.keys()),
+    "msense_devices": {},
+    "ip_qb2_lidar": "",
+    "ip_pupil_labs": "",
 }
 
-IP_QB2_LIDAR = "192.168.0.253"
-IP_PUPIL_LABS = "192.168.50.167"
 
 
 def _normalize_msense(raw):
@@ -147,7 +112,7 @@ class DeviceConfig:
                 pass
         # File missing or corrupt — create with defaults
         self._active = list(_DEFAULTS["enabled_devices"])
-        self.msense_devices = list(_DEFAULTS["msense_devices"])
+        self.msense_devices = dict(_DEFAULTS["msense_devices"])
         self.ip_lidar = _DEFAULTS["ip_qb2_lidar"]
         self.ip_pupil_labs = _DEFAULTS["ip_pupil_labs"]
         self._save()
@@ -167,41 +132,29 @@ class DeviceConfig:
     def get_active_table(self):
         return {k: DEVICE_CATALOG[k] for k in self._active if k in DEVICE_CATALOG}
 
-    def get_active_msense_devices(self):
-        """Name -> UUID/MAC of MSense wristbands that are both listed and enabled."""
-        return {
-            rec["Name"]: rec["UUID / MAC Address"]
-            for rec in self.msense_devices
-            if rec.get("Enabled", True) and str(rec.get("Name", "")).strip() and str(rec.get("UUID / MAC Address", "")).strip()
-        }
-
     # ── UI callbacks ──────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _msense_records_from_df(msense_df):
-        return [
-            {
-                "Name": row["Name"],
-                "UUID / MAC Address": row["UUID / MAC Address"],
-                "Enabled": bool(row["Enabled"]) if pd.notna(row.get("Enabled", True)) else True,
-            }
-            for _, row in msense_df.iterrows()
-            if str(row["Name"]).strip() and str(row["UUID / MAC Address"]).strip()
-        ]
 
     def _apply(self, selected, msense_df, ip_lidar, ip_pupil_labs):
         self._active = list(selected)
-        self.msense_devices = self._msense_records_from_df(msense_df)
+        self.msense_devices = {
+            row["Name"]: row["UUID / MAC Address"]
+            for _, row in msense_df.iterrows()
+            if str(row["Name"]).strip() and str(row["UUID / MAC Address"]).strip()
+        }
         self.ip_lidar = ip_lidar
         self.ip_pupil_labs = ip_pupil_labs
         self._save()
-        n_enabled = sum(1 for rec in self.msense_devices if rec["Enabled"])
-        return f"Saved — {len(self._active)} device type(s) enabled, {n_enabled}/{len(self.msense_devices)} MSense wristband(s) enabled"
+        return f"Saved — {len(self._active)} device(s) enabled"
 
     def _export_config(self, selected, msense_df, ip_lidar, ip_pupil_labs):
+        msense = {
+            row["Name"]: row["UUID / MAC Address"]
+            for _, row in msense_df.iterrows()
+            if str(row["Name"]).strip() and str(row["UUID / MAC Address"]).strip()
+        }
         config = {
             "enabled_devices": selected,
-            "msense_devices": self._msense_records_from_df(msense_df),
+            "msense_devices": msense,
             "ip_qb2_lidar": ip_lidar,
             "ip_pupil_labs": ip_pupil_labs,
         }
@@ -218,13 +171,13 @@ class DeviceConfig:
                 raw = json.load(f)
             enabled = [d for d in raw.get("enabled_devices", []) if d in DEVICE_CATALOG]
             unknown = [d for d in raw.get("enabled_devices", []) if d not in DEVICE_CATALOG]
-            msense_records = _normalize_msense(raw.get("msense_devices", self.msense_devices))
+            msense = raw.get("msense_devices", self.msense_devices)
             ip_lidar = raw.get("ip_qb2_lidar", self.ip_lidar)
             ip_pupil = raw.get("ip_pupil_labs", self.ip_pupil_labs)
-            msg = f"Loaded — {len(enabled)} device type(s)"
+            msg = f"Loaded — {len(enabled)} device(s)"
             if unknown:
                 msg += f" (skipped unknown: {', '.join(unknown)})"
-            msense_df = pd.DataFrame(msense_records, columns=_MSENSE_COLUMNS)
+            msense_df = pd.DataFrame(list(msense.items()), columns=["Name", "UUID / MAC Address"])
             return (
                 gr.update(value=enabled),
                 gr.update(value=msense_df),
@@ -248,13 +201,13 @@ class DeviceConfig:
                 )
 
             with gr.Accordion("MSense wristbands", open=True):
-                gr.Markdown("Name–UUID pairs for BLE wristband discovery and connection. Uncheck Enabled to skip connecting to a wristband without removing it from the list.")
+                gr.Markdown("Name–UUID pairs for BLE wristband discovery and connection.")
                 msense_df = gr.Dataframe(
-                    value=pd.DataFrame(self.msense_devices, columns=_MSENSE_COLUMNS),
-                    headers=_MSENSE_COLUMNS,
-                    datatype=["str", "str", "bool"],
+                    value=pd.DataFrame(list(self.msense_devices.items()), columns=["Name", "UUID / MAC Address"]),
+                    headers=["Name", "UUID / MAC Address"],
+                    datatype=["str", "str"],
                     row_count=(len(self.msense_devices), "dynamic"),
-                    col_count=(3, "fixed"),
+                    col_count=(2, "fixed"),
                     interactive=True,
                 )
 
