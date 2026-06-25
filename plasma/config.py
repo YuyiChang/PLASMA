@@ -7,8 +7,12 @@ import pandas as pd
 __version__ = "0.1.0-beta"
 __data_dir__ = "data"
 
-DEVICE_CATALOG = {
-    'MSense Wristbands': {
+device_table = {
+    # 'test': {
+    #     'module': 'plasma.devices.template',
+    #     'class': 'PlasmaDevice'
+    # },
+     'MSense Wristbands': {
         'module': 'plasma.devices.msense',
         'class': 'MotionSenseHRV',
     },
@@ -32,10 +36,26 @@ DEVICE_CATALOG = {
         'module': 'plasma.devices.obs',
         'class': 'ObsRecorder'
     },
-    'Bitalino': {
-        'module': 'plasma.devices.bitalino',
-        'class': 'PlasmaBitalino',
+    'qb2 LiDAR': {
+        'module': 'plasma.devices.qb2',
+        'class': 'Qb2'
     },
+    # 'Pupil Lab IMU': {
+    #     'module': 'plasma.devices.pupil_labs',
+    #     'class': 'PupilLabsIMU'
+    # },
+    # 'Pupil Lab Eye Event Blink': {
+    #     'module': 'plasma.devices.pupil_labs',
+    #     'class': 'PupilLabsEyeEventBlink'
+    # },
+    # 'ShimmerGSR': {
+    #     'module': 'plasma.devices.shimmer',
+    #     'class': 'ShimmerGSR'
+    # },
+    # 'OBS Recorder': {
+    #     'module': 'plasma.devices.obs',
+    #     'class': 'ObsRecorder'
+    # }
 }
 
 # device_table = {
@@ -80,14 +100,8 @@ MSENSE_DEV = {
     "MSense Right 4BH100": "51972CC5-950C-43EA-4E18-163275824EFE",
 }
 
-_DEFAULTS = {
-    "enabled_devices": list(DEVICE_CATALOG.keys()),
-    "msense_devices": [],
-    "ip_qb2_lidar": "",
-    "ip_pupil_labs": "",
-}
-
-_MSENSE_COLUMNS = ["Name", "UUID / MAC Address", "Enabled"]
+IP_QB2_LIDAR = "192.168.0.253"
+IP_PUPIL_LABS = "192.168.50.167"
 
 
 def _normalize_msense(raw):
