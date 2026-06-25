@@ -8,19 +8,18 @@ import time
 from pylsl import StreamInfo, StreamOutlet, cf_double64
 import numpy as np
 import struct
-from plasma.config import __data_dir__, __version__, MSENSE_DEV
+from plasma.config import __data_dir__, __version__, device_config
 
 yams_dir = __data_dir__
-
-# device name - mac addr here
-device_list = MSENSE_DEV
 
 class MotionSenseHRV(PlasmaDevice):
     def __init__(self, session_info, logger, tag):
         super().__init__(session_info, logger, tag)
 
+        self.self.device_list = dict(device_config.msense_devices)
+
         self.memo = {}
-        for k in device_list.keys():
+        for k in self.self.device_list.keys():
             self.memo[k] = PlasmaMemo(k)
 
         self.init_adapter()
@@ -53,8 +52,8 @@ class MotionSenseHRV(PlasmaDevice):
                 self.info(f"{i}: {peripheral.identifier()} [{peripheral.address()}]")
                 # try to look up device alias
                 addr = peripheral.address().upper()
-                if addr in device_list.keys():
-                    alias = device_list[addr]
+                if addr in self.device_list.keys():
+                    alias = self.device_list[addr]
                     name = f"{alias} ({peripheral.identifier()}) [{peripheral.address()}]"
                 else:
                     name = f"{peripheral.identifier()} [{peripheral.address()}]"
@@ -78,7 +77,7 @@ class MotionSenseHRV(PlasmaDevice):
         self.ctl_state = "Start device connection"
 
         # quick sanity check
-        for name, addr in device_list.items():
+        for name, addr in self.device_list.items():
             self.info(f"Connecting to device {addr}")
             # assert addr in self.devices.keys(), self.info(f"Target device not found {addr}")
 

@@ -1,14 +1,14 @@
-import gradio as gr 
+import gradio as gr
+import json
+import os
+import tempfile
+import pandas as pd
 
 __version__ = "0.1.0-beta"
 __data_dir__ = "data"
 
-device_table = {
-    # 'test': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDevice'
-    # },
-     'MSense Wristbands': {
+DEVICE_CATALOG = {
+    'MSense Wristbands': {
         'module': 'plasma.devices.msense',
         'class': 'MotionSenseHRV'
     },
@@ -16,96 +16,193 @@ device_table = {
         'module': 'plasma.devices.qb2',
         'class': 'Qb2'
     },
-    # 'Pupil Lab IMU': {
-    #     'module': 'plasma.devices.pupil_labs',
-    #     'class': 'PupilLabsIMU'
-    # },
-    # 'Pupil Lab Eye Event Blink': {
-    #     'module': 'plasma.devices.pupil_labs',
-    #     'class': 'PupilLabsEyeEventBlink'
-    # },
-    # 'ShimmerGSR': {
-    #     'module': 'plasma.devices.shimmer',
-    #     'class': 'ShimmerGSR'
-    # },
-    # 'OBS Recorder': {
-    #     'module': 'plasma.devices.obs',
-    #     'class': 'ObsRecorder'
-    # }
+    'Pupil Lab IMU': {
+        'module': 'plasma.devices.pupil_labs',
+        'class': 'PupilLabsIMU'
+    },
+    'Pupil Lab Eye Event Blink': {
+        'module': 'plasma.devices.pupil_labs',
+        'class': 'PupilLabsEyeEventBlink'
+    },
+    'ShimmerGSR': {
+        'module': 'plasma.devices.shimmer',
+        'class': 'ShimmerGSR'
+    },
+    'OBS Recorder': {
+        'module': 'plasma.devices.obs',
+        'class': 'ObsRecorder'
+    },
+    'Bitalino': {
+        'module': 'plasma.devices.bitalino',
+        'class': 'PlasmaBitalino'
+    },
 }
 
-# device_table = {
-#     #  'Wristband': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'Camera recorder': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'Eye tracking': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     'MotionSENSE HRV wristband': {
-#         'module': 'plasma.devices.msense',
-#         'class': 'MotionSenseHRV'
-#     },
-#     'Bitalino': {
-#         'module': 'plasma.devices.bitalino',
-#         'class': 'PlasmaBitalino'
-#     },
-#     # 'Skin conductance': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'LiDAR': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'Camera Recorder 2': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # }
-# }
+_DEVICE_CONFIG_FILE = "plasma_device_config.json"
 
-MSENSE_DEV = {
-    # "MSense Left 74N": "D3:54:EB:A4:9B:82",
-    # "Msense Right 70N": "FF:7D:06:B4:51:98",
-    "MSense Left 01S": "2104F8E3-D94A-1DF7-691E-9491AE431DC1", 
-    "MSense Right 4BH100": "51972CC5-950C-43EA-4E18-163275824EFE",
+_DEFAULTS = {
+    "enabled_devices": list(DEVICE_CATALOG.keys()),
+    "msense_devices": {},
+    "ip_qb2_lidar": "",
+    "ip_pupil_labs": "",
 }
 
-IP_QB2_LIDAR = "192.168.0.253"
-IP_PUPIL_LABS = "192.168.50.167"
 
-
-class Config():
+class DeviceConfig:
     def __init__(self):
-        self.ip_lidar = IP_QB2_LIDAR
-        self.ip_pupil_labs = IP_PUPIL_LABS
+        cfg = self._load()
+        self._active = cfg["enabled_devices"]
+        self.msense_devices = cfg["msense_devices"]
+        self.ip_lidar = cfg["ip_qb2_lidar"]
+        self.ip_pupil_labs = cfg["ip_pupil_labs"]
+
+    # ── persistence ──────────────────────────────────────────────────────────
+
+    def _load(self):
+        if os.path.exists(_DEVICE_CONFIG_FILE):
+            try:
+                with open(_DEVICE_CONFIG_FILE, 'r') as f:
+                    raw = json.load(f)
+                cfg = dict(_DEFAULTS)
+                cfg["enabled_devices"] = [d for d in raw.get("enabled_devices", cfg["enabled_devices"]) if d in DEVICE_CATALOG]
+                cfg["msense_devices"] = raw.get("msense_devices", cfg["msense_devices"])
+                cfg["ip_qb2_lidar"] = raw.get("ip_qb2_lidar", cfg["ip_qb2_lidar"])
+                cfg["ip_pupil_labs"] = raw.get("ip_pupil_labs", cfg["ip_pupil_labs"])
+                return cfg
+            except Exception:
+                pass
+        # File missing or corrupt — create with defaults
+        self._active = list(_DEFAULTS["enabled_devices"])
+        self.msense_devices = dict(_DEFAULTS["msense_devices"])
+        self.ip_lidar = _DEFAULTS["ip_qb2_lidar"]
+        self.ip_pupil_labs = _DEFAULTS["ip_pupil_labs"]
+        self._save()
+        return dict(_DEFAULTS)
+
+    def _save(self):
+        with open(_DEVICE_CONFIG_FILE, 'w') as f:
+            json.dump({
+                "enabled_devices": self._active,
+                "msense_devices": self.msense_devices,
+                "ip_qb2_lidar": self.ip_lidar,
+                "ip_pupil_labs": self.ip_pupil_labs,
+            }, f, indent=2)
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def get_active_table(self):
+        return {k: DEVICE_CATALOG[k] for k in self._active if k in DEVICE_CATALOG}
+
+    # ── UI callbacks ──────────────────────────────────────────────────────────
+
+    def _apply(self, selected, msense_df, ip_lidar, ip_pupil_labs):
+        self._active = list(selected)
+        self.msense_devices = {
+            row["Name"]: row["UUID / MAC Address"]
+            for _, row in msense_df.iterrows()
+            if str(row["Name"]).strip() and str(row["UUID / MAC Address"]).strip()
+        }
+        self.ip_lidar = ip_lidar
+        self.ip_pupil_labs = ip_pupil_labs
+        self._save()
+        return f"Saved — {len(self._active)} device(s) enabled"
+
+    def _export_config(self, selected, msense_df, ip_lidar, ip_pupil_labs):
+        msense = {
+            row["Name"]: row["UUID / MAC Address"]
+            for _, row in msense_df.iterrows()
+            if str(row["Name"]).strip() and str(row["UUID / MAC Address"]).strip()
+        }
+        config = {
+            "enabled_devices": selected,
+            "msense_devices": msense,
+            "ip_qb2_lidar": ip_lidar,
+            "ip_pupil_labs": ip_pupil_labs,
+        }
+        path = os.path.join(tempfile.mkdtemp(), "plasma_device_config.json")
+        with open(path, 'w') as f:
+            json.dump(config, f, indent=2)
+        return path, f"Config exported with {len(selected)} device(s)"
+
+    def _import_config(self, file):
+        if file is None:
+            return gr.update(), gr.update(), gr.update(), gr.update(), ""
+        try:
+            with open(file, 'r') as f:
+                raw = json.load(f)
+            enabled = [d for d in raw.get("enabled_devices", []) if d in DEVICE_CATALOG]
+            unknown = [d for d in raw.get("enabled_devices", []) if d not in DEVICE_CATALOG]
+            msense = raw.get("msense_devices", self.msense_devices)
+            ip_lidar = raw.get("ip_qb2_lidar", self.ip_lidar)
+            ip_pupil = raw.get("ip_pupil_labs", self.ip_pupil_labs)
+            msg = f"Loaded — {len(enabled)} device(s)"
+            if unknown:
+                msg += f" (skipped unknown: {', '.join(unknown)})"
+            msense_df = pd.DataFrame(list(msense.items()), columns=["Name", "UUID / MAC Address"])
+            return (
+                gr.update(value=enabled),
+                gr.update(value=msense_df),
+                gr.update(value=ip_lidar),
+                gr.update(value=ip_pupil),
+                msg,
+            )
+        except Exception as e:
+            return gr.update(), gr.update(), gr.update(), gr.update(), f"Import error: {e}"
+
+    # ── Gradio interface ──────────────────────────────────────────────────────
 
     def interface(self):
         with gr.Column():
-            ip_qb2_lidar = gr.Text(value=self.ip_lidar, label="QB2 LiDAR IP Address")
-            ip_qb2_lidar.change(self._update_pupil_labs, inputs=ip_qb2_lidar)
+            with gr.Accordion("Device catalog", open=True):
+                gr.Markdown("Select which sensors appear in the session dashboard.")
+                checkbox_group = gr.CheckboxGroup(
+                    choices=list(DEVICE_CATALOG.keys()),
+                    value=list(self._active),
+                    label="Available sensors",
+                )
 
-            ip_pupil_labs = gr.Text(value=self.ip_pupil_labs, label="Pupil Labs IP Address")
-            ip_pupil_labs.change(self._update_pupil_labs, inputs=ip_pupil_labs)
+            with gr.Accordion("MSense wristbands", open=True):
+                gr.Markdown("Name–UUID pairs for BLE wristband discovery and connection.")
+                msense_df = gr.Dataframe(
+                    value=pd.DataFrame(list(self.msense_devices.items()), columns=["Name", "UUID / MAC Address"]),
+                    headers=["Name", "UUID / MAC Address"],
+                    datatype=["str", "str"],
+                    row_count=(len(self.msense_devices), "dynamic"),
+                    col_count=(2, "fixed"),
+                    interactive=True,
+                )
 
-            save = gr.Button(value="Save")
-            save.click(self._save_config)
+            with gr.Accordion("Network settings", open=True):
+                ip_lidar_txt = gr.Text(value=self.ip_lidar, label="QB2 LiDAR IP address")
+                ip_pupil_txt = gr.Text(value=self.ip_pupil_labs, label="Pupil Labs IP address")
 
-    def _update_lidar_ip(self, ip):
-        self.ip_lidar = ip
+            with gr.Row():
+                btn_apply = gr.Button("Apply", variant="primary")
+                btn_export = gr.Button("Export config")
 
-    def _update_pupil_labs(self, ip):
-        self.ip_pupil_labs = ip
+            file_import = gr.File(label="Import config (.json)", file_types=[".json"])
+            export_file = gr.File(label="Config file", interactive=False)
+            status = gr.Textbox(interactive=False, value="", show_label=False, container=False)
 
-    def _save_config(self):
-        print(f"IP of Qb2 LiDAR = {self.ip_lidar}")
-        print(f"IP of Pupil Labs = {self.ip_pupil_labs}")
+            btn_apply.click(
+                self._apply,
+                inputs=[checkbox_group, msense_df, ip_lidar_txt, ip_pupil_txt],
+                outputs=status,
+            )
+            btn_export.click(
+                self._export_config,
+                inputs=[checkbox_group, msense_df, ip_lidar_txt, ip_pupil_txt],
+                outputs=[export_file, status],
+            )
+            file_import.change(
+                self._import_config,
+                inputs=file_import,
+                outputs=[checkbox_group, msense_df, ip_lidar_txt, ip_pupil_txt, status],
+            )
 
 
-####
-plasma_config = Config()
+device_config = DeviceConfig()
+
+# Aliases kept for existing device-module imports
+plasma_config = device_config
+device_table = device_config.get_active_table()

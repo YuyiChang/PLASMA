@@ -14,14 +14,12 @@ from plasma.devices.template import PlasmaDevice, PlasmaMemo
 # from plasma.config import IP_QB2_LIDAR
 from plasma.config import plasma_config
 
-ip = plasma_config.ip_lidar
-
 class Qb2(PlasmaDevice):
     def __init__(self, session_info, logger, tag) -> None:
         super().__init__(session_info, logger, tag)
         self.memo = PlasmaMemo('qb2 LiDAR')
         self.session_info = session_info
-        self.addr = ip
+        self.addr = plasma_config.ip_lidar
         self.status = ""
         self.last_lsl = ""
 
