@@ -7,8 +7,12 @@ import pandas as pd
 __version__ = "0.1.0-beta"
 __data_dir__ = "data"
 
-DEVICE_CATALOG = {
-    'MSense Wristbands': {
+device_table = {
+    # 'test': {
+    #     'module': 'plasma.devices.template',
+    #     'class': 'PlasmaDevice'
+    # },
+     'MSense Wristbands': {
         'module': 'plasma.devices.msense',
         'class': 'MotionSenseHRV',
     },
@@ -48,6 +52,8 @@ _DEFAULTS = {
 }
 
 _MSENSE_COLUMNS = ["Name", "UUID / MAC Address", "Enabled"]
+IP_QB2_LIDAR = "192.168.0.253"
+IP_PUPIL_LABS = "192.168.50.167"
 
 
 def _normalize_msense(raw):
