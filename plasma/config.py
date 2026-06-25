@@ -3,51 +3,12 @@ import gradio as gr
 __version__ = "0.1.0-beta"
 __data_dir__ = "data"
 
-# device_table = {
-#     # 'test': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDevice'
-#     # },
-#      'MSense Wristbands': {
-#         'module': 'plasma.devices.msense',
-#         'class': 'MotionSenseHRV'
-#     },
-#     'qb2 LiDAR': {
-#         'module': 'plasma.devices.qb2',
-#         'class': 'Qb2'
-#     },
-#     'Pupil Lab IMU': {
-#         'module': 'plasma.devices.pupil_labs',
-#         'class': 'PupilLabsIMU'
-#     },
-#     'Pupil Lab Eye Event Blink': {
-#         'module': 'plasma.devices.pupil_labs',
-#         'class': 'PupilLabsEyeEventBlink'
-#     },
-#     'ShimmerGSR': {
-#         'module': 'plasma.devices.shimmer',
-#         'class': 'ShimmerGSR'
-#     },
-#     'OBS Recorder': {
-#         'module': 'plasma.devices.obs',
-#         'class': 'ObsRecorder'
-#     }
-# }
-
 device_table = {
-    #  'Wristband': {
+    # 'test': {
     #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
+    #     'class': 'PlasmaDevice'
     # },
-    # 'Camera recorder': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # },
-    # 'Eye tracking': {
-    #     'module': 'plasma.devices.template',
-    #     'class': 'PlasmaDemoDevice'
-    # },
-    'MotionSENSE HRV wristband': {
+     'MSense Wristbands': {
         'module': 'plasma.devices.msense',
         'class': 'MotionSenseHRV',
     },
@@ -76,7 +37,7 @@ MSENSE_DEV = {
     "MSense Right 4BH100": "51972CC5-950C-43EA-4E18-163275824EFE",
 }
 
-IP_QB2_LIDAR = "192.168.0.35"
+IP_QB2_LIDAR = "192.168.0.253"
 IP_PUPIL_LABS = "192.168.50.167"
 
 
