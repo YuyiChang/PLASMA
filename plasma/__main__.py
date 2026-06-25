@@ -1,6 +1,6 @@
 import gradio as gr
 from plasma.integrated_panel import IntegratedPanel
-from plasma.config import plasma_config
+from plasma.config import device_config
 
 js_func = """
 function refresh() {
@@ -23,7 +23,7 @@ def main():
         with gr.Tab("Signal visualizer"):
             ip.visualizer_interface()
         with gr.Tab("Configuration"):
-            plasma_config.interface()
+            device_config.interface()
         # with gr.Tab("PL"):
         #     pl.interface()
 

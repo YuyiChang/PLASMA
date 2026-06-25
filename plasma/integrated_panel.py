@@ -5,7 +5,7 @@ from plasma.lsl_session import encode_participant
 import importlib
 import logging, datetime
 from logging import Logger
-from plasma.config import device_table, __data_dir__, __version__
+from plasma.config import device_config, __data_dir__, __version__
 import pandas as pd
 import numpy as np
 
@@ -98,7 +98,7 @@ import numpy as np
 
 class IntegratedPanel():
     def __init__(self):
-        self.device_list = list(device_table.keys())
+        self.device_list = list(device_config.get_active_table().keys())
         self.log_root = __data_dir__
 
         self.available_devices = []
@@ -203,9 +203,12 @@ class IntegratedPanel():
 
                 with gr.Accordion(label="Device initialization", open=True):
                     device_grp = gr.CheckboxGroup(choices=self.device_list, value=self.device_list, label="Select sensor(s)")
-                    btn_init = gr.Button("🚦Initialize selected device(s)")
+                    with gr.Row():
+                        btn_init = gr.Button("🚦Initialize selected device(s)")
+                        btn_refresh = gr.Button("Refresh list")
 
                     btn_init.click(self.init_devices, inputs=device_grp)
+                    btn_refresh.click(self._refresh_devices, outputs=device_grp)
 
             with gr.Column():
                 with gr.Accordion(label="Device control", open=True):
@@ -228,10 +231,15 @@ class IntegratedPanel():
         #         # print(help_txt)
         #     md = gr.Markdown(help_txt)
 
+    def _refresh_devices(self):
+        active = list(device_config.get_active_table().keys())
+        return gr.CheckboxGroup(choices=active, value=active)
+
     def init_devices(self, selected_devices):
         self.available_devices = []
+        active_table = device_config.get_active_table()
         for dev in selected_devices:
-            cls = device_table[dev]
+            cls = active_table[dev]
             print(dev, cls)
             module = importlib.import_module(cls['module'])
             Device = getattr(module, cls['class'])
