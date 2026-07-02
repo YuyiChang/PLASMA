@@ -16,10 +16,10 @@ class MotionSenseHRV(PlasmaDevice):
     def __init__(self, session_info, logger, tag):
         super().__init__(session_info, logger, tag)
 
-        self.self.device_list = dict(device_config.msense_devices)
+        self.device_list = dict(device_config.msense_devices)
 
         self.memo = {}
-        for k in self.self.device_list.keys():
+        for k in self.device_list.keys():
             self.memo[k] = PlasmaMemo(k)
 
         self.init_adapter()
