@@ -1,3 +1,6 @@
+import multiprocessing
+multiprocessing.freeze_support()
+
 try:
     from plasma.__main__ import main
     main()
