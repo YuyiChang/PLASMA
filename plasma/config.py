@@ -10,7 +10,7 @@ __data_dir__ = "data"
 DEVICE_CATALOG = {
     'MSense Wristbands': {
         'module': 'plasma.devices.msense',
-        'class': 'MotionSenseHRV'
+        'class': 'MotionSenseHRV',
     },
     'qb2 LiDAR': {
         'module': 'plasma.devices.qb2',
@@ -34,7 +34,7 @@ DEVICE_CATALOG = {
     },
     'Bitalino': {
         'module': 'plasma.devices.bitalino',
-        'class': 'PlasmaBitalino'
+        'class': 'PlasmaBitalino',
     },
 }
 
