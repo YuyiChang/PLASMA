@@ -1,6 +1,7 @@
 import gradio as gr
 from plasma.integrated_panel import IntegratedPanel
-from plasma.config import device_config
+# from plasma.devices.pupil_labs import PupilLabsDashboard
+from plasma.config import plasma_config
 
 js_func = """
 function refresh() {
