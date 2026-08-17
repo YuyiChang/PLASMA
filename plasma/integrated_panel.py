@@ -54,8 +54,7 @@ class UpdateFunction():
             'data': data
         })
         return df
->>>>>>> 389e8f3 (added feature to switch update function through check box)
-        
+            
 
 class IntegratedPanel():
     def __init__(self):
