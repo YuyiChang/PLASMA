@@ -76,6 +76,33 @@ MSENSE_DEV = {
     "MSense Right 4BH100": "51972CC5-950C-43EA-4E18-163275824EFE",
 }
 
+_DEFAULTS = {
+    "enabled_devices": list(DEVICE_CATALOG.keys()),
+    "msense_devices": [],
+    "ip_qb2_lidar": "",
+    "ip_pupil_labs": "",
+}
+
+_MSENSE_COLUMNS = ["Name", "UUID / MAC Address", "Enabled"]
+
+
+def _normalize_msense(raw):
+    """Accepts either the legacy {name: uuid} mapping or the current
+    list of {Name, UUID / MAC Address, Enabled} records, and returns
+    the latter — legacy entries default to enabled."""
+    if isinstance(raw, dict):
+        return [{"Name": k, "UUID / MAC Address": v, "Enabled": True} for k, v in raw.items()]
+    if isinstance(raw, list):
+        return [
+            {
+                "Name": rec.get("Name", ""),
+                "UUID / MAC Address": rec.get("UUID / MAC Address", ""),
+                "Enabled": bool(rec.get("Enabled", True)),
+            }
+            for rec in raw
+        ]
+    return []
+
 
 class DeviceConfig:
     def __init__(self):
@@ -94,7 +121,7 @@ class DeviceConfig:
                     raw = json.load(f)
                 cfg = dict(_DEFAULTS)
                 cfg["enabled_devices"] = [d for d in raw.get("enabled_devices", cfg["enabled_devices"]) if d in DEVICE_CATALOG]
-                cfg["msense_devices"] = raw.get("msense_devices", cfg["msense_devices"])
+                cfg["msense_devices"] = _normalize_msense(raw.get("msense_devices", cfg["msense_devices"]))
                 cfg["ip_qb2_lidar"] = raw.get("ip_qb2_lidar", cfg["ip_qb2_lidar"])
                 cfg["ip_pupil_labs"] = raw.get("ip_pupil_labs", cfg["ip_pupil_labs"])
                 return cfg
@@ -102,7 +129,7 @@ class DeviceConfig:
                 pass
         # File missing or corrupt — create with defaults
         self._active = list(_DEFAULTS["enabled_devices"])
-        self.msense_devices = dict(_DEFAULTS["msense_devices"])
+        self.msense_devices = list(_DEFAULTS["msense_devices"])
         self.ip_lidar = _DEFAULTS["ip_qb2_lidar"]
         self.ip_pupil_labs = _DEFAULTS["ip_pupil_labs"]
         self._save()
@@ -122,29 +149,41 @@ class DeviceConfig:
     def get_active_table(self):
         return {k: DEVICE_CATALOG[k] for k in self._active if k in DEVICE_CATALOG}
 
+    def get_active_msense_devices(self):
+        """Name -> UUID/MAC of MSense wristbands that are both listed and enabled."""
+        return {
+            rec["Name"]: rec["UUID / MAC Address"]
+            for rec in self.msense_devices
+            if rec.get("Enabled", True) and str(rec.get("Name", "")).strip() and str(rec.get("UUID / MAC Address", "")).strip()
+        }
+
     # ── UI callbacks ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _msense_records_from_df(msense_df):
+        return [
+            {
+                "Name": row["Name"],
+                "UUID / MAC Address": row["UUID / MAC Address"],
+                "Enabled": bool(row["Enabled"]) if pd.notna(row.get("Enabled", True)) else True,
+            }
+            for _, row in msense_df.iterrows()
+            if str(row["Name"]).strip() and str(row["UUID / MAC Address"]).strip()
+        ]
 
     def _apply(self, selected, msense_df, ip_lidar, ip_pupil_labs):
         self._active = list(selected)
-        self.msense_devices = {
-            row["Name"]: row["UUID / MAC Address"]
-            for _, row in msense_df.iterrows()
-            if str(row["Name"]).strip() and str(row["UUID / MAC Address"]).strip()
-        }
+        self.msense_devices = self._msense_records_from_df(msense_df)
         self.ip_lidar = ip_lidar
         self.ip_pupil_labs = ip_pupil_labs
         self._save()
-        return f"Saved — {len(self._active)} device(s) enabled"
+        n_enabled = sum(1 for rec in self.msense_devices if rec["Enabled"])
+        return f"Saved — {len(self._active)} device type(s) enabled, {n_enabled}/{len(self.msense_devices)} MSense wristband(s) enabled"
 
     def _export_config(self, selected, msense_df, ip_lidar, ip_pupil_labs):
-        msense = {
-            row["Name"]: row["UUID / MAC Address"]
-            for _, row in msense_df.iterrows()
-            if str(row["Name"]).strip() and str(row["UUID / MAC Address"]).strip()
-        }
         config = {
             "enabled_devices": selected,
-            "msense_devices": msense,
+            "msense_devices": self._msense_records_from_df(msense_df),
             "ip_qb2_lidar": ip_lidar,
             "ip_pupil_labs": ip_pupil_labs,
         }
@@ -161,13 +200,13 @@ class DeviceConfig:
                 raw = json.load(f)
             enabled = [d for d in raw.get("enabled_devices", []) if d in DEVICE_CATALOG]
             unknown = [d for d in raw.get("enabled_devices", []) if d not in DEVICE_CATALOG]
-            msense = raw.get("msense_devices", self.msense_devices)
+            msense_records = _normalize_msense(raw.get("msense_devices", self.msense_devices))
             ip_lidar = raw.get("ip_qb2_lidar", self.ip_lidar)
             ip_pupil = raw.get("ip_pupil_labs", self.ip_pupil_labs)
-            msg = f"Loaded — {len(enabled)} device(s)"
+            msg = f"Loaded — {len(enabled)} device type(s)"
             if unknown:
                 msg += f" (skipped unknown: {', '.join(unknown)})"
-            msense_df = pd.DataFrame(list(msense.items()), columns=["Name", "UUID / MAC Address"])
+            msense_df = pd.DataFrame(msense_records, columns=_MSENSE_COLUMNS)
             return (
                 gr.update(value=enabled),
                 gr.update(value=msense_df),
@@ -191,13 +230,13 @@ class DeviceConfig:
                 )
 
             with gr.Accordion("MSense wristbands", open=True):
-                gr.Markdown("Name–UUID pairs for BLE wristband discovery and connection.")
+                gr.Markdown("Name–UUID pairs for BLE wristband discovery and connection. Uncheck Enabled to skip connecting to a wristband without removing it from the list.")
                 msense_df = gr.Dataframe(
-                    value=pd.DataFrame(list(self.msense_devices.items()), columns=["Name", "UUID / MAC Address"]),
-                    headers=["Name", "UUID / MAC Address"],
-                    datatype=["str", "str"],
+                    value=pd.DataFrame(self.msense_devices, columns=_MSENSE_COLUMNS),
+                    headers=_MSENSE_COLUMNS,
+                    datatype=["str", "str", "bool"],
                     row_count=(len(self.msense_devices), "dynamic"),
-                    col_count=(2, "fixed"),
+                    col_count=(3, "fixed"),
                     interactive=True,
                 )
 
