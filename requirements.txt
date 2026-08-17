@@ -8,3 +8,5 @@ pylsl
 simplepyble
 pyserial
 pyshimmer
+opencv-python
+bitalino

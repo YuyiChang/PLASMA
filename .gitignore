@@ -211,5 +211,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+r61/plasma_device_config.json
 .vscode/settings.json
 plasma_device_config.json

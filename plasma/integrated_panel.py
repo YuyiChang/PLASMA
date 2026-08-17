@@ -9,6 +9,53 @@ from plasma.config import device_config, __data_dir__, __version__
 import pandas as pd
 import numpy as np
 
+class UpdateFunction():
+    def __init__(self):
+        self.fn = self.default_fn
+        self.available_fns = {
+            'Bitalino' : self.bitalino_update_data, 
+            'MotionSENSE HRV wristband' : self.MotionSENSE_HRV_wristband_update_data
+            }
+
+    def switch_device(self, device):
+        self.fn = self.available_fns[device] #temp solution
+    
+    def default_fn(self):
+        
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': np.arange(100)/100
+        })
+        return df
+
+    def bitalino_update_data(self):
+
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': np.zeros(100)
+        })
+        return df
+        
+
+    def MotionSENSE_HRV_wristband_update_data(self):
+        # very dummy way of pulling data to be visualized
+        sel_dev = None
+        data = np.arange(100) / 100
+
+        # for dev in self.available_devices:
+        #     if "SENSE" in dev.tag:
+        #         sel_dev = dev
+        #         data = np.array(sel_dev.memo['MSense Left 01S'].data)
+        #         print('=====', data.shape)
+        #         break
+
+        df = pd.DataFrame(data={
+            'index': np.arange(100),
+            'data': data
+        })
+        return df
+            
+
 class IntegratedPanel():
     def __init__(self):
         self.device_list = list(device_config.get_active_table().keys())
@@ -21,28 +68,80 @@ class IntegratedPanel():
         self.logger = get_logger(__data_dir__)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
-    def visualizer_interface(self):
-        # refresh = gr.Button("Refresh available devices")
-        # checkbox_group = gr.CheckboxGroup()
-        # refresh.click(self.update_devices, outputs=checkbox_group)
-        gr.LinePlot(value=self.update_data, x='index', y='data', every=0.5)
+        self.update = UpdateFunction()
+        
 
-    def update_data(self):
-        # very dummy way of pulling data to be visualized
-        sel_dev = None
+    def visualizer_interface(self):
+        with gr.Row():
+            # refresh = gr.Button("Refresh available devices")
+            radio = gr.Radio(self.device_list, label="devices", scale=1)
+            timer = gr.Timer(0.5)  # seconds
+            # refresh.click(self.update_devices, outputs=checkbox_group)
+            plot = gr.LinePlot(value=self.dynamic_update, x='index', y='data', color='channel', every=timer, scale=4)
+
+            radio.select(self.select_device)
+
+    def select_device(self, evt: gr.SelectData):
+        self.current_dev = evt.value
+    
+    def dynamic_update(self):
+        if not self.current_dev:
+            return self.dummy_update()
+        
         data = np.arange(100) / 100
+        length = 1
+        num_channel = 1
+
+        #linear search is not efficient
+        #change to dictionary if there are time to do it
+        #be sure to change all other code that uses available_devices if it was changed to dictionary 
         for dev in self.available_devices:
-            if "SENSE" in dev.tag:
-                sel_dev = dev
-                data = np.array(sel_dev.memo['MSense Left 01S'].data)
-                print('=====', data.shape)
+            if self.current_dev in dev.tag:
+                memo = dev.memo
+                if isinstance(memo, dict):
+                    memo = memo[dev.memo2read]
+                data = np.array(memo.data)
+                length = dev.data_length
+                num_channel = dev.num_channel
                 break
+        #creating the channels every 5 sec is not efficient 
+        #optimize if possible
+        channels = [f"ch{i+1}" for i in range(num_channel)]
 
         df = pd.DataFrame(data={
-            'index': np.arange(100),
-            'data': data
+            'index': np.tile(np.arange(100 * length), num_channel),
+            'data': data,
+            'channel': np.tile(np.repeat(channels, length), 100)
         })
+        
         return df
+    
+    def select_device(self, evt: gr.SelectData):
+        self.update.switch_device(evt.value)
+        return self.update.fn()
+
+    def dummy_update(self):
+        """
+        This dummpy update function is NECESSARY for initalizing all channels at the beginning of the app
+        DO NOT DELETE until a better solution is found
+        """
+        samples = 100
+        max_channels = 6
+        channels = [f"ch{i+1}" for i in range(max_channels)]
+        #print("running default update function")
+
+        # Construct long-form dataframe
+        df = pd.DataFrame({
+            "index": np.tile(np.arange(samples), max_channels),
+            "data": np.concatenate([
+                np.sin(np.linspace(0, np.pi * 2, samples) + i) * 0.5 + i
+                for i in range(max_channels)
+            ]),
+            "channel": np.repeat(channels, samples)
+        })
+
+        return df
+        
 
     def update_devices(self):
         aa = [dev.tag for dev in self.available_devices]
@@ -109,7 +208,8 @@ class IntegratedPanel():
             Device = getattr(module, cls['class'])
             device_instance = Device(self.session_info, self.logger, tag=dev)
             self.available_devices.append(device_instance)
-
+        
+        #self.update.init_update_fn(self.available_devices)
         self.sts = "Ready to start"
 
 
