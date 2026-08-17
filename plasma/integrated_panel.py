@@ -8,6 +8,10 @@ from logging import Logger
 from plasma.config import device_config, __data_dir__, __version__
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+VISUALIZER_PLOT_ELEM_ID = "plasma-visualizer-plot"
 
 class IntegratedPanel():
     def __init__(self):
@@ -22,31 +26,97 @@ class IntegratedPanel():
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
     def visualizer_interface(self):
-        # refresh = gr.Button("Refresh available devices")
-        # checkbox_group = gr.CheckboxGroup()
-        # refresh.click(self.update_devices, outputs=checkbox_group)
-        gr.LinePlot(value=self.update_data, x='index', y='data', every=0.5)
+        with gr.Column():
+            gr.Markdown(
+                "Live device signal viewer. Initialize device(s) on the **Session dashboard** tab first, "
+                "then refresh sources here. X-axis uses each device's own sample counter, not computer clock time."
+            )
+            with gr.Row():
+                source_select = gr.Dropdown(choices=[], multiselect=True, label="Data source(s)")
+                channel_select = gr.CheckboxGroup(choices=[], label="Channel(s)")
 
-    def update_data(self):
-        # very dummy way of pulling data to be visualized
-        sel_dev = None
-        data = np.arange(100) / 100
+            with gr.Row():
+                btn_refresh_sources = gr.Button("🔄 Refresh sources")
+                btn_fullscreen = gr.Button("⛶ Fullscreen")
+
+            with gr.Column(elem_id=VISUALIZER_PLOT_ELEM_ID):
+                plot = gr.Plot(show_label=False)
+
+            timer = gr.Timer(value=0.2, active=True)
+
+            btn_refresh_sources.click(
+                self.refresh_visual_sources, outputs=source_select
+            ).then(
+                self.refresh_channels, inputs=source_select, outputs=channel_select
+            )
+            source_select.change(self.refresh_channels, inputs=source_select, outputs=channel_select)
+            timer.tick(fn=self.update_plot, inputs=[source_select, channel_select], outputs=plot)
+            btn_fullscreen.click(
+                None, None, None,
+                js=f"""() => {{
+                    const el = document.getElementById('{VISUALIZER_PLOT_ELEM_ID}');
+                    if (el && el.requestFullscreen) {{ el.requestFullscreen(); }}
+                }}""",
+            )
+
+    def get_visual_sources(self):
+        """Flat {"device tag [· sub-source]": PlasmaMemo} map of every live
+        source that currently has at least one data channel to plot."""
+        sources = {}
         for dev in self.available_devices:
-            if "SENSE" in dev.tag:
-                sel_dev = dev
-                data = np.array(sel_dev.memo['MSense Left 01S'].data)
-                print('=====', data.shape)
-                break
+            for name, memo in dev.get_sources().items():
+                if memo.channels:
+                    label = name if name == dev.tag else f"{dev.tag} · {name}"
+                    sources[label] = memo
+        return sources
 
-        df = pd.DataFrame(data={
-            'index': np.arange(100),
-            'data': data
-        })
-        return df
+    def refresh_visual_sources(self):
+        names = list(self.get_visual_sources().keys())
+        return gr.Dropdown(choices=names, value=names)
 
-    def update_devices(self):
-        aa = [dev.tag for dev in self.available_devices]
-        return gr.CheckboxGroup(choices=aa)
+    def refresh_channels(self, selected_sources):
+        sources = self.get_visual_sources()
+        channels = []
+        for name in selected_sources or []:
+            memo = sources.get(name)
+            if memo is None:
+                continue
+            for ch in memo.channels:
+                if ch not in channels:
+                    channels.append(ch)
+        return gr.CheckboxGroup(choices=channels, value=channels)
+
+    def update_plot(self, selected_sources, selected_channels):
+        sources = self.get_visual_sources()
+        channels = selected_channels or []
+
+        if not channels or not selected_sources:
+            fig = go.Figure()
+            fig.update_layout(
+                title="Select a data source and channel(s) to visualize",
+                height=300,
+                uirevision="plasma-visualizer",
+            )
+            return fig
+
+        fig = make_subplots(rows=len(channels), cols=1, shared_xaxes=True, subplot_titles=channels, vertical_spacing=0.08)
+
+        for row, ch in enumerate(channels, start=1):
+            for src_name in selected_sources:
+                memo = sources.get(src_name)
+                if memo is None or ch not in memo.channels:
+                    continue
+                x, y = memo.get_series(ch)
+                fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=f"{src_name} · {ch}"), row=row, col=1)
+            fig.update_xaxes(title_text="Time since session start (s)", row=row, col=1)
+
+        fig.update_layout(
+            height=max(250 * len(channels), 250),
+            margin=dict(l=40, r=20, t=40, b=30),
+            showlegend=True,
+            uirevision="plasma-visualizer",
+        )
+        return fig
 
     def interface(self):
         with gr.Row():

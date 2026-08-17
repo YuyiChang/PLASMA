@@ -2,28 +2,44 @@ import threading
 import time
 import datetime
 import numpy as np
+from collections import deque
+
+DEFAULT_WINDOW_S = 30.0
 
 class PlasmaMemo():
-    def __init__(self, name):
+    def __init__(self, name, channels=None, window_s=DEFAULT_WINDOW_S):
         self.name = name
         self.sts = "🟦" # status
         self.set_latest("initialized")
-        self.data = [0] * 100
+        self.window_s = window_s
+        # named rolling buffers of (t, value), t = seconds since the caller's
+        # own time reference (e.g. session start) — pruned to the last window_s
+        self.channels = {ch: deque() for ch in (channels or [])}
 
     def get_sts(self):
         return {
             "type": self.sts,
             "description": f"------ {self.latest}",
         }
-    
+
     def set_latest(self, msg):
         now = datetime.datetime.now().strftime("%H:%M:%S")
         self.latest = f"{now} {msg}"
 
-    def set_data(self, data):
-        print('=========', data)
-        self.data.append(data)
-        self.data.pop(0)
+    def set_data(self, channel, value, t):
+        buf = self.channels.setdefault(channel, deque())
+        buf.append((t, value))
+        cutoff = t - self.window_s
+        while buf and buf[0][0] < cutoff:
+            buf.popleft()
+
+    def get_series(self, channel):
+        """Returns (xs, ys) for a channel, xs being the caller-supplied time values."""
+        buf = self.channels.get(channel)
+        if not buf:
+            return [], []
+        xs, ys = zip(*buf)
+        return list(xs), list(ys)
 
 
 class PlasmaDevice:
@@ -36,6 +52,16 @@ class PlasmaDevice:
 
         self.memo = PlasmaMemo(tag)
         self.tag = tag
+
+    def get_sources(self):
+        """Map of source-name -> PlasmaMemo for live visualization.
+
+        Most devices expose a single memo under their own tag; devices with
+        multiple physical sub-devices (e.g. MSense wristbands) override
+        self.memo with a {sub_device_name: PlasmaMemo} dict instead."""
+        if isinstance(self.memo, dict):
+            return self.memo
+        return {self.tag: self.memo}
 
     def info(self, msg):
         if self.logger is None:

@@ -20,7 +20,11 @@ class MotionSenseHRV(PlasmaDevice):
 
         self.memo = {}
         for k in self.device_list.keys():
-            self.memo[k] = PlasmaMemo(k)
+            self.memo[k] = PlasmaMemo(k, channels=["ENMO", "counter"])
+
+        # fallback reference in case data arrives before start() is clicked;
+        # start() resets this to the true session-start time
+        self.t_start = time.time()
 
         self.init_adapter()
 
@@ -190,7 +194,9 @@ class MotionSenseHRV(PlasmaDevice):
         self.active_outlets[name].push_sample([ENMO[0], packet_counter[0]])
         # print(f"{ENMO[0]} {packet_counter[0]}", self.memo.keys(), name)
         self.memo[name].set_latest(f"{ENMO[0]} {packet_counter[0]}")
-        self.memo[name].set_data(ENMO[0])
+        elapsed = time.time() - self.t_start
+        self.memo[name].set_data("ENMO", ENMO[0], elapsed)
+        self.memo[name].set_data("counter", packet_counter[0], elapsed)
 
 
 class MsenseOutlet(StreamOutlet):

@@ -2,6 +2,7 @@ numpy
 matplotlib
 tqdm
 gradio
+plotly
 blickfeld-qb2
 pupil-labs-realtime-api
 pylsl
