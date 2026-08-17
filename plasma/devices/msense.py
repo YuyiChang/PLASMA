@@ -19,7 +19,7 @@ class MotionSenseHRV(PlasmaDevice):
         self.device_list = device_config.get_active_msense_devices()
 
         self.memo = {}
-        for k in self.self.device_list.keys():
+        for k in self.device_list.keys():
             self.memo[k] = PlasmaMemo(k)
 
         self.init_adapter()

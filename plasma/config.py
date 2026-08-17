@@ -16,65 +16,29 @@ DEVICE_CATALOG = {
         'module': 'plasma.devices.qb2',
         'class': 'Qb2'
     },
-    # 'Pupil Lab IMU': {
-    #     'module': 'plasma.devices.pupil_labs',
-    #     'class': 'PupilLabsIMU'
-    # },
-    # 'Pupil Lab Eye Event Blink': {
-    #     'module': 'plasma.devices.pupil_labs',
-    #     'class': 'PupilLabsEyeEventBlink'
-    # },
-    # 'ShimmerGSR': {
-    #     'module': 'plasma.devices.shimmer',
-    #     'class': 'ShimmerGSR'
-    # },
-    # 'OBS Recorder': {
-    #     'module': 'plasma.devices.obs',
-    #     'class': 'ObsRecorder'
-    # }
+    'Pupil Lab IMU': {
+        'module': 'plasma.devices.pupil_labs',
+        'class': 'PupilLabsIMU'
+    },
+    'Pupil Lab Eye Event Blink': {
+        'module': 'plasma.devices.pupil_labs',
+        'class': 'PupilLabsEyeEventBlink'
+    },
+    'ShimmerGSR': {
+        'module': 'plasma.devices.shimmer',
+        'class': 'ShimmerGSR'
+    },
+    'OBS Recorder': {
+        'module': 'plasma.devices.obs',
+        'class': 'ObsRecorder'
+    },
+    'Bitalino': {
+        'module': 'plasma.devices.bitalino',
+        'class': 'PlasmaBitalino'
+    },
 }
 
-# device_table = {
-#     #  'Wristband': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'Camera recorder': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'Eye tracking': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     'MotionSENSE HRV wristband': {
-#         'module': 'plasma.devices.msense',
-#         'class': 'MotionSenseHRV'
-#     },
-#     'Bitalino': {
-#         'module': 'plasma.devices.bitalino',
-#         'class': 'PlasmaBitalino'
-#     },
-#     # 'Skin conductance': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'LiDAR': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # },
-#     # 'Camera Recorder 2': {
-#     #     'module': 'plasma.devices.template',
-#     #     'class': 'PlasmaDemoDevice'
-#     # }
-# }
-
-MSENSE_DEV = {
-    # "MSense Left 74N": "D3:54:EB:A4:9B:82",
-    # "Msense Right 70N": "FF:7D:06:B4:51:98",
-    "MSense Left 01S": "2104F8E3-D94A-1DF7-691E-9491AE431DC1", 
-    "MSense Right 4BH100": "51972CC5-950C-43EA-4E18-163275824EFE",
-}
+_DEVICE_CONFIG_FILE = "plasma_device_config.json"
 
 _DEFAULTS = {
     "enabled_devices": list(DEVICE_CATALOG.keys()),
@@ -84,25 +48,6 @@ _DEFAULTS = {
 }
 
 _MSENSE_COLUMNS = ["Name", "UUID / MAC Address", "Enabled"]
-
-
-def _normalize_msense(raw):
-    """Accepts either the legacy {name: uuid} mapping or the current
-    list of {Name, UUID / MAC Address, Enabled} records, and returns
-    the latter — legacy entries default to enabled."""
-    if isinstance(raw, dict):
-        return [{"Name": k, "UUID / MAC Address": v, "Enabled": True} for k, v in raw.items()]
-    if isinstance(raw, list):
-        return [
-            {
-                "Name": rec.get("Name", ""),
-                "UUID / MAC Address": rec.get("UUID / MAC Address", ""),
-                "Enabled": bool(rec.get("Enabled", True)),
-            }
-            for rec in raw
-        ]
-    return []
-
 
 
 def _normalize_msense(raw):
