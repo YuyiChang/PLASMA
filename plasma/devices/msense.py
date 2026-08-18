@@ -17,10 +17,14 @@ class MotionSenseHRV(PlasmaDevice):
         super().__init__(session_info, logger, tag)
 
         self.device_list = device_config.get_active_msense_devices()
+        self.imu_stream_devices = device_config.get_imu_stream_devices()
 
         self.memo = {}
         for k in self.device_list.keys():
-            self.memo[k] = PlasmaMemo(k, channels=["ENMO", "counter"])
+            channels = ["ENMO", "counter"]
+            if k in self.imu_stream_devices:
+                channels += ["AccX", "AccY", "AccZ", "Q0", "Q1", "Q2", "Q3"]
+            self.memo[k] = PlasmaMemo(k, channels=channels)
 
         # fallback reference in case data arrives before start() is clicked;
         # start() resets this to the true session-start time
@@ -165,7 +169,13 @@ class MotionSenseHRV(PlasmaDevice):
 
         self.register_enmo(peripheral, name)
 
-        # 
+        if name in self.imu_stream_devices:
+            try:
+                self.register_imu_stream(peripheral, name)
+            except Exception as e:
+                self.info(f"IMU stream unavailable on {name} (demo firmware not present?): {e}")
+
+        #
         # if start and self.auto_reconnect:
         #     self.start_device_monitor()
         # elif not start:
@@ -197,6 +207,30 @@ class MotionSenseHRV(PlasmaDevice):
         elapsed = time.time() - self.t_start
         self.memo[name].set_data("ENMO", ENMO[0], elapsed)
         self.memo[name].set_data("counter", packet_counter[0], elapsed)
+
+    # demo feature: real-time accel + orientation, only on wristbands with the
+    # demo firmware (see data/IMU_STREAM_BLE_CHARACTERISTIC.md)
+    def register_imu_stream(self, peripheral, name):
+        service_uuid = "da39c950-1d81-48e2-9c68-d0ae4bbd351f"
+        characteristic_uuid = "da39c953-1d81-48e2-9c68-d0ae4bbd351f"
+        peripheral.notify(service_uuid, characteristic_uuid, lambda data: self.imu_stream_handler(data, peripheral, name))
+
+    def imu_stream_handler(self, data, peripheral, name):
+        # ±4g default sensitivity divisor; see IMU_STREAM_BLE_CHARACTERISTIC.md
+        ACCEL_DIVISOR = 8192
+        acc_x, acc_y, acc_z, q0, q1, q2, counter = struct.unpack("<hhhfffH", data)
+
+        q3_sq = 1.0 - q0 * q0 - q1 * q1 - q2 * q2
+        q3 = q3_sq ** 0.5 if q3_sq > 0 else 0.0
+
+        elapsed = time.time() - self.t_start
+        self.memo[name].set_data("AccX", acc_x / ACCEL_DIVISOR, elapsed)
+        self.memo[name].set_data("AccY", acc_y / ACCEL_DIVISOR, elapsed)
+        self.memo[name].set_data("AccZ", acc_z / ACCEL_DIVISOR, elapsed)
+        self.memo[name].set_data("Q0", q0, elapsed)
+        self.memo[name].set_data("Q1", q1, elapsed)
+        self.memo[name].set_data("Q2", q2, elapsed)
+        self.memo[name].set_data("Q3", q3, elapsed)
 
 
 class MsenseOutlet(StreamOutlet):

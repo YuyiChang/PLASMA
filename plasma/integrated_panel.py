@@ -13,6 +13,18 @@ from plotly.subplots import make_subplots
 
 VISUALIZER_PLOT_ELEM_ID = "plasma-visualizer-plot"
 
+# Related scalar channels sharing one subplot instead of one row each.
+# Channels not listed here fall back to being their own singleton group.
+CHANNEL_GROUPS = {
+    "Accel (g)": ["AccX", "AccY", "AccZ"],
+    "Quaternion": ["Q0", "Q1", "Q2", "Q3"],
+}
+_CHANNEL_TO_GROUP = {ch: label for label, chs in CHANNEL_GROUPS.items() for ch in chs}
+
+
+def _group_for_channel(ch):
+    return _CHANNEL_TO_GROUP.get(ch, ch)
+
 class IntegratedPanel():
     def __init__(self):
         self.device_list = list(device_config.get_active_table().keys())
@@ -66,7 +78,8 @@ class IntegratedPanel():
         for dev in self.available_devices:
             for name, memo in dev.get_sources().items():
                 if memo.channels:
-                    label = name if name == dev.tag else f"{dev.tag} · {name}"
+                    # label = name if name == dev.tag else f"{dev.tag} · {name}"
+                    label = name
                     sources[label] = memo
         return sources
 
@@ -76,21 +89,22 @@ class IntegratedPanel():
 
     def refresh_channels(self, selected_sources):
         sources = self.get_visual_sources()
-        channels = []
+        groups = []
         for name in selected_sources or []:
             memo = sources.get(name)
             if memo is None:
                 continue
             for ch in memo.channels:
-                if ch not in channels:
-                    channels.append(ch)
-        return gr.CheckboxGroup(choices=channels, value=channels)
+                g = _group_for_channel(ch)
+                if g not in groups:
+                    groups.append(g)
+        return gr.CheckboxGroup(choices=groups, value=groups)
 
-    def update_plot(self, selected_sources, selected_channels):
+    def update_plot(self, selected_sources, selected_groups):
         sources = self.get_visual_sources()
-        channels = selected_channels or []
+        groups = selected_groups or []
 
-        if not channels or not selected_sources:
+        if not groups or not selected_sources:
             fig = go.Figure()
             fig.update_layout(
                 title="Select a data source and channel(s) to visualize",
@@ -99,20 +113,28 @@ class IntegratedPanel():
             )
             return fig
 
-        fig = make_subplots(rows=len(channels), cols=1, shared_xaxes=True, subplot_titles=channels, vertical_spacing=0.08)
+        fig = make_subplots(rows=len(groups), cols=1, shared_xaxes=True, vertical_spacing=0.015)
 
-        for row, ch in enumerate(channels, start=1):
-            for src_name in selected_sources:
-                memo = sources.get(src_name)
-                if memo is None or ch not in memo.channels:
-                    continue
-                x, y = memo.get_series(ch)
-                fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=f"{src_name} · {ch}"), row=row, col=1)
-            fig.update_xaxes(title_text="Time since session start (s)", row=row, col=1)
+        for row, group in enumerate(groups, start=1):
+            for ch in CHANNEL_GROUPS.get(group, [group]):
+                for src_name in selected_sources:
+                    memo = sources.get(src_name)
+                    if memo is None or ch not in memo.channels:
+                        continue
+                    x, y = memo.get_series(ch)
+                    fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=f"{src_name} · {ch}"), row=row, col=1)
+
+            fig.update_yaxes(title_text=group, title_standoff=4, row=row, col=1)
+            # only the bottom-most subplot needs an x-axis title/tick labels;
+            # the rest just waste vertical space repeating the same axis
+            if row == len(groups):
+                fig.update_xaxes(title_text="Time since session start (s)", row=row, col=1)
+            else:
+                fig.update_xaxes(showticklabels=False, row=row, col=1)
 
         fig.update_layout(
-            height=max(250 * len(channels), 250),
-            margin=dict(l=40, r=20, t=40, b=30),
+            height=max(150 * len(groups), 200),
+            margin=dict(l=50, r=20, t=10, b=30),
             showlegend=True,
             uirevision="plasma-visualizer",
         )

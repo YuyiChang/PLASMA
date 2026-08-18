@@ -47,21 +47,23 @@ _DEFAULTS = {
     "ip_pupil_labs": "",
 }
 
-_MSENSE_COLUMNS = ["Name", "UUID / MAC Address", "Enabled"]
+_MSENSE_COLUMNS = ["Name", "UUID / MAC Address", "Enabled", "IMU Stream"]
 
 
 def _normalize_msense(raw):
     """Accepts either the legacy {name: uuid} mapping or the current
-    list of {Name, UUID / MAC Address, Enabled} records, and returns
-    the latter — legacy entries default to enabled."""
+    list of {Name, UUID / MAC Address, Enabled, IMU Stream} records, and
+    returns the latter — legacy entries default to enabled, IMU Stream
+    defaults to off since it's demo firmware not every wristband has."""
     if isinstance(raw, dict):
-        return [{"Name": k, "UUID / MAC Address": v, "Enabled": True} for k, v in raw.items()]
+        return [{"Name": k, "UUID / MAC Address": v, "Enabled": True, "IMU Stream": False} for k, v in raw.items()]
     if isinstance(raw, list):
         return [
             {
                 "Name": rec.get("Name", ""),
                 "UUID / MAC Address": rec.get("UUID / MAC Address", ""),
                 "Enabled": bool(rec.get("Enabled", True)),
+                "IMU Stream": bool(rec.get("IMU Stream", False)),
             }
             for rec in raw
         ]
@@ -121,6 +123,14 @@ class DeviceConfig:
             if rec.get("Enabled", True) and str(rec.get("Name", "")).strip() and str(rec.get("UUID / MAC Address", "")).strip()
         }
 
+    def get_imu_stream_devices(self):
+        """Names of MSense wristbands with the demo IMU-stream characteristic enabled."""
+        return {
+            rec["Name"]
+            for rec in self.msense_devices
+            if rec.get("Enabled", True) and rec.get("IMU Stream", False) and str(rec.get("Name", "")).strip()
+        }
+
     # ── UI callbacks ──────────────────────────────────────────────────────────
 
     @staticmethod
@@ -130,6 +140,7 @@ class DeviceConfig:
                 "Name": row["Name"],
                 "UUID / MAC Address": row["UUID / MAC Address"],
                 "Enabled": bool(row["Enabled"]) if pd.notna(row.get("Enabled", True)) else True,
+                "IMU Stream": bool(row["IMU Stream"]) if pd.notna(row.get("IMU Stream", False)) else False,
             }
             for _, row in msense_df.iterrows()
             if str(row["Name"]).strip() and str(row["UUID / MAC Address"]).strip()
@@ -194,13 +205,17 @@ class DeviceConfig:
                 )
 
             with gr.Accordion("MSense wristbands", open=True):
-                gr.Markdown("Name–UUID pairs for BLE wristband discovery and connection. Uncheck Enabled to skip connecting to a wristband without removing it from the list.")
+                gr.Markdown(
+                    "Name–UUID pairs for BLE wristband discovery and connection. Uncheck Enabled to skip "
+                    "connecting to a wristband without removing it from the list. IMU Stream is demo firmware "
+                    "not every wristband has — only check it for units known to support it."
+                )
                 msense_df = gr.Dataframe(
                     value=pd.DataFrame(self.msense_devices, columns=_MSENSE_COLUMNS),
                     headers=_MSENSE_COLUMNS,
-                    datatype=["str", "str", "bool"],
+                    datatype=["str", "str", "bool", "bool"],
                     row_count=(len(self.msense_devices), "dynamic"),
-                    col_count=(3, "fixed"),
+                    col_count=(4, "fixed"),
                     interactive=True,
                 )
 
