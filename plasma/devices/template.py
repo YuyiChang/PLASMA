@@ -41,6 +41,11 @@ class PlasmaMemo():
         xs, ys = zip(*buf)
         return list(xs), list(ys)
 
+    def get_latest(self, channel):
+        """Returns the most recent (t, value) for a channel, or None if empty."""
+        buf = self.channels.get(channel)
+        return buf[-1] if buf else None
+
 
 class PlasmaDevice:
     def __init__(self, session_info, logger=None, tag=None):
@@ -62,6 +67,22 @@ class PlasmaDevice:
         if isinstance(self.memo, dict):
             return self.memo
         return {self.tag: self.memo}
+
+    def reset_orientation(self):
+        """No-op by default; devices that compose a running orientation
+        estimate (e.g. MSense IMU stream) override this."""
+        pass
+
+    def start_gyro_calibration(self, duration=3.0):
+        """No-op by default; devices with a gyro-bias-correctable orientation
+        estimate (e.g. MSense IMU stream) override this."""
+        pass
+
+    def disconnect(self):
+        """No-op by default; devices holding an external connection (e.g.
+        MSense BLE peripherals) override this to tear it down before the
+        instance is discarded on re-initialization."""
+        pass
 
     def info(self, msg):
         if self.logger is None:

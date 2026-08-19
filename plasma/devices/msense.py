@@ -9,6 +9,8 @@ from pylsl import StreamInfo, StreamOutlet, cf_double64
 import numpy as np
 import struct
 from plasma.config import __data_dir__, __version__, device_config
+from plasma.quaternion import IDENTITY_QUAT, quat_multiply, quat_normalize
+from plasma.gyro_bias import load_gyro_bias, save_gyro_bias
 
 yams_dir = __data_dir__
 
@@ -19,11 +21,18 @@ class MotionSenseHRV(PlasmaDevice):
         self.device_list = device_config.get_active_msense_devices()
         self.imu_stream_devices = device_config.get_imu_stream_devices()
 
+        bias_by_addr = load_gyro_bias()
+
         self.memo = {}
-        for k in self.device_list.keys():
+        self.orientation_quat = {}
+        self.gyro_bias = {}
+        self.gyro_calib = {}
+        for k, addr in self.device_list.items():
             channels = ["ENMO", "counter"]
             if k in self.imu_stream_devices:
-                channels += ["AccX", "AccY", "AccZ", "Q0", "Q1", "Q2", "Q3"]
+                channels += ["AccX", "AccY", "AccZ", "Q0", "Q1", "Q2", "Q3", "OrientX", "OrientY", "OrientZ", "OrientW"]
+                self.orientation_quat[k] = IDENTITY_QUAT
+                self.gyro_bias[k] = bias_by_addr.get(addr, (0.0, 0.0, 0.0))
             self.memo[k] = PlasmaMemo(k, channels=channels)
 
         # fallback reference in case data arrives before start() is clicked;
@@ -121,6 +130,7 @@ class MotionSenseHRV(PlasmaDevice):
 
         gr.Info("▶️ Start data collection...")
         self.t_start = time.time()
+        self.reset_orientation()
         self.info(f"Start data collection with out dir = {self.log_dir}")
         self.info(f"Subject ID = {self.session_info['sub_id']}")
         self.info(f"Session ID = {self.session_info['ses_id']}")
@@ -147,7 +157,41 @@ class MotionSenseHRV(PlasmaDevice):
 
         for m in self.memo.values():
             m.sts = "🛑"
-    
+
+    def reset_orientation(self):
+        for name in self.orientation_quat:
+            self.orientation_quat[name] = IDENTITY_QUAT
+
+    def disconnect(self):
+        for name, p in list(self.active_devices.items()):
+            try:
+                if p.is_connected():
+                    p.disconnect()
+            except Exception as e:
+                self.info(f"Error disconnecting {name}: {e}")
+        self.active_devices = {}
+        self.active_outlets = {}
+
+    def start_gyro_calibration(self, duration=3.0):
+        now = time.time()
+        for name in self.imu_stream_devices:
+            if name in self.active_devices:
+                self.gyro_calib[name] = {"until": now + duration, "sum": [0.0, 0.0, 0.0], "n": 0}
+                self.memo[name].sts = "🎯 Calibrating..."
+                self.info(f"Started gyro bias calibration for {name} ({duration}s) — keep the wristband still")
+
+    def _finish_gyro_calibration(self, name):
+        calib = self.gyro_calib.pop(name, None)
+        if calib is None or calib["n"] == 0:
+            return
+        bias = tuple(s / calib["n"] for s in calib["sum"])
+        self.gyro_bias[name] = bias
+        addr = self.device_list.get(name)
+        if addr:
+            save_gyro_bias(addr, bias, calib["n"])
+        self.memo[name].sts = "✅ Bias saved"
+        self.info(f"Gyro bias calibrated for {name}: {bias} (n={calib['n']})")
+
     def collection_ctl(self, name, start=True):
         peripheral = self.active_devices[name]
 
@@ -223,6 +267,35 @@ class MotionSenseHRV(PlasmaDevice):
         q3_sq = 1.0 - q0 * q0 - q1 * q1 - q2 * q2
         q3 = q3_sq ** 0.5 if q3_sq > 0 else 0.0
 
+        # gyro bias calibration: accumulate the *raw* per-frame vector part
+        # while stationary — see start_gyro_calibration/_finish_gyro_calibration
+        calib = self.gyro_calib.get(name)
+        if calib is not None:
+            if time.time() < calib["until"]:
+                calib["sum"][0] += q0
+                calib["sum"][1] += q1
+                calib["sum"][2] += q2
+                calib["n"] += 1
+            else:
+                self._finish_gyro_calibration(name)
+
+        # subtract the calibrated bias (small-angle approx: bias lives in the
+        # same near-identity vector-part space as the delta itself), then
+        # re-derive the scalar term the same way the raw q3 was reconstructed
+        bx, by, bz = self.gyro_bias.get(name, (0.0, 0.0, 0.0))
+        cx, cy, cz = q0 - bx, q1 - by, q2 - bz
+        cw_sq = 1.0 - cx * cx - cy * cy - cz * cz
+        cw = cw_sq ** 0.5 if cw_sq > 0 else 0.0
+
+        # per-frame delta rotation (x, y, z, w); NOT absolute orientation —
+        # composed below into a running estimate since the last reset
+        # (see data/IMU_STREAM_BLE_CHARACTERISTIC.md)
+        delta = (cx, cy, cz, cw)
+        prev = self.orientation_quat.get(name, IDENTITY_QUAT)
+        composed = quat_normalize(quat_multiply(prev, delta))
+        self.orientation_quat[name] = composed
+        ox, oy, oz, ow = composed
+
         elapsed = time.time() - self.t_start
         self.memo[name].set_data("AccX", acc_x / ACCEL_DIVISOR, elapsed)
         self.memo[name].set_data("AccY", acc_y / ACCEL_DIVISOR, elapsed)
@@ -231,6 +304,10 @@ class MotionSenseHRV(PlasmaDevice):
         self.memo[name].set_data("Q1", q1, elapsed)
         self.memo[name].set_data("Q2", q2, elapsed)
         self.memo[name].set_data("Q3", q3, elapsed)
+        self.memo[name].set_data("OrientX", ox, elapsed)
+        self.memo[name].set_data("OrientY", oy, elapsed)
+        self.memo[name].set_data("OrientZ", oz, elapsed)
+        self.memo[name].set_data("OrientW", ow, elapsed)
 
 
 class MsenseOutlet(StreamOutlet):

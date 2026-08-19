@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from plasma.quaternion import quat_to_axes
 
 VISUALIZER_PLOT_ELEM_ID = "plasma-visualizer-plot"
 
@@ -17,13 +18,45 @@ VISUALIZER_PLOT_ELEM_ID = "plasma-visualizer-plot"
 # Channels not listed here fall back to being their own singleton group.
 CHANNEL_GROUPS = {
     "Accel (g)": ["AccX", "AccY", "AccZ"],
-    "Quaternion": ["Q0", "Q1", "Q2", "Q3"],
+    "Quaternion Δ (per-frame)": ["Q0", "Q1", "Q2", "Q3"],
+    "Orientation (composed)": ["OrientX", "OrientY", "OrientZ", "OrientW"],
 }
 _CHANNEL_TO_GROUP = {ch: label for label, chs in CHANNEL_GROUPS.items() for ch in chs}
+
+# Unit box (half-extents in local/body frame) drawn inside the orientation
+# indicator so rotation about any axis is visually obvious, not just the
+# 3 axis lines. Flattened/elongated like a wristband rather than a cube.
+_BOX_HALF_EXTENTS = (0.4, 0.22, 0.1)
+_BOX_X_FLAGS = [0, 0, 1, 1, 0, 0, 1, 1]
+_BOX_Y_FLAGS = [0, 1, 1, 0, 0, 1, 1, 0]
+_BOX_Z_FLAGS = [0, 0, 0, 0, 1, 1, 1, 1]
+_BOX_I = [7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2]
+_BOX_J = [3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3]
+_BOX_K = [0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6]
+_BOX_LOCAL_VERTS = [
+    (
+        _BOX_HALF_EXTENTS[0] if xf else -_BOX_HALF_EXTENTS[0],
+        _BOX_HALF_EXTENTS[1] if yf else -_BOX_HALF_EXTENTS[1],
+        _BOX_HALF_EXTENTS[2] if zf else -_BOX_HALF_EXTENTS[2],
+    )
+    for xf, yf, zf in zip(_BOX_X_FLAGS, _BOX_Y_FLAGS, _BOX_Z_FLAGS)
+]
 
 
 def _group_for_channel(ch):
     return _CHANNEL_TO_GROUP.get(ch, ch)
+
+
+def _rotate_point(p, axes):
+    """Rotate local-frame point p=(px,py,pz) using the 3 rotated basis
+    vectors returned by quat_to_axes (its columns are the rotation matrix)."""
+    px, py, pz = p
+    ax, ay, az = axes
+    return (
+        px * ax[0] + py * ay[0] + pz * az[0],
+        px * ax[1] + py * ay[1] + pz * az[1],
+        px * ax[2] + py * ay[2] + pz * az[2],
+    )
 
 class IntegratedPanel():
     def __init__(self):
@@ -49,10 +82,20 @@ class IntegratedPanel():
 
             with gr.Row():
                 btn_refresh_sources = gr.Button("🔄 Refresh sources")
+                btn_reset_orientation = gr.Button("↺ Reset orientation")
+                calib_duration = gr.Number(value=3, minimum=1, precision=0, label="Calibration duration (s)", scale=0)
+                btn_calibrate_gyro = gr.Button("🎯 Calibrate gyro bias")
                 btn_fullscreen = gr.Button("⛶ Fullscreen")
 
             with gr.Column(elem_id=VISUALIZER_PLOT_ELEM_ID):
                 plot = gr.Plot(show_label=False)
+                orientation_plot = gr.Plot(show_label=False, visible=False)
+                gr.Markdown(
+                    "*Orientation is a gyro-only dead-reckoning estimate composed from per-frame deltas since the "
+                    "last Start/Reset — there's no accelerometer/magnetometer correction, so it will drift over "
+                    "time. Use Reset orientation to re-zero it. Calibrate gyro bias with the wristband(s) held "
+                    "still — the bias is saved to disk and reapplied automatically on future launches.*"
+                )
 
             timer = gr.Timer(value=0.2, active=True)
 
@@ -62,7 +105,10 @@ class IntegratedPanel():
                 self.refresh_channels, inputs=source_select, outputs=channel_select
             )
             source_select.change(self.refresh_channels, inputs=source_select, outputs=channel_select)
+            btn_reset_orientation.click(self.reset_orientation_all)
+            btn_calibrate_gyro.click(self.calibrate_gyro_all, inputs=calib_duration)
             timer.tick(fn=self.update_plot, inputs=[source_select, channel_select], outputs=plot)
+            timer.tick(fn=self.update_orientation, inputs=[source_select, channel_select], outputs=orientation_plot)
             btn_fullscreen.click(
                 None, None, None,
                 js=f"""() => {{
@@ -140,6 +186,89 @@ class IntegratedPanel():
         )
         return fig
 
+    def update_orientation(self, selected_sources, selected_groups):
+        sources = self.get_visual_sources()
+        quat_sources = []
+        if "Orientation (composed)" in (selected_groups or []):
+            for src_name in selected_sources or []:
+                memo = sources.get(src_name)
+                if memo is None:
+                    continue
+                latest = [memo.get_latest(ch) for ch in ("OrientX", "OrientY", "OrientZ", "OrientW")]
+                if all(v is not None for v in latest):
+                    quat_sources.append((src_name, tuple(v[1] for v in latest)))
+
+        if not quat_sources:
+            return gr.update(visible=False)
+
+        n = len(quat_sources)
+        fig = make_subplots(
+            rows=1, cols=n,
+            specs=[[{"type": "scene"}] * n],
+            subplot_titles=[name for name, _ in quat_sources],
+            horizontal_spacing=0.02,
+        )
+
+        axis_colors = {"X": "red", "Y": "green", "Z": "blue"}
+        for col, (src_name, q) in enumerate(quat_sources, start=1):
+            axes = quat_to_axes(q)
+            for label, vec in zip(("X", "Y", "Z"), axes):
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=[0, vec[0]], y=[0, vec[1]], z=[0, vec[2]],
+                        mode="lines",
+                        line=dict(color=axis_colors[label], width=6),
+                        name=label,
+                        legendgroup=label,
+                        showlegend=(col == 1),
+                    ),
+                    row=1, col=col,
+                )
+
+            box_verts = [_rotate_point(p, axes) for p in _BOX_LOCAL_VERTS]
+            fig.add_trace(
+                go.Mesh3d(
+                    x=[v[0] for v in box_verts],
+                    y=[v[1] for v in box_verts],
+                    z=[v[2] for v in box_verts],
+                    i=_BOX_I, j=_BOX_J, k=_BOX_K,
+                    color="lightslategray",
+                    opacity=0.5,
+                    flatshading=True,
+                    name="orientation",
+                    showlegend=False,
+                    hoverinfo="skip",
+                ),
+                row=1, col=col,
+            )
+
+            scene_key = "scene" if col == 1 else f"scene{col}"
+            fig.update_layout(**{
+                scene_key: dict(
+                    xaxis=dict(range=[-1, 1], visible=False),
+                    yaxis=dict(range=[-1, 1], visible=False),
+                    zaxis=dict(range=[-1, 1], visible=False),
+                    aspectmode="cube",
+                )
+            })
+
+        fig.update_layout(
+            height=220,
+            margin=dict(l=0, r=0, t=20, b=0),
+            showlegend=True,
+            uirevision="plasma-orientation",
+        )
+        return gr.update(value=fig, visible=True)
+
+    def reset_orientation_all(self):
+        for dev in self.available_devices:
+            dev.reset_orientation()
+
+    def calibrate_gyro_all(self, duration):
+        for dev in self.available_devices:
+            dev.start_gyro_calibration(duration)
+        gr.Info(f"Calibrating gyro bias for {duration}s — keep wristband(s) still")
+
     def interface(self):
         with gr.Row():
             with gr.Column():
@@ -192,6 +321,16 @@ class IntegratedPanel():
         return gr.CheckboxGroup(choices=active, value=active)
 
     def init_devices(self, selected_devices):
+        for dev in self.available_devices:
+            try:
+                dev.stop()
+            except Exception as e:
+                self.logger.info(f"Error stopping previous device before reinit: {e}")
+            try:
+                dev.disconnect()
+            except Exception as e:
+                self.logger.info(f"Error disconnecting previous device before reinit: {e}")
+
         self.available_devices = []
         active_table = device_config.get_active_table()
         for dev in selected_devices:
