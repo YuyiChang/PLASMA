@@ -346,12 +346,18 @@ class IntegratedPanel():
 
     def start_collection(self):
         for dev in self.available_devices:
-            dev.start()
+            try:
+                dev.start()
+            except Exception as e:
+                self.logger.info(f"Error starting device {dev.tag}: {e}")
         self.sts = "Collection in progress"
 
     def stop_collection(self):
         for dev in self.available_devices:
-            dev.stop()
+            try:
+                dev.stop()
+            except Exception as e:
+                self.logger.info(f"Error stopping device {dev.tag}: {e}")
         self.sts = "Collection stopped"
 
     def update_params(self):

@@ -4,6 +4,7 @@ import datetime
 import os
 import logging
 import gradio as gr
+import threading
 import time
 from pylsl import StreamInfo, StreamOutlet, cf_double64
 import numpy as np
@@ -27,6 +28,10 @@ class MotionSenseHRV(PlasmaDevice):
         self.orientation_quat = {}
         self.gyro_bias = {}
         self.gyro_calib = {}
+        # guards orientation_quat/gyro_calib/gyro_bias, mutated from both the
+        # Gradio/main thread (start/stop/reset/calibrate) and the BLE notify
+        # callback thread (imu_stream_handler)
+        self._state_lock = threading.Lock()
         for k, addr in self.device_list.items():
             channels = ["ENMO", "counter"]
             if k in self.imu_stream_devices:
@@ -102,16 +107,30 @@ class MotionSenseHRV(PlasmaDevice):
                 dev = self.devices[addr]
                 p = dev['pheripheral']
                 n = dev['name']
-                
+
                 self.info(f"Starting to connect to {n}")
                 # gr.Info(f"Connecting to devices: {n}")
                 print(f'==== {n}')
                 print(f"=== {p.identifier()} at {p.address()}")
-                p.set_callback_on_connected(lambda: self.info(f"{n} {p.identifier()} is connected"))
-                p.set_callback_on_disconnected(lambda: self.info(f"{n} {p.identifier()} is disconnected"))
-                p.connect()
-                self.active_devices[name] = p
-                self.active_outlets[name] = MsenseOutlet(n, p)
+                try:
+                    # bind n/p/name by default arg — otherwise every callback
+                    # closes over the loop variable and fires with whichever
+                    # device happened to be last when the loop finished
+                    p.set_callback_on_connected(lambda n=n, p=p: self.info(f"{n} {p.identifier()} is connected"))
+                    p.set_callback_on_disconnected(lambda nm=name: self._on_unexpected_disconnect(nm))
+                    p.connect()
+                    self.active_devices[name] = p
+                    self.active_outlets[name] = MsenseOutlet(n, p)
+                except Exception as e:
+                    self.info(f"Error connecting to {n}: {e}")
+                    self.memo[name].sts = "⛔ connect failed"
+                    self.active_devices.pop(name, None)
+                    self.active_outlets.pop(name, None)
+                    try:
+                        if p.is_connected():
+                            p.disconnect()
+                    except Exception:
+                        pass
             else:
                 self.memo[name].sts = "⛔ device not found"
 
@@ -136,31 +155,44 @@ class MotionSenseHRV(PlasmaDevice):
         self.info(f"Session ID = {self.session_info['ses_id']}")
         self.info(f"Participant encoding = {self.session_info['participant_enc']}")
 
-        for name, p in self.active_devices.items():
+        for name, p in list(self.active_devices.items()):
             print(name, p.is_connected(), p.is_connectable())
-            self.collection_ctl(name, True)
-            self.active_outlets[name].log_dir = self.log_dir
+            try:
+                self.collection_ctl(name, True)
+                self.active_outlets[name].log_dir = self.log_dir
+                self.memo[name].sts = "🟢"
+            except Exception as e:
+                self.info(f"Error starting {name}: {e}")
+                self.memo[name].sts = "⚠️ start failed"
 
         self.ctl_state = "Collection in progress"
-
-        for m in self.memo.values():
-            m.sts = "🟢"
 
     def stop(self):
         gr.Info("🛑 Stop data collection...")
         self.info("Data collection stopped")
-        for name, p in self.active_devices.items():
+        for name, p in list(self.active_devices.items()):
             print(name, p.is_connected(), p.is_connectable())
-            self.collection_ctl(name, False)
+            try:
+                self.collection_ctl(name, False)
+                self.memo[name].sts = "🛑"
+            except Exception as e:
+                self.info(f"Error stopping {name}: {e}")
+                self.memo[name].sts = "⚠️ stop failed"
 
         self.ctl_state = "Collection stopped"
 
-        for m in self.memo.values():
-            m.sts = "🛑"
-
     def reset_orientation(self):
-        for name in self.orientation_quat:
-            self.orientation_quat[name] = IDENTITY_QUAT
+        with self._state_lock:
+            for name in self.orientation_quat:
+                self.orientation_quat[name] = IDENTITY_QUAT
+
+    def _on_unexpected_disconnect(self, name):
+        """Fired by simplepyble when a wristband drops BLE on its own
+        (out of range, battery) — without this the UI never reflected an
+        in-session disconnect until the next Stop press."""
+        self.info(f"{name} disconnected unexpectedly")
+        if name in self.memo:
+            self.memo[name].sts = "🔌 disconnected"
 
     def disconnect(self):
         for name, p in list(self.active_devices.items()):
@@ -176,16 +208,18 @@ class MotionSenseHRV(PlasmaDevice):
         now = time.time()
         for name in self.imu_stream_devices:
             if name in self.active_devices:
-                self.gyro_calib[name] = {"until": now + duration, "sum": [0.0, 0.0, 0.0], "n": 0}
+                with self._state_lock:
+                    self.gyro_calib[name] = {"until": now + duration, "sum": [0.0, 0.0, 0.0], "n": 0}
                 self.memo[name].sts = "🎯 Calibrating..."
                 self.info(f"Started gyro bias calibration for {name} ({duration}s) — keep the wristband still")
 
     def _finish_gyro_calibration(self, name):
-        calib = self.gyro_calib.pop(name, None)
-        if calib is None or calib["n"] == 0:
-            return
-        bias = tuple(s / calib["n"] for s in calib["sum"])
-        self.gyro_bias[name] = bias
+        with self._state_lock:
+            calib = self.gyro_calib.pop(name, None)
+            if calib is None or calib["n"] == 0:
+                return
+            bias = tuple(s / calib["n"] for s in calib["sum"])
+            self.gyro_bias[name] = bias
         addr = self.device_list.get(name)
         if addr:
             save_gyro_bias(addr, bias, calib["n"])
@@ -195,29 +229,35 @@ class MotionSenseHRV(PlasmaDevice):
     def collection_ctl(self, name, start=True):
         peripheral = self.active_devices[name]
 
+        if not peripheral.is_connected():
+            raise RuntimeError(f"{name} is not connected (BLE link dropped)")
+
         # if starting, do the initialization
         if start:
             # write unix time
-            peripheral.write_request("da39c930-1d81-48e2-9c68-d0ae4bbd351f", 
-                                     "da39c932-1d81-48e2-9c68-d0ae4bbd351f", 
+            peripheral.write_request("da39c930-1d81-48e2-9c68-d0ae4bbd351f",
+                                     "da39c932-1d81-48e2-9c68-d0ae4bbd351f",
                                      struct.pack("<Q", int(time.time())))
             # write participant hash
             self.participant_byte = struct.pack("<I", self.session_info['participant_enc'])
             peripheral.write_request("da39c930-1d81-48e2-9c68-d0ae4bbd351f",
-                                     "da39c933-1d81-48e2-9c68-d0ae4bbd351f", 
+                                     "da39c933-1d81-48e2-9c68-d0ae4bbd351f",
                                      self.participant_byte)
 
         service_uuid = "da39c930-1d81-48e2-9c68-d0ae4bbd351f"
         characteristic_uuid = "da39c931-1d81-48e2-9c68-d0ae4bbd351f"
         peripheral.write_request(service_uuid, characteristic_uuid, struct.pack("<I", int(start)))
 
-        self.register_enmo(peripheral, name)
+        # only (re-)subscribe on start; stop should just tell the firmware to
+        # stop streaming, not stack another notify callback on top
+        if start:
+            self.register_enmo(peripheral, name)
 
-        if name in self.imu_stream_devices:
-            try:
-                self.register_imu_stream(peripheral, name)
-            except Exception as e:
-                self.info(f"IMU stream unavailable on {name} (demo firmware not present?): {e}")
+            if name in self.imu_stream_devices:
+                try:
+                    self.register_imu_stream(peripheral, name)
+                except Exception as e:
+                    self.info(f"IMU stream unavailable on {name} (demo firmware not present?): {e}")
 
         #
         # if start and self.auto_reconnect:
@@ -234,23 +274,27 @@ class MotionSenseHRV(PlasmaDevice):
 
 
     def enmo_handler(self, data, peripheral, name):
-        # print(peripheral.identifier(), data)
-        ENMO = struct.unpack("<f", data[0:4])
+        # runs on the BLE library's callback thread — never let an exception
+        # escape here, it would otherwise silently kill notifications for
+        # this device with no visible status change
+        try:
+            ENMO = struct.unpack("<f", data[0:4])
 
-        if len(data) == 8:
-            packet_counter = struct.unpack("<I", data[4:8])
-        elif len(data) == 6:
-            packet_counter = struct.unpack("<H", data[4:6])
-        
-        horizontal_array = [ENMO[0], packet_counter[0]]
-        # print(f"{name}: package counter", horizontal_array)
+            if len(data) == 8:
+                packet_counter = struct.unpack("<I", data[4:8])
+            elif len(data) == 6:
+                packet_counter = struct.unpack("<H", data[4:6])
+            else:
+                self.info(f"Unexpected ENMO packet length {len(data)} from {name}, dropping")
+                return
 
-        self.active_outlets[name].push_sample([ENMO[0], packet_counter[0]])
-        # print(f"{ENMO[0]} {packet_counter[0]}", self.memo.keys(), name)
-        self.memo[name].set_latest(f"{ENMO[0]} {packet_counter[0]}")
-        elapsed = time.time() - self.t_start
-        self.memo[name].set_data("ENMO", ENMO[0], elapsed)
-        self.memo[name].set_data("counter", packet_counter[0], elapsed)
+            self.active_outlets[name].push_sample([ENMO[0], packet_counter[0]])
+            self.memo[name].set_latest(f"{ENMO[0]} {packet_counter[0]}")
+            elapsed = time.time() - self.t_start
+            self.memo[name].set_data("ENMO", ENMO[0], elapsed)
+            self.memo[name].set_data("counter", packet_counter[0], elapsed)
+        except Exception as e:
+            self.info(f"Error handling ENMO packet from {name}: {e}")
 
     # demo feature: real-time accel + orientation, only on wristbands with the
     # demo firmware (see data/IMU_STREAM_BLE_CHARACTERISTIC.md)
@@ -260,54 +304,62 @@ class MotionSenseHRV(PlasmaDevice):
         peripheral.notify(service_uuid, characteristic_uuid, lambda data: self.imu_stream_handler(data, peripheral, name))
 
     def imu_stream_handler(self, data, peripheral, name):
-        # ±4g default sensitivity divisor; see IMU_STREAM_BLE_CHARACTERISTIC.md
-        ACCEL_DIVISOR = 8192
-        acc_x, acc_y, acc_z, q0, q1, q2, counter = struct.unpack("<hhhfffH", data)
+        # runs on the BLE library's callback thread — never let an exception
+        # escape here, it would otherwise silently kill notifications for
+        # this device with no visible status change
+        try:
+            # ±4g default sensitivity divisor; see IMU_STREAM_BLE_CHARACTERISTIC.md
+            ACCEL_DIVISOR = 8192
+            acc_x, acc_y, acc_z, q0, q1, q2, counter = struct.unpack("<hhhfffH", data)
 
-        q3_sq = 1.0 - q0 * q0 - q1 * q1 - q2 * q2
-        q3 = q3_sq ** 0.5 if q3_sq > 0 else 0.0
+            q3_sq = 1.0 - q0 * q0 - q1 * q1 - q2 * q2
+            q3 = q3_sq ** 0.5 if q3_sq > 0 else 0.0
 
-        # gyro bias calibration: accumulate the *raw* per-frame vector part
-        # while stationary — see start_gyro_calibration/_finish_gyro_calibration
-        calib = self.gyro_calib.get(name)
-        if calib is not None:
-            if time.time() < calib["until"]:
-                calib["sum"][0] += q0
-                calib["sum"][1] += q1
-                calib["sum"][2] += q2
-                calib["n"] += 1
-            else:
-                self._finish_gyro_calibration(name)
+            # gyro bias calibration: accumulate the *raw* per-frame vector part
+            # while stationary — see start_gyro_calibration/_finish_gyro_calibration
+            calib = self.gyro_calib.get(name)
+            if calib is not None:
+                if time.time() < calib["until"]:
+                    with self._state_lock:
+                        calib["sum"][0] += q0
+                        calib["sum"][1] += q1
+                        calib["sum"][2] += q2
+                        calib["n"] += 1
+                else:
+                    self._finish_gyro_calibration(name)
 
-        # subtract the calibrated bias (small-angle approx: bias lives in the
-        # same near-identity vector-part space as the delta itself), then
-        # re-derive the scalar term the same way the raw q3 was reconstructed
-        bx, by, bz = self.gyro_bias.get(name, (0.0, 0.0, 0.0))
-        cx, cy, cz = q0 - bx, q1 - by, q2 - bz
-        cw_sq = 1.0 - cx * cx - cy * cy - cz * cz
-        cw = cw_sq ** 0.5 if cw_sq > 0 else 0.0
+            # subtract the calibrated bias (small-angle approx: bias lives in the
+            # same near-identity vector-part space as the delta itself), then
+            # re-derive the scalar term the same way the raw q3 was reconstructed
+            bx, by, bz = self.gyro_bias.get(name, (0.0, 0.0, 0.0))
+            cx, cy, cz = q0 - bx, q1 - by, q2 - bz
+            cw_sq = 1.0 - cx * cx - cy * cy - cz * cz
+            cw = cw_sq ** 0.5 if cw_sq > 0 else 0.0
 
-        # per-frame delta rotation (x, y, z, w); NOT absolute orientation —
-        # composed below into a running estimate since the last reset
-        # (see data/IMU_STREAM_BLE_CHARACTERISTIC.md)
-        delta = (cx, cy, cz, cw)
-        prev = self.orientation_quat.get(name, IDENTITY_QUAT)
-        composed = quat_normalize(quat_multiply(prev, delta))
-        self.orientation_quat[name] = composed
-        ox, oy, oz, ow = composed
+            # per-frame delta rotation (x, y, z, w); NOT absolute orientation —
+            # composed below into a running estimate since the last reset
+            # (see data/IMU_STREAM_BLE_CHARACTERISTIC.md)
+            delta = (cx, cy, cz, cw)
+            with self._state_lock:
+                prev = self.orientation_quat.get(name, IDENTITY_QUAT)
+                composed = quat_normalize(quat_multiply(prev, delta))
+                self.orientation_quat[name] = composed
+            ox, oy, oz, ow = composed
 
-        elapsed = time.time() - self.t_start
-        self.memo[name].set_data("AccX", acc_x / ACCEL_DIVISOR, elapsed)
-        self.memo[name].set_data("AccY", acc_y / ACCEL_DIVISOR, elapsed)
-        self.memo[name].set_data("AccZ", acc_z / ACCEL_DIVISOR, elapsed)
-        self.memo[name].set_data("Q0", q0, elapsed)
-        self.memo[name].set_data("Q1", q1, elapsed)
-        self.memo[name].set_data("Q2", q2, elapsed)
-        self.memo[name].set_data("Q3", q3, elapsed)
-        self.memo[name].set_data("OrientX", ox, elapsed)
-        self.memo[name].set_data("OrientY", oy, elapsed)
-        self.memo[name].set_data("OrientZ", oz, elapsed)
-        self.memo[name].set_data("OrientW", ow, elapsed)
+            elapsed = time.time() - self.t_start
+            self.memo[name].set_data("AccX", acc_x / ACCEL_DIVISOR, elapsed)
+            self.memo[name].set_data("AccY", acc_y / ACCEL_DIVISOR, elapsed)
+            self.memo[name].set_data("AccZ", acc_z / ACCEL_DIVISOR, elapsed)
+            self.memo[name].set_data("Q0", q0, elapsed)
+            self.memo[name].set_data("Q1", q1, elapsed)
+            self.memo[name].set_data("Q2", q2, elapsed)
+            self.memo[name].set_data("Q3", q3, elapsed)
+            self.memo[name].set_data("OrientX", ox, elapsed)
+            self.memo[name].set_data("OrientY", oy, elapsed)
+            self.memo[name].set_data("OrientZ", oz, elapsed)
+            self.memo[name].set_data("OrientW", ow, elapsed)
+        except Exception as e:
+            self.info(f"Error handling IMU stream packet from {name}: {e}")
 
 
 class MsenseOutlet(StreamOutlet):
