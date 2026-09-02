@@ -22,6 +22,8 @@ def main():
             ip.interface()
         with gr.Tab("Signal visualizer"):
             ip.visualizer_interface()
+        with gr.Tab("ECG/PPG Signal Quality"):
+            ip.signal_quality_interface()
         with gr.Tab("Configuration"):
             device_config.interface()
         # with gr.Tab("PL"):

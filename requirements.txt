@@ -1,4 +1,6 @@
 numpy
+scipy
+pandas
 matplotlib
 tqdm
 gradio
@@ -9,3 +11,4 @@ pylsl
 simplepyble
 pyserial
 pyshimmer
+obsws-python

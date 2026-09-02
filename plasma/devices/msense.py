@@ -15,6 +15,28 @@ from plasma.gyro_bias import load_gyro_bias, save_gyro_bias
 
 yams_dir = __data_dir__
 
+# --- ECG/PPG signal-quality-check (SQC) snapshot, via Nordic UART Service ---
+# The firmware-side protocol is still provisional — see
+# data/ECG_PPG_SIGNAL_QUALITY_BLE_NUS.md for what's confirmed vs. assumed.
+# UUIDs are the standard NUS ones; everything else below is a best-guess
+# placeholder to update once the firmware side is confirmed.
+NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+NUS_RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # host -> device (write)
+NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # device -> host (notify)
+
+SQC_ECG_FS = 512
+SQC_PPG_FS = 256
+SQC_DURATION_S = 30
+SQC_ECG_N_SAMPLES = SQC_DURATION_S * SQC_ECG_FS      # 15360, 1 channel
+SQC_PPG_N_VALUES = SQC_DURATION_S * SQC_PPG_FS * 2   # 15360 raw values
+SQC_PPG_N_CHANNELS = 2                               # e.g. red/IR — unconfirmed, see doc
+SQC_SAMPLE_DTYPE = "<i2"                             # int16 LE — unconfirmed, see doc
+SQC_ECG_N_BYTES = SQC_ECG_N_SAMPLES * 2
+SQC_PPG_N_BYTES = SQC_PPG_N_VALUES * 2
+SQC_TOTAL_N_BYTES = SQC_ECG_N_BYTES + SQC_PPG_N_BYTES  # ECG block, then PPG block
+SQC_TIMEOUT_S = 60.0  # snapshot considered stalled if not complete by then
+
+
 class MotionSenseHRV(PlasmaDevice):
     def __init__(self, session_info, logger, tag):
         super().__init__(session_info, logger, tag)
@@ -28,6 +50,7 @@ class MotionSenseHRV(PlasmaDevice):
         self.orientation_quat = {}
         self.gyro_bias = {}
         self.gyro_calib = {}
+        self.sqc_state = {}
         # guards orientation_quat/gyro_calib/gyro_bias, mutated from both the
         # Gradio/main thread (start/stop/reset/calibrate) and the BLE notify
         # callback thread (imu_stream_handler)
@@ -39,6 +62,7 @@ class MotionSenseHRV(PlasmaDevice):
                 self.orientation_quat[k] = IDENTITY_QUAT
                 self.gyro_bias[k] = bias_by_addr.get(addr, (0.0, 0.0, 0.0))
             self.memo[k] = PlasmaMemo(k, channels=channels)
+            self.sqc_state[k] = self._new_sqc_state()
 
         # fallback reference in case data arrives before start() is clicked;
         # start() resets this to the true session-start time
@@ -121,6 +145,10 @@ class MotionSenseHRV(PlasmaDevice):
                     p.connect()
                     self.active_devices[name] = p
                     self.active_outlets[name] = MsenseOutlet(n, p)
+                    try:
+                        self.register_nus_notify(p, name)
+                    except Exception as e:
+                        self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
                 except Exception as e:
                     self.info(f"Error connecting to {n}: {e}")
                     self.memo[name].sts = "⛔ connect failed"
@@ -360,6 +388,108 @@ class MotionSenseHRV(PlasmaDevice):
             self.memo[name].set_data("OrientW", ow, elapsed)
         except Exception as e:
             self.info(f"Error handling IMU stream packet from {name}: {e}")
+
+    # ── ECG/PPG signal-quality-check (SQC) snapshot ─────────────────────────
+    # See the NUS_*/SQC_* constants above and
+    # data/ECG_PPG_SIGNAL_QUALITY_BLE_NUS.md — the wire protocol here is
+    # still provisional on the firmware side.
+
+    @staticmethod
+    def _new_sqc_state():
+        return {
+            "status": "idle",  # idle | requesting | receiving | ready | error
+            "buffer": bytearray(),
+            "requested_at": None,
+            "ecg": None,
+            "ppg": None,
+            "error": None,
+        }
+
+    def register_nus_notify(self, peripheral, name):
+        peripheral.notify(NUS_SERVICE_UUID, NUS_TX_CHAR_UUID,
+                           lambda data: self._nus_data_handler(data, name))
+
+    def get_sqc_devices(self):
+        """Wristband names currently connected and eligible for an SQC snapshot request."""
+        return list(self.active_devices.keys())
+
+    def request_sqc_snapshot(self, name):
+        if name not in self.active_devices or not self.active_devices[name].is_connected():
+            return f"⛔ {name} not connected"
+
+        state = self.sqc_state.setdefault(name, self._new_sqc_state())
+        state.update(status="requesting", buffer=bytearray(), requested_at=time.time(),
+                      ecg=None, ppg=None, error=None)
+        try:
+            # NUS RX is conventionally write-without-response; the exact
+            # trigger byte doesn't matter per spec ("write any character")
+            self.active_devices[name].write_command(NUS_SERVICE_UUID, NUS_RX_CHAR_UUID, b"\x01")
+        except Exception as e:
+            state["status"] = "error"
+            state["error"] = f"request failed: {e}"
+            self.info(f"SQC snapshot request failed for {name}: {e}")
+            return f"⛔ {name} request failed: {e}"
+
+        self.info(f"Requested ECG/PPG SQC snapshot from {name}")
+        return f"📡 Requested snapshot from {name} — waiting for device..."
+
+    def _nus_data_handler(self, data, name):
+        # runs on the BLE library's callback thread — never let an exception
+        # escape here, it would otherwise silently kill notifications for
+        # this device with no visible status change
+        try:
+            state = self.sqc_state.get(name)
+            if state is None or state["status"] not in ("requesting", "receiving"):
+                # unsolicited/late data (e.g. arriving after a timeout) — ignore
+                return
+            state["buffer"].extend(data)
+            state["status"] = "receiving"
+            if len(state["buffer"]) >= SQC_TOTAL_N_BYTES:
+                self._finish_sqc_snapshot(name)
+        except Exception as e:
+            self.info(f"Error handling SQC snapshot data from {name}: {e}")
+
+    def _finish_sqc_snapshot(self, name):
+        state = self.sqc_state[name]
+        raw = bytes(state["buffer"][:SQC_TOTAL_N_BYTES])
+        try:
+            ecg = np.frombuffer(raw[:SQC_ECG_N_BYTES], dtype=SQC_SAMPLE_DTYPE)
+            ppg = np.frombuffer(raw[SQC_ECG_N_BYTES:SQC_TOTAL_N_BYTES], dtype=SQC_SAMPLE_DTYPE)
+            ppg = ppg.reshape(-1, SQC_PPG_N_CHANNELS).T  # (channels, samples)
+            state["ecg"] = ecg.astype(float)
+            state["ppg"] = ppg.astype(float)
+            state["status"] = "ready"
+            self.info(f"SQC snapshot complete for {name}: {len(ecg)} ECG + {ppg.shape} PPG samples")
+        except Exception as e:
+            state["status"] = "error"
+            state["error"] = f"decode failed: {e}"
+            self.info(f"SQC snapshot decode failed for {name}: {e}")
+
+    def get_sqc_status(self, name):
+        state = self.sqc_state.get(name)
+        if state is None:
+            return {"status": "unavailable", "received": 0, "total": SQC_TOTAL_N_BYTES, "error": None}
+
+        if state["status"] in ("requesting", "receiving") and state["requested_at"] is not None \
+                and time.time() - state["requested_at"] > SQC_TIMEOUT_S:
+            state["status"] = "error"
+            state["error"] = "timed out waiting for device"
+
+        return {
+            "status": state["status"],
+            "received": len(state["buffer"]),
+            "total": SQC_TOTAL_N_BYTES,
+            "error": state.get("error"),
+        }
+
+    def get_sqc_result(self, name):
+        state = self.sqc_state.get(name)
+        if state is None or state["status"] != "ready":
+            return None
+        return {
+            "ecg": state["ecg"], "ecg_fs": SQC_ECG_FS,
+            "ppg": state["ppg"], "ppg_fs": SQC_PPG_FS,
+        }
 
 
 class MsenseOutlet(StreamOutlet):

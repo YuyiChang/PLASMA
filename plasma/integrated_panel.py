@@ -11,6 +11,8 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from plasma.quaternion import quat_to_axes
+from plasma.signal_quality import filter_ecg, filter_ppg, estimate_heart_rate, signal_quality_index
+from plasma.devices.msense import MotionSenseHRV
 
 VISUALIZER_PLOT_ELEM_ID = "plasma-visualizer-plot"
 
@@ -116,6 +118,135 @@ class IntegratedPanel():
                     if (el && el.requestFullscreen) {{ el.requestFullscreen(); }}
                 }}""",
             )
+
+    def signal_quality_interface(self):
+        with gr.Column():
+            gr.Markdown(
+                "On-demand ECG/PPG signal-quality snapshot for a connected MSense wristband — "
+                "pulls up to 30s of buffered raw data over BLE and previews it filtered, so you can "
+                "check electrode/PPG contact before starting a full session. Initialize the MSense "
+                "device on the **Session dashboard** tab first, then refresh here.\n\n"
+                "*The device-side protocol for this is still provisional — see "
+                "`data/ECG_PPG_SIGNAL_QUALITY_BLE_NUS.md`.*"
+            )
+            with gr.Row():
+                sqc_device_select = gr.Dropdown(choices=[], label="MSense wristband")
+                btn_refresh_sqc = gr.Button("🔄 Refresh")
+                btn_request_sqc = gr.Button("📡 Request 30s snapshot", variant="primary")
+
+            sqc_status = gr.Textbox(label="Status", interactive=False)
+            sqc_plot = gr.Plot(show_label=False)
+            sqc_metrics = gr.Markdown()
+
+            sqc_timer = gr.Timer(value=0.5, active=True)
+
+            btn_refresh_sqc.click(self.refresh_sqc_devices, outputs=sqc_device_select)
+            btn_request_sqc.click(self.request_sqc, inputs=sqc_device_select, outputs=sqc_status)
+            sqc_timer.tick(
+                fn=self.update_sqc, inputs=sqc_device_select,
+                outputs=[sqc_status, sqc_plot, sqc_metrics],
+            )
+
+    def _get_msense_device(self):
+        for dev in self.available_devices:
+            if isinstance(dev, MotionSenseHRV):
+                return dev
+        return None
+
+    def refresh_sqc_devices(self):
+        dev = self._get_msense_device()
+        names = dev.get_sqc_devices() if dev else []
+        return gr.Dropdown(choices=names, value=(names[0] if names else None))
+
+    def request_sqc(self, name):
+        if not name:
+            return "⛔ Select a wristband first"
+        dev = self._get_msense_device()
+        if dev is None:
+            return "⛔ MSense device not initialized — initialize it on the Session dashboard tab first"
+        return dev.request_sqc_snapshot(name)
+
+    def update_sqc(self, name):
+        dev = self._get_msense_device()
+        if dev is None or not name:
+            return gr.update(), gr.update(), gr.update()
+
+        status = dev.get_sqc_status(name)
+        st = status["status"]
+
+        if st in ("idle", "unavailable"):
+            return "Idle — press Request to pull a snapshot", gr.update(), ""
+        if st in ("requesting", "receiving"):
+            return f"📡 {st}... {status['received']}/{status['total']} bytes", gr.update(), ""
+        if st == "error":
+            return f"❌ {status['error']}", gr.update(), ""
+
+        result = dev.get_sqc_result(name)
+        if result is None:
+            return "❌ snapshot missing after ready", gr.update(), ""
+
+        fig, metrics_md = self._build_sqc_figure(result)
+        return "✅ Ready", fig, metrics_md
+
+    @staticmethod
+    def _build_sqc_figure(result):
+        ecg, ecg_fs = result["ecg"], result["ecg_fs"]
+        ppg, ppg_fs = result["ppg"], result["ppg_fs"]
+        n_ppg_channels = ppg.shape[0]
+
+        ecg_t = np.arange(len(ecg)) / ecg_fs
+        ecg_filt = filter_ecg(ecg, ecg_fs)
+        ecg_hr, ecg_peaks = estimate_heart_rate(ecg_filt, ecg_fs)
+        ecg_sqi = signal_quality_index(ecg, ecg_filt, clip_value=32767)
+
+        fig = make_subplots(
+            rows=1 + n_ppg_channels, cols=1, shared_xaxes=False, vertical_spacing=0.05,
+            subplot_titles=["ECG"] + [f"PPG ch{i}" for i in range(n_ppg_channels)],
+        )
+        fig.add_trace(go.Scatter(x=ecg_t, y=ecg, mode="lines", name="ECG raw", opacity=0.35), row=1, col=1)
+        fig.add_trace(go.Scatter(x=ecg_t, y=ecg_filt, mode="lines", name="ECG filtered"), row=1, col=1)
+        if len(ecg_peaks):
+            fig.add_trace(
+                go.Scatter(x=ecg_t[ecg_peaks], y=ecg_filt[ecg_peaks], mode="markers",
+                           name="ECG peaks", marker=dict(color="red", size=6)),
+                row=1, col=1,
+            )
+        fig.update_xaxes(title_text="Time (s)", row=1, col=1)
+
+        metric_lines = [
+            f"- **ECG**: {ecg_sqi['label']} (SNR {ecg_sqi['snr_db']:.1f} dB)"
+            + (f", HR {round(ecg_hr)} bpm" if ecg_hr else "")
+        ]
+
+        for ch in range(n_ppg_channels):
+            row = ch + 2
+            ppg_t = np.arange(ppg.shape[1]) / ppg_fs
+            ch_filt = filter_ppg(ppg[ch], ppg_fs)
+            hr, peaks = estimate_heart_rate(ch_filt, ppg_fs)
+            sqi = signal_quality_index(ppg[ch], ch_filt, clip_value=32767)
+
+            fig.add_trace(go.Scatter(x=ppg_t, y=ppg[ch], mode="lines", name=f"PPG{ch} raw", opacity=0.35), row=row, col=1)
+            fig.add_trace(go.Scatter(x=ppg_t, y=ch_filt, mode="lines", name=f"PPG{ch} filtered"), row=row, col=1)
+            if len(peaks):
+                fig.add_trace(
+                    go.Scatter(x=ppg_t[peaks], y=ch_filt[peaks], mode="markers",
+                               name=f"PPG{ch} peaks", marker=dict(color="red", size=6)),
+                    row=row, col=1,
+                )
+            fig.update_xaxes(title_text="Time (s)", row=row, col=1)
+
+            metric_lines.append(
+                f"- **PPG ch{ch}**: {sqi['label']} (SNR {sqi['snr_db']:.1f} dB)"
+                + (f", HR {round(hr)} bpm" if hr else "")
+            )
+
+        fig.update_layout(
+            height=220 * (1 + n_ppg_channels),
+            margin=dict(l=50, r=20, t=30, b=30),
+            showlegend=False,
+            uirevision="plasma-sqc",
+        )
+        return fig, "\n".join(metric_lines)
 
     def get_visual_sources(self):
         """Flat {"device tag [· sub-source]": PlasmaMemo} map of every live

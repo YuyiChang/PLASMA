@@ -40,8 +40,10 @@ DEVICE_CATALOG = {
 
 _DEVICE_CONFIG_FILE = "plasma_device_config.json"
 
+_DEFAULT_DISABLED_DEVICES = {'Bitalino'}  # needs PyBluez, which isn't bundled — opt-in only
+
 _DEFAULTS = {
-    "enabled_devices": list(DEVICE_CATALOG.keys()),
+    "enabled_devices": [d for d in DEVICE_CATALOG.keys() if d not in _DEFAULT_DISABLED_DEVICES],
     "msense_devices": [],
     "ip_qb2_lidar": "",
     "ip_pupil_labs": "",
