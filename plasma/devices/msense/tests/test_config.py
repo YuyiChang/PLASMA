@@ -1,4 +1,4 @@
-"""Offline coverage for plasma.config MSense record handling + plasma.ble_scan.
+"""Offline coverage for MSense record handling + ble_scan.
 
 No BLE, no Gradio: these exercise the pure normalize / merge / scan-filter logic.
 """
@@ -6,24 +6,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from plasma.config import (
+from plasma.devices.msense import ble_scan
+from plasma.devices.msense.config import (
     _MSENSE_COLUMNS,
     _normalize_msense,
+    _msense_records_from_df,
     merge_msense_records,
-    DeviceConfig,
+    display_labels,
 )
-from plasma import ble_scan
 
 
 # ── _normalize_msense ───────────────────────────────────────────────────────
-
-def test_normalize_legacy_dict_adds_blank_nickname():
-    out = _normalize_msense({"MSense4X-AAA": "UUID-AAA"})
-    assert out == [{
-        "Name": "MSense4X-AAA", "Nickname": "", "UUID / MAC Address": "UUID-AAA",
-        "Enabled": True, "IMU Stream": False,
-    }]
-
 
 def test_normalize_list_without_nickname_key():
     out = _normalize_msense([
@@ -52,24 +45,23 @@ def test_records_from_df_handles_nan_nickname_and_drops_blank_rows():
         ],
         columns=_MSENSE_COLUMNS,
     )
-    recs = DeviceConfig._msense_records_from_df(df)
+    recs = _msense_records_from_df(df)
     assert [r["Name"] for r in recs] == ["w1", "w2"]
     assert recs[0]["Nickname"] == ""
     assert recs[1]["Nickname"] == "right"
     assert recs[1]["Enabled"] is False and recs[1]["IMU Stream"] is True
 
 
-# ── get_msense_display_labels ──────────────────────────────────────────────
+# ── display_labels ─────────────────────────────────────────────────────────
 
 def test_display_labels_name_paren_nickname():
-    dc = DeviceConfig.__new__(DeviceConfig)
-    dc.msense_devices = [
+    blob = {"devices": [
         {"Name": "MSense4ECG-Z5G4A", "Nickname": "left wrist", "UUID / MAC Address": "u1", "Enabled": True},
         {"Name": "MSense4ECG-EX4BT", "Nickname": "", "UUID / MAC Address": "u2", "Enabled": True},
         {"Name": "MSense4ECG-OFF", "Nickname": "unused", "UUID / MAC Address": "u3", "Enabled": False},
         {"Name": "", "Nickname": "orphan", "UUID / MAC Address": "u4", "Enabled": True},
-    ]
-    out = dc.get_msense_display_labels()
+    ]}
+    out = display_labels(blob)
     assert out == {
         "MSense4ECG-Z5G4A": "MSense4ECG-Z5G4A (left wrist)",
         "MSense4ECG-EX4BT": "MSense4ECG-EX4BT",

@@ -3,8 +3,8 @@ import struct
 
 import pytest
 
-from plasma import nus_stream as ns
-from plasma.nus_stream import (
+from plasma.devices.msense import nus_stream as ns
+from plasma.devices.msense.nus_stream import (
     StreamSession, ProtocolError, parse_start_ack, build_command,
     OP_START, MSG_START_ACK, MSG_DATA, MSG_END, MSG_RESULT,
     PROFILE, DEVICE_PPG, DEVICE_ECG, TOTAL_SENSOR_BYTES,

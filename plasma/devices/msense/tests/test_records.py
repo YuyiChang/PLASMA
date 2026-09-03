@@ -4,7 +4,7 @@ import struct
 import numpy as np
 import pytest
 
-from plasma.ppg_ecg_records import decode_ppg, decode_ecg, crc8_07, ECG_SYNC
+from plasma.devices.msense.records import decode_ppg, decode_ecg, crc8_07, ECG_SYNC
 
 
 # ── PPG ─────────────────────────────────────────────────────────────────────
