@@ -1,12 +1,16 @@
-"""Config-tab BLE scan helper.
+"""Config-tab BLE scan + USB-drive provisioning helpers.
 
-Kept separate from ``plasma/devices/msense.py`` on purpose: that module owns the
+Kept separate from ``device.py`` on purpose: that module owns the
 adapter/connection lifecycle for a live recording, this one just answers "which
-MSense wristbands are advertising right now?" for the Configuration tab. Mirrors
-the scan pattern in ``MotionSenseHRV`` (blocking ``adapter.scan_for`` +
-``scan_get_results``); RSSI is not read because simplepyble only exposes it
-post-connect.
+MSense wristbands are advertising right now?" (``scan_msense``) and "what is the
+MAC on this mounted MSense drive?" (``read_uuid_from_drive``) for the
+Configuration / MSense-Tools tabs.
 """
+import os
+import re
+from glob import glob
+
+_MAC_RE = re.compile(r'([0-9A-Fa-f]{2}[:]){5}([0-9A-Fa-f]{2})')
 
 
 def scan_msense(timeout_ms=5000, filter_name="MSense", adapter=None):
@@ -46,3 +50,21 @@ def scan_msense(timeout_ms=5000, filter_name="MSense", adapter=None):
         found[addr] = {"name": name, "address": addr, "connectable": connectable}
 
     return list(found.values())
+
+
+def read_uuid_from_drive(target_path):
+    """Return the MAC address written in ``uuid.txt`` on a mounted MSense USB
+    drive, or an explanatory string if none is found.
+
+    (Was ``yams.uuid_extractor.get_uuid_from_path``.)
+    """
+    matches = glob(os.path.join(target_path, "uuid.txt"))
+    if not matches:
+        return "No MotionSenSE found. Plug in or change the MotionSenSE path?"
+    try:
+        with open(matches[0], "r") as f:
+            txt = f.read()
+    except Exception as e:
+        return str(e)
+    m = _MAC_RE.search(txt)
+    return m.group(0) if m else "uuid.txt present but no MAC address in it"

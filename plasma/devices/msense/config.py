@@ -9,6 +9,8 @@ This module must NOT import ``plasma.config`` — ``config_section`` receives th
 ``DeviceConfig`` instance as ``host`` and reads/writes it through
 ``host.get_plugin_config`` / ``host.update_plugin_config``.
 """
+import json
+
 import gradio as gr
 import pandas as pd
 
@@ -69,6 +71,38 @@ def merge_msense_records(existing, scanned, overwrite):
     if skipped:
         msg += f" ({skipped} already listed)"
     return list(existing) + added, msg
+
+
+# ── device_info.json import (YAMS provisioning format) ───────────────────────
+
+def import_device_info(path):
+    """Read a YAMS-style ``device_info.json`` (a flat ``{serial: UUID/MAC}``
+    mapping) into ``[{"name": serial, "address": uuid}, ...]`` — the shape
+    ``merge_msense_records`` consumes. Returns ``[]`` on any problem.
+
+    Connect-time matching is by **address** (see ``device.py``'s
+    ``connect_devices``), so the serial becomes the record Name / LSL label
+    only — exactly what YAMS did with its aliases.
+    """
+    try:
+        with open(path, "r") as f:
+            raw = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    return [{"name": str(k), "address": str(v)}
+            for k, v in raw.items() if str(v).strip()]
+
+
+def merge_device_info_into_blob(blob, path, overwrite=False):
+    """Merge a ``device_info.json`` into an msense config blob's device list.
+    Returns ``(new_blob, summary_str)``."""
+    scanned = import_device_info(path)
+    if not scanned:
+        return blob, f"No usable entries in {path}"
+    records, msg = merge_msense_records(_records(blob), scanned, overwrite)
+    return {"devices": records}, msg
 
 
 def _msense_records_from_df(msense_df):
