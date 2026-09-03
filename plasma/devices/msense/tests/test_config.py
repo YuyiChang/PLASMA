@@ -6,12 +6,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import json
+
 from plasma.devices.msense import ble_scan
 from plasma.devices.msense.config import (
     _MSENSE_COLUMNS,
     _normalize_msense,
     _msense_records_from_df,
     merge_msense_records,
+    merge_device_info_into_blob,
+    import_device_info,
     display_labels,
 )
 
@@ -139,3 +143,41 @@ def test_scan_msense_filters_dedupes_uppercases():
     assert [d["address"] for d in out] == ["UUID-AAA", "UUID-BBB"]
     assert out[0]["name"] == "MSense4PPG-AAA"
     assert all(d["connectable"] is True for d in out)
+
+
+# ── device_info.json import (YAMS provisioning) ─────────────────────────────
+
+def test_import_device_info(tmp_path):
+    p = tmp_path / "device_info.json"
+    p.write_text(json.dumps({"4BF01S": "2104F8E3-D94A-1DF7", "Left 74N": "D3:54:EB:A4:9B:82", "blank": ""}))
+    out = import_device_info(str(p))
+    assert out == [
+        {"name": "4BF01S", "address": "2104F8E3-D94A-1DF7"},
+        {"name": "Left 74N", "address": "D3:54:EB:A4:9B:82"},
+    ]
+
+
+def test_import_device_info_missing_or_bad(tmp_path):
+    assert import_device_info(str(tmp_path / "nope.json")) == []
+    bad = tmp_path / "bad.json"
+    bad.write_text("[1, 2, 3]")
+    assert import_device_info(str(bad)) == []
+
+
+def test_merge_device_info_into_blob_append(tmp_path):
+    p = tmp_path / "device_info.json"
+    p.write_text(json.dumps({"newdev": "AA-BB-CC"}))
+    blob = {"devices": [{"Name": "old", "Nickname": "", "UUID / MAC Address": "11-22",
+                         "Enabled": True, "IMU Stream": False}]}
+    new_blob, msg = merge_device_info_into_blob(blob, str(p), overwrite=False)
+    names = [r["Name"] for r in new_blob["devices"]]
+    assert names == ["old", "newdev"]
+    assert "1 new" in msg
+
+
+def test_merge_device_info_into_blob_overwrite(tmp_path):
+    p = tmp_path / "device_info.json"
+    p.write_text(json.dumps({"a": "1", "b": "2"}))
+    new_blob, _ = merge_device_info_into_blob({"devices": [{"Name": "x", "UUID / MAC Address": "9"}]},
+                                              str(p), overwrite=True)
+    assert [r["Name"] for r in new_blob["devices"]] == ["a", "b"]

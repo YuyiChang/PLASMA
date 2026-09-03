@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 datas = []
 datas += collect_data_files('gradio_client')
@@ -37,17 +37,7 @@ a = Analysis(
         "plasma.devices.shimmer",
         "plasma.devices.obs",
         "plasma.devices.bitalino",
-        "plasma.devices.msense",
-        "plasma.devices.msense.device",
-        "plasma.devices.msense.config",
-        "plasma.devices.msense.panels",
-        "plasma.devices.msense.nus_stream",
-        "plasma.devices.msense.records",
-        "plasma.devices.msense.signal_quality",
-        "plasma.devices.msense.ble_scan",
-        "plasma.devices.msense.gyro_bias",
-        "plasma.devices.msense.quaternion",
-    ],
+    ] + collect_submodules("plasma.devices.msense"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

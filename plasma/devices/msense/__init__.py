@@ -24,7 +24,6 @@ def register(register_fn):
         class_name="MotionSenseHRV",
         config_section=_config.config_section,
         tabs=(
-            ("ECG/PPG Signal Quality", _panels.build_sqc_tab),
-            ("MSense IMU", _panels.build_imu_tab),
+            ("MSense", _panels.build_msense_tab),
         ),
     ))

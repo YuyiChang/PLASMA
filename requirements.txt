@@ -1,10 +1,12 @@
 numpy
-scipy            # msense plugin only (ECG/PPG signal-quality filters)
+scipy            # msense plugin only (ECG/PPG signal-quality filters, clock-sync)
 pandas
-matplotlib
+matplotlib       # msense plugin only (clock-sync QC plots)
 tqdm
 gradio
 plotly
+psutil           # msense plugin only (USB-drive detection for the downloader)
+Pillow           # msense plugin only (optional — clock-sync QC plot gallery)
 blickfeld-qb2    # qb2 LiDAR plugin only
 pupil-labs-realtime-api  # pupil_labs plugin only
 pylsl
