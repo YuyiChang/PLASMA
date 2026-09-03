@@ -69,6 +69,8 @@ class MotionSenseHRV(PlasmaDevice):
 
         self.device_list = device_config.get_active_msense_devices()
         self.imu_stream_devices = device_config.get_imu_stream_devices()
+        # Name -> "Name (Nickname)" for UI panels; identifier stays the Name.
+        self.display_labels = device_config.get_msense_display_labels()
 
         bias_by_addr = load_gyro_bias()
 
@@ -87,7 +89,7 @@ class MotionSenseHRV(PlasmaDevice):
                 channels += ["AccX", "AccY", "AccZ", "Q0", "Q1", "Q2", "Q3", "OrientX", "OrientY", "OrientZ", "OrientW"]
                 self.orientation_quat[k] = IDENTITY_QUAT
                 self.gyro_bias[k] = bias_by_addr.get(addr, (0.0, 0.0, 0.0))
-            self.memo[k] = PlasmaMemo(k, channels=channels)
+            self.memo[k] = PlasmaMemo(k, channels=channels, label=self.display_labels.get(k, k))
             self.sqc_state[k] = self._new_sqc_state()
 
         # fallback reference in case data arrives before start() is clicked;
@@ -487,6 +489,11 @@ class MotionSenseHRV(PlasmaDevice):
     def get_sqc_devices(self):
         """Wristband names currently connected and eligible for an SQC snapshot request."""
         return list(self.active_devices.keys())
+
+    def display_name(self, name):
+        """UI label for a wristband: ``"Name (Nickname)"`` when a nickname is
+        configured, else the bare Name. ``name`` stays the identifier."""
+        return self.display_labels.get(name, name)
 
     def request_sqc_snapshot(self, name, max_seconds=None, history_only=False):
         """Pull a snapshot. max_seconds / history_only enable quick mode: the

@@ -7,8 +7,11 @@ from collections import deque
 DEFAULT_WINDOW_S = 30.0
 
 class PlasmaMemo():
-    def __init__(self, name, channels=None, window_s=DEFAULT_WINDOW_S):
+    def __init__(self, name, channels=None, window_s=DEFAULT_WINDOW_S, label=None):
         self.name = name
+        # human-facing label for UI panels; defaults to name. The identifier
+        # stays `name` (LSL stream, status/gyro-bias keys) — `label` is cosmetic.
+        self.label = label or name
         self.sts = "🟦" # status
         self.set_latest("initialized")
         self.window_s = window_s

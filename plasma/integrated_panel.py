@@ -207,10 +207,11 @@ class IntegratedPanel():
 
         lines, results = [], []
         for name in names:
+            disp = dev.display_name(name)
             status = dev.get_sqc_status(name)
             st = status["status"]
             if st in ("idle", "unavailable"):
-                lines.append(f"- **{name}** — idle")
+                lines.append(f"- **{disp}** — idle")
                 continue
             if st in ("requesting", "receiving"):
                 total = status["records_total"] or "?"
@@ -218,28 +219,28 @@ class IntegratedPanel():
                 if isinstance(total, int) and total:
                     pct = f" ({100 * status['records_received'] // total}%)"
                 lines.append(
-                    f"- **{name}** — 📡 {st} ({status['phase']}) "
+                    f"- **{disp}** — 📡 {st} ({status['phase']}) "
                     f"{status['records_received']}/{total} records{pct}{_diag_str(status)}"
                 )
                 preview = dev.get_sqc_preview(name)
                 if preview is not None:
-                    results.append((name, preview))
+                    results.append((disp, preview))
                 continue
             if st == "finishing":
-                lines.append(f"- **{name}** — 💾 finalizing…{_diag_str(status)}")
+                lines.append(f"- **{disp}** — 💾 finalizing…{_diag_str(status)}")
                 continue
             if st == "rejected":
-                lines.append(f"- **{name}** — 🚫 rejected: {status['error']}")
+                lines.append(f"- **{disp}** — 🚫 rejected: {status['error']}")
                 continue
             if st == "error":
-                lines.append(f"- **{name}** — ❌ {status['error']}{_diag_str(status)}")
+                lines.append(f"- **{disp}** — ❌ {status['error']}{_diag_str(status)}")
                 continue
 
             result = dev.get_sqc_result(name)
             if result is None:
-                lines.append(f"- **{name}** — ❌ ready but no data")
+                lines.append(f"- **{disp}** — ❌ ready but no data")
                 continue
-            results.append((name, result))
+            results.append((disp, result))
             prov = result.get("provenance") or {}
             dirty = " ⚠️dirty" if prov.get("git_tree_state") == "dirty" else ""
             quick = ""
@@ -247,7 +248,7 @@ class IntegratedPanel():
                 ph = prov.get("phase_at_cancel", "")
                 quick = f" · ✂ quick {result['quick_seconds']:g}s{' (' + ph + ')' if ph else ''}"
             lines.append(
-                f"- **{name}** — ✅ {result['device_type']}{quick} · id `{prov.get('device_id', '?')}` · "
+                f"- **{disp}** — ✅ {result['device_type']}{quick} · id `{prov.get('device_id', '?')}` · "
                 f"fw `{str(prov.get('git_commit', '?'))[:10]}`{dirty} · saved `{status['saved_path']}`"
             )
 
@@ -309,7 +310,7 @@ class IntegratedPanel():
             for name, memo in dev.get_sources().items():
                 if memo.channels:
                     # label = name if name == dev.tag else f"{dev.tag} · {name}"
-                    label = name
+                    label = getattr(memo, "label", name)
                     sources[label] = memo
         return sources
 
@@ -553,9 +554,9 @@ class IntegratedPanel():
         for dev in self.available_devices:
             if isinstance(dev.memo, dict):
                 for k, v in dev.memo.items():
-                    params[f"- {k}"] = v.get_sts()
+                    params[f"- {getattr(v, 'label', k)}"] = v.get_sts()
             else:
-                params[f"- {dev.memo.name}"] = dev.memo.get_sts()
+                params[f"- {getattr(dev.memo, 'label', dev.memo.name)}"] = dev.memo.get_sts()
 
         # print(params)
         return params

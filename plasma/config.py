@@ -171,6 +171,23 @@ class DeviceConfig:
             if rec.get("Enabled", True) and rec.get("IMU Stream", False) and str(rec.get("Name", "")).strip()
         }
 
+    def get_msense_display_labels(self):
+        """Name -> ``"Name (Nickname)"`` for listed+enabled wristbands (bare Name
+        when Nickname is blank).
+
+        Display only: consumed by the Session dashboard status panel and the
+        Signal visualizer. The BLE Name stays the identifier used for LSL stream
+        names, status/memo keys and gyro-bias lookup.
+        """
+        out = {}
+        for rec in self.msense_devices:
+            name = str(rec.get("Name", "")).strip()
+            if not (rec.get("Enabled", True) and name and str(rec.get("UUID / MAC Address", "")).strip()):
+                continue
+            nick = str(rec.get("Nickname", "")).strip()
+            out[name] = f"{name} ({nick})" if nick else name
+        return out
+
     # ── UI callbacks ──────────────────────────────────────────────────────────
 
     @staticmethod
@@ -288,7 +305,9 @@ class DeviceConfig:
                     "Name–UUID pairs for BLE wristband discovery and connection. Uncheck Enabled to skip "
                     "connecting to a wristband without removing it from the list. IMU Stream is demo firmware "
                     "not every wristband has — only check it for units known to support it. Nickname is an "
-                    "optional label for your own reference; leave it blank to just use the device name.\n\n"
+                    "optional label: when set, the Session dashboard status panel and Signal visualizer show "
+                    "\"Name (Nickname)\"; leave it blank to show just the device name. The BLE Name stays the "
+                    "identifier for LSL streams, saved files and gyro-bias.\n\n"
                     "**Scan** for wristbands in range, tick the ones to add, then Append (keep the current "
                     "list) or Overwrite. Scan before initializing devices on the Session dashboard — the Mac "
                     "has a single BLE radio, and edits here only take effect the next time you Initialize."

@@ -59,6 +59,23 @@ def test_records_from_df_handles_nan_nickname_and_drops_blank_rows():
     assert recs[1]["Enabled"] is False and recs[1]["IMU Stream"] is True
 
 
+# ── get_msense_display_labels ──────────────────────────────────────────────
+
+def test_display_labels_name_paren_nickname():
+    dc = DeviceConfig.__new__(DeviceConfig)
+    dc.msense_devices = [
+        {"Name": "MSense4ECG-Z5G4A", "Nickname": "left wrist", "UUID / MAC Address": "u1", "Enabled": True},
+        {"Name": "MSense4ECG-EX4BT", "Nickname": "", "UUID / MAC Address": "u2", "Enabled": True},
+        {"Name": "MSense4ECG-OFF", "Nickname": "unused", "UUID / MAC Address": "u3", "Enabled": False},
+        {"Name": "", "Nickname": "orphan", "UUID / MAC Address": "u4", "Enabled": True},
+    ]
+    out = dc.get_msense_display_labels()
+    assert out == {
+        "MSense4ECG-Z5G4A": "MSense4ECG-Z5G4A (left wrist)",
+        "MSense4ECG-EX4BT": "MSense4ECG-EX4BT",
+    }
+
+
 # ── merge_msense_records ────────────────────────────────────────────────────
 
 _EXISTING = [
