@@ -12,3 +12,4 @@ simplepyble
 pyserial
 pyshimmer
 obsws-python
+pytest

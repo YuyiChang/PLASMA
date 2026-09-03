@@ -1,6 +1,17 @@
+import atexit
+import os
+import signal
 import gradio as gr
 from plasma.integrated_panel import IntegratedPanel
 from plasma.config import device_config
+
+
+def _handle_sigterm(signum, frame):
+    # run atexit hooks (device _shutdown_cleanup — CANCEL + BLE disconnect) then
+    # exit hard, so `kill <pid>` doesn't leave an MSense mid-transfer holding its
+    # single connection slot until the supervision timeout
+    atexit._run_exitfuncs()
+    os._exit(143)
 
 js_func = """
 function refresh() {
@@ -14,6 +25,11 @@ function refresh() {
 """
 
 def main():
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    except ValueError:
+        pass  # not the main thread (e.g. imported oddly) — atexit still covers normal exit
+
     ip = IntegratedPanel()
     # pl = PupilLabsDashboard()
 

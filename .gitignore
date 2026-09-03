@@ -214,3 +214,5 @@ __marimo__/
 .vscode/settings.json
 plasma_device_config.json
 plasma_gyro_bias.json
+
+local_docs/

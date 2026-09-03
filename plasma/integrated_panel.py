@@ -11,7 +11,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from plasma.quaternion import quat_to_axes
-from plasma.signal_quality import filter_ecg, filter_ppg, estimate_heart_rate, signal_quality_index
+from plasma.signal_quality import filter_ecg, filter_ppg
 from plasma.devices.msense import MotionSenseHRV
 
 VISUALIZER_PLOT_ELEM_ID = "plasma-visualizer-plot"
@@ -122,30 +122,41 @@ class IntegratedPanel():
     def signal_quality_interface(self):
         with gr.Column():
             gr.Markdown(
-                "On-demand ECG/PPG signal-quality snapshot for a connected MSense wristband — "
-                "pulls up to 30s of buffered raw data over BLE and previews it filtered, so you can "
-                "check electrode/PPG contact before starting a full session. Initialize the MSense "
-                "device on the **Session dashboard** tab first, then refresh here.\n\n"
-                "*The device-side protocol for this is still provisional — see "
-                "`data/ECG_PPG_SIGNAL_QUALITY_BLE_NUS.md`.*"
+                "On-demand raw ECG/PPG snapshot for every connected MSense wristband so you can "
+                "eyeball electrode / optical contact before starting a full session. Initialize the "
+                "MSense device on the **Session dashboard** tab first, then Refresh here. Wristbands "
+                "are snapshotted **one at a time** (the Mac has a single BLE radio); each capture is "
+                "saved to disk (session log dir if a recording is running, else "
+                "`data/sqc_snapshots/`).\n\n"
+                "The device always streams a fixed 96 KiB (a pre-buffered *history* window then a "
+                "*forward* window it acquires live — ~16 s total ECG / ~24 s PPG). **Quick mode** "
+                "(default) sends CANCEL once *N* seconds have arrived and keeps the partial; with "
+                "*N* ≤ the history window (~5 s ECG / ~8 s PPG) the whole live-acquisition wait is "
+                "skipped. Clear the field (and leave *History only* off) for a full capture.\n"
             )
             with gr.Row():
-                sqc_device_select = gr.Dropdown(choices=[], label="MSense wristband")
                 btn_refresh_sqc = gr.Button("🔄 Refresh")
-                btn_request_sqc = gr.Button("📡 Request 30s snapshot", variant="primary")
+                btn_request_sqc = gr.Button("📡 Snapshot all wristbands (sequential)", variant="primary")
+                btn_cancel_sqc = gr.Button("✖ Cancel all")
+            with gr.Row():
+                sqc_max_s = gr.Number(
+                    value=5, precision=1, minimum=0,
+                    label="Quick mode — stop after N s (clear for full capture)")
+                sqc_hist_only = gr.Checkbox(
+                    value=False, label="History only (stop at the history→forward boundary)")
 
-            sqc_status = gr.Textbox(label="Status", interactive=False)
+            sqc_status = gr.Markdown()
             sqc_plot = gr.Plot(show_label=False)
-            sqc_metrics = gr.Markdown()
 
-            sqc_timer = gr.Timer(value=0.5, active=True)
+            # coarse refresh — the BLE transfer is slow, so ~1 Hz is plenty and
+            # keeps re-decoding / re-plotting the growing signal cheap
+            sqc_timer = gr.Timer(value=1.0, active=True)
 
-            btn_refresh_sqc.click(self.refresh_sqc_devices, outputs=sqc_device_select)
-            btn_request_sqc.click(self.request_sqc, inputs=sqc_device_select, outputs=sqc_status)
-            sqc_timer.tick(
-                fn=self.update_sqc, inputs=sqc_device_select,
-                outputs=[sqc_status, sqc_plot, sqc_metrics],
-            )
+            btn_refresh_sqc.click(self.update_sqc, outputs=[sqc_status, sqc_plot])
+            btn_request_sqc.click(self.request_sqc, inputs=[sqc_max_s, sqc_hist_only],
+                                  outputs=sqc_status)
+            btn_cancel_sqc.click(self.cancel_sqc, outputs=sqc_status)
+            sqc_timer.tick(fn=self.update_sqc, outputs=[sqc_status, sqc_plot])
 
     def _get_msense_device(self):
         for dev in self.available_devices:
@@ -153,100 +164,142 @@ class IntegratedPanel():
                 return dev
         return None
 
-    def refresh_sqc_devices(self):
-        dev = self._get_msense_device()
-        names = dev.get_sqc_devices() if dev else []
-        return gr.Dropdown(choices=names, value=(names[0] if names else None))
-
-    def request_sqc(self, name):
-        if not name:
-            return "⛔ Select a wristband first"
+    def request_sqc(self, max_seconds=None, history_only=False):
         dev = self._get_msense_device()
         if dev is None:
             return "⛔ MSense device not initialized — initialize it on the Session dashboard tab first"
-        return dev.request_sqc_snapshot(name)
+        try:
+            ms = float(max_seconds) if max_seconds not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            ms = None
+        if ms is not None and ms <= 0:
+            ms = None
+        return dev.request_all_sqc_snapshots(max_seconds=ms, history_only=bool(history_only))
 
-    def update_sqc(self, name):
+    def cancel_sqc(self):
         dev = self._get_msense_device()
-        if dev is None or not name:
-            return gr.update(), gr.update(), gr.update()
+        if dev is None:
+            return "⛔ MSense device not initialized"
+        return dev.cancel_all_sqc_snapshots()
 
-        status = dev.get_sqc_status(name)
-        st = status["status"]
+    def update_sqc(self):
+        dev = self._get_msense_device()
+        if dev is None:
+            return "⛔ MSense device not initialized — initialize it on the Session dashboard tab first", gr.update()
 
-        if st in ("idle", "unavailable"):
-            return "Idle — press Request to pull a snapshot", gr.update(), ""
-        if st in ("requesting", "receiving"):
-            return f"📡 {st}... {status['received']}/{status['total']} bytes", gr.update(), ""
-        if st == "error":
-            return f"❌ {status['error']}", gr.update(), ""
+        names = dev.get_sqc_devices()
+        if not names:
+            return "No MSense wristbands connected.", gr.update()
 
-        result = dev.get_sqc_result(name)
-        if result is None:
-            return "❌ snapshot missing after ready", gr.update(), ""
+        def _diag_str(status):
+            d = status.get("diag") or {}
+            if not d.get("notifs"):
+                return ""
+            s = (f" · {d['kib_s']} KiB/s ({d['notif_s']}/s × {d['mean_notif_bytes']}B), "
+                 f"gap {d['last_gap_s']}s (max {d['max_gap_s']}s), proc≤{d['max_proc_ms']}ms")
+            if d.get("mtu") is not None or d.get("rssi") is not None:
+                s += f", mtu {d.get('mtu')}, rssi {d.get('rssi')}"
+            if d.get("seq_gaps"):
+                s += f", ⚠️{d['seq_gaps']} seq gaps"
+            if d.get("recoveries"):
+                s += f", 🔄{d['recoveries']}× reconnect"
+            return s
 
-        fig, metrics_md = self._build_sqc_figure(result)
-        return "✅ Ready", fig, metrics_md
+        lines, results = [], []
+        for name in names:
+            status = dev.get_sqc_status(name)
+            st = status["status"]
+            if st in ("idle", "unavailable"):
+                lines.append(f"- **{name}** — idle")
+                continue
+            if st in ("requesting", "receiving"):
+                total = status["records_total"] or "?"
+                pct = ""
+                if isinstance(total, int) and total:
+                    pct = f" ({100 * status['records_received'] // total}%)"
+                lines.append(
+                    f"- **{name}** — 📡 {st} ({status['phase']}) "
+                    f"{status['records_received']}/{total} records{pct}{_diag_str(status)}"
+                )
+                preview = dev.get_sqc_preview(name)
+                if preview is not None:
+                    results.append((name, preview))
+                continue
+            if st == "finishing":
+                lines.append(f"- **{name}** — 💾 finalizing…{_diag_str(status)}")
+                continue
+            if st == "rejected":
+                lines.append(f"- **{name}** — 🚫 rejected: {status['error']}")
+                continue
+            if st == "error":
+                lines.append(f"- **{name}** — ❌ {status['error']}{_diag_str(status)}")
+                continue
+
+            result = dev.get_sqc_result(name)
+            if result is None:
+                lines.append(f"- **{name}** — ❌ ready but no data")
+                continue
+            results.append((name, result))
+            prov = result.get("provenance") or {}
+            dirty = " ⚠️dirty" if prov.get("git_tree_state") == "dirty" else ""
+            quick = ""
+            if result.get("quick_seconds"):
+                ph = prov.get("phase_at_cancel", "")
+                quick = f" · ✂ quick {result['quick_seconds']:g}s{' (' + ph + ')' if ph else ''}"
+            lines.append(
+                f"- **{name}** — ✅ {result['device_type']}{quick} · id `{prov.get('device_id', '?')}` · "
+                f"fw `{str(prov.get('git_commit', '?'))[:10]}`{dirty} · saved `{status['saved_path']}`"
+            )
+
+        fig = self._build_sqc_figure(results) if results else gr.update()
+        return "\n".join(lines), fig
 
     @staticmethod
-    def _build_sqc_figure(result):
-        ecg, ecg_fs = result["ecg"], result["ecg_fs"]
-        ppg, ppg_fs = result["ppg"], result["ppg_fs"]
-        n_ppg_channels = ppg.shape[0]
-
-        ecg_t = np.arange(len(ecg)) / ecg_fs
-        ecg_filt = filter_ecg(ecg, ecg_fs)
-        ecg_hr, ecg_peaks = estimate_heart_rate(ecg_filt, ecg_fs)
-        ecg_sqi = signal_quality_index(ecg, ecg_filt, clip_value=32767)
+    def _build_sqc_figure(results):
+        # one row per (unit x channel); raw on the primary y-axis, a light
+        # bandpass overlay on a secondary y-axis so the pulsatile component
+        # stays visible next to the large DC term. While a capture is still
+        # streaming in ("partial") we plot the raw trace only — filtering a
+        # still-growing signal just adds edge artifacts.
+        rows = []
+        for name, result in results:
+            partial = result.get("partial")            # live preview, still streaming
+            quick_s = result.get("quick_seconds")      # finished but cut short on purpose
+            for ch_name, y in result["channels"].items():
+                title = f"{name} · {ch_name}"
+                if partial:
+                    title += " — receiving…"
+                elif quick_s:
+                    title += f" — {quick_s:g}s quick"
+                rows.append((title, np.asarray(y, dtype=float), result["fs"],
+                             result["device_type"] == "ECG", partial))
 
         fig = make_subplots(
-            rows=1 + n_ppg_channels, cols=1, shared_xaxes=False, vertical_spacing=0.05,
-            subplot_titles=["ECG"] + [f"PPG ch{i}" for i in range(n_ppg_channels)],
+            rows=len(rows), cols=1, shared_xaxes=False, vertical_spacing=0.06 / max(len(rows), 1),
+            subplot_titles=[title for title, *_ in rows],
+            specs=[[{"secondary_y": True}] for _ in rows],
         )
-        fig.add_trace(go.Scatter(x=ecg_t, y=ecg, mode="lines", name="ECG raw", opacity=0.35), row=1, col=1)
-        fig.add_trace(go.Scatter(x=ecg_t, y=ecg_filt, mode="lines", name="ECG filtered"), row=1, col=1)
-        if len(ecg_peaks):
-            fig.add_trace(
-                go.Scatter(x=ecg_t[ecg_peaks], y=ecg_filt[ecg_peaks], mode="markers",
-                           name="ECG peaks", marker=dict(color="red", size=6)),
-                row=1, col=1,
-            )
-        fig.update_xaxes(title_text="Time (s)", row=1, col=1)
-
-        metric_lines = [
-            f"- **ECG**: {ecg_sqi['label']} (SNR {ecg_sqi['snr_db']:.1f} dB)"
-            + (f", HR {round(ecg_hr)} bpm" if ecg_hr else "")
-        ]
-
-        for ch in range(n_ppg_channels):
-            row = ch + 2
-            ppg_t = np.arange(ppg.shape[1]) / ppg_fs
-            ch_filt = filter_ppg(ppg[ch], ppg_fs)
-            hr, peaks = estimate_heart_rate(ch_filt, ppg_fs)
-            sqi = signal_quality_index(ppg[ch], ch_filt, clip_value=32767)
-
-            fig.add_trace(go.Scatter(x=ppg_t, y=ppg[ch], mode="lines", name=f"PPG{ch} raw", opacity=0.35), row=row, col=1)
-            fig.add_trace(go.Scatter(x=ppg_t, y=ch_filt, mode="lines", name=f"PPG{ch} filtered"), row=row, col=1)
-            if len(peaks):
-                fig.add_trace(
-                    go.Scatter(x=ppg_t[peaks], y=ch_filt[peaks], mode="markers",
-                               name=f"PPG{ch} peaks", marker=dict(color="red", size=6)),
-                    row=row, col=1,
-                )
-            fig.update_xaxes(title_text="Time (s)", row=row, col=1)
-
-            metric_lines.append(
-                f"- **PPG ch{ch}**: {sqi['label']} (SNR {sqi['snr_db']:.1f} dB)"
-                + (f", HR {round(hr)} bpm" if hr else "")
-            )
+        for i, (title, y, fs, is_ecg, partial) in enumerate(rows, start=1):
+            t = np.arange(len(y)) / fs
+            fig.add_trace(go.Scatter(x=t, y=y, mode="lines", name="raw",
+                                     line=dict(color="#1f77b4")), row=i, col=1, secondary_y=False)
+            if not partial and len(y) > 64:
+                try:
+                    filt = filter_ecg(y, fs) if is_ecg else filter_ppg(y, fs)
+                    fig.add_trace(go.Scatter(x=t, y=filt, mode="lines", name="filtered",
+                                             line=dict(color="#d62728", width=1), opacity=0.7),
+                                  row=i, col=1, secondary_y=True)
+                except Exception:
+                    pass
+            fig.update_xaxes(title_text="Time (s)", row=i, col=1)
 
         fig.update_layout(
-            height=220 * (1 + n_ppg_channels),
+            height=200 * max(len(rows), 1),
             margin=dict(l=50, r=20, t=30, b=30),
             showlegend=False,
             uirevision="plasma-sqc",
         )
-        return fig, "\n".join(metric_lines)
+        return fig
 
     def get_visual_sources(self):
         """Flat {"device tag [· sub-source]": PlasmaMemo} map of every live
