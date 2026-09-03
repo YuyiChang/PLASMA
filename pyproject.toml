@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plasma-app"
+description = "PLASMA — Platform for LSL-based Acquisition of Sensor Metrics and Analytics"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dynamic = ["version"]
+dependencies = [
+    "gradio",
+    "plotly",
+    "pylsl",
+    "numpy",
+]
+
+[project.urls]
+Homepage = "https://github.com/YuyiChang/PLASMA"
+Repository = "https://github.com/YuyiChang/PLASMA"
+
+[project.optional-dependencies]
+msense = ["simplepyble", "scipy", "matplotlib", "psutil", "Pillow", "pandas", "tqdm"]
+qb2 = ["blickfeld-qb2"]
+pupil = ["pupil-labs-realtime-api"]
+shimmer = ["pyshimmer", "pyserial"]
+obs = ["obsws-python"]
+all = ["plasma-app[msense,qb2,pupil,shimmer,obs]"]
+build = ["pyinstaller"]
+test = ["pytest"]
+
+[project.scripts]
+plasma = "plasma.__main__:main"
+
+[project.entry-points.pyinstaller]
+hook-dirs = "plasma.__pyinstaller:get_hook_dirs"
+
+[tool.setuptools.dynamic]
+version = { attr = "plasma.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["plasma*"]
+exclude = ["plasma.tests*", "plasma.devices.msense.tests*", "tests*"]
+
+[tool.setuptools.package-data]
+plasma = ["resources/icons/*.ico"]
+
+[tool.pytest.ini_options]
+testpaths = ["plasma"]

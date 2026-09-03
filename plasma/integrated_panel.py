@@ -1,12 +1,13 @@
 import gradio as gr
 import struct
 import os
-from plasma.lsl_session import encode_participant
+from plasma.lsl_session import encode_participant, SessionInfo
 from plasma.journal import task_labels, format_journal_msg, open_journal_outlet, MSG_TYPES
 import logging, datetime
 from logging import Logger
-from plasma import plugins
-from plasma.config import device_config, __data_dir__, __version__
+from plasma import plugins, __version__
+from plasma.config import device_config
+from plasma.app_context import app_context
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -16,13 +17,13 @@ VISUALIZER_PLOT_ELEM_ID = "plasma-visualizer-plot"
 class IntegratedPanel():
     def __init__(self):
         self.device_list = list(device_config.get_active_table().keys())
-        self.log_root = __data_dir__
+        self.log_root = app_context().data_dir
 
         self.available_devices = []
 
         self.sts = "Welcome"
 
-        self.logger = get_logger(__data_dir__)
+        self.logger = get_logger(self.log_root)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
 
         # session task-marker LSL stream (None if liblsl is unavailable)
@@ -294,27 +295,27 @@ class IntegratedPanel():
 
         # print(name, integer_representation)
         self.participant_byte = struct.pack("<I", integer_representation)
-        self.session_info = {
-            'sub_id': sub,
-            'ses_id': ses,
-            'participant_enc': integer_representation,
-            'log_dir': os.path.join(self.log_root, sub, ses)
-        }
+        self.session_info = SessionInfo(
+            sub_id=sub,
+            ses_id=ses,
+            participant_enc=integer_representation,
+            log_root=self.log_root,
+        )
         return integer_representation
 
 
-def get_logger(yams_dir="data"):
+def get_logger(log_dir="data"):
     # current YYMMDD
     now = datetime.datetime.now()
     date = now.strftime("%Y-%m-%d")
 
     # init logger
     logger = logging.getLogger(__name__)
-    os.makedirs(yams_dir, exist_ok=True)
-    logging.basicConfig(level=logging.INFO, 
+    os.makedirs(log_dir, exist_ok=True)
+    logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s [%(levelname)s] %(message)s',
                         handlers=[
-                            logging.FileHandler(os.path.join(yams_dir, f"{date}_plasma_session.log")),
+                            logging.FileHandler(os.path.join(log_dir, f"{date}_plasma_session.log")),
                             logging.StreamHandler()
                         ])
     return logger

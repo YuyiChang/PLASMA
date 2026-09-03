@@ -3,6 +3,7 @@ import os
 import signal
 import gradio as gr
 from plasma import plugins
+from plasma.app_context import app_context
 from plasma.integrated_panel import IntegratedPanel
 from plasma.config import device_config
 
@@ -37,7 +38,7 @@ def main():
     ip = IntegratedPanel()
     # pl = PupilLabsDashboard()
 
-    with gr.Blocks(title="PLASMA", theme=gr.themes.Ocean(), js=js_func) as app:
+    with gr.Blocks(title=app_context().app_name, theme=gr.themes.Ocean(), js=js_func) as app:
         with gr.Tab("Session dashboard"):
             ip.interface()
         with gr.Tab("Signal visualizer"):

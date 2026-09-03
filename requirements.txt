@@ -1,17 +1,4 @@
-numpy
-scipy            # msense plugin only (ECG/PPG signal-quality filters, clock-sync)
-pandas
-matplotlib       # msense plugin only (clock-sync QC plots)
-tqdm
-gradio
-plotly
-psutil           # msense plugin only (USB-drive detection for the downloader)
-Pillow           # msense plugin only (optional — clock-sync QC plot gallery)
-blickfeld-qb2    # qb2 LiDAR plugin only
-pupil-labs-realtime-api  # pupil_labs plugin only
-pylsl
-simplepyble      # msense plugin only (BLE)
-pyserial
-pyshimmer        # shimmer plugin only
-obsws-python     # obs plugin only
-pytest
+# Dependency metadata now lives in pyproject.toml. This shim keeps the
+# documented `pip install -r requirements.txt` working — it installs PLASMA
+# editable with every plugin extra plus the build/test tooling.
+-e .[all,build,test]
