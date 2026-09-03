@@ -13,7 +13,9 @@ from collections import deque
 from pylsl import StreamInfo, StreamOutlet, cf_double64
 import numpy as np
 import struct
-from plasma.config import __data_dir__, __version__, device_config
+from plasma import __version__
+from plasma.config import device_config
+from plasma.app_context import app_context
 from .quaternion import IDENTITY_QUAT, quat_multiply, quat_normalize
 from .gyro_bias import load_gyro_bias, save_gyro_bias
 from . import nus_stream
@@ -23,8 +25,6 @@ from .nus_stream import (
     HANDSHAKE_TIMEOUT_S,
 )
 from .records import decode_ppg, decode_ecg
-
-yams_dir = __data_dir__
 
 # --- ECG/PPG signal-quality-check (SQC) snapshot, via Nordic UART Service ---
 # Protocol v1 bounded sensor stream — see
@@ -253,8 +253,8 @@ class MotionSenseHRV(PlasmaDevice):
     def start(self):
         timestamp = time.strftime("%y%m%d_%H%M")
         # create log dir
-        self.log_dir = os.path.join(yams_dir, 
-                                    self.session_info['sub_id'], 
+        self.log_dir = os.path.join(app_context().data_dir,
+                                    self.session_info['sub_id'],
                                     self.session_info['ses_id'], 
                                     f"{self.session_info['participant_enc']}_{timestamp}")
         print(f"create log dir {self.log_dir}")
@@ -1140,7 +1140,7 @@ class MotionSenseHRV(PlasmaDevice):
         active session log dir when a recording is running, else data/sqc_snapshots/.
         `suffix` marks partial (quick-mode) captures on disk, e.g. "_p5s"."""
         ts = time.strftime("%y%m%d_%H%M%S")
-        base = getattr(self, "log_dir", None) or os.path.join(yams_dir, "sqc_snapshots", ts)
+        base = getattr(self, "log_dir", None) or os.path.join(app_context().data_dir, "sqc_snapshots", ts)
         os.makedirs(base, exist_ok=True)
 
         safe = str(name).replace(":", "-").replace(" ", "_")
@@ -1252,7 +1252,7 @@ class MsenseOutlet(StreamOutlet):
             info = StreamInfo(name, "MotionSenSE", 3, 2, cf_double64, peripheral.address())
             super().__init__(info, chunk_size, max_buffered)
 
-        self.log_dir = os.path.join(yams_dir, "default")
+        self.log_dir = os.path.join(app_context().data_dir, "default")
 
     def tic(self):
         now = datetime.datetime.now()

@@ -5,15 +5,16 @@ import json
 import os
 import time
 
-_GYRO_BIAS_FILE = "plasma_gyro_bias.json"
+from plasma.app_context import app_context
 
 
 def load_gyro_bias():
     """Returns {uuid_or_mac: (bx, by, bz)}, or {} if no calibration exists yet."""
-    if not os.path.exists(_GYRO_BIAS_FILE):
+    path = app_context().gyro_bias_path
+    if not os.path.exists(path):
         return {}
     try:
-        with open(_GYRO_BIAS_FILE, 'r') as f:
+        with open(path, 'r') as f:
             raw = json.load(f)
         return {addr: tuple(rec["bias"]) for addr, rec in raw.items()}
     except Exception:
@@ -21,10 +22,11 @@ def load_gyro_bias():
 
 
 def save_gyro_bias(addr, bias, n_samples):
+    path = app_context().gyro_bias_path
     raw = {}
-    if os.path.exists(_GYRO_BIAS_FILE):
+    if os.path.exists(path):
         try:
-            with open(_GYRO_BIAS_FILE, 'r') as f:
+            with open(path, 'r') as f:
                 raw = json.load(f)
         except Exception:
             raw = {}
@@ -33,5 +35,6 @@ def save_gyro_bias(addr, bias, n_samples):
         "n_samples": n_samples,
         "calibrated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    with open(_GYRO_BIAS_FILE, 'w') as f:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, 'w') as f:
         json.dump(raw, f, indent=2)

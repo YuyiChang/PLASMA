@@ -6,8 +6,22 @@ PLASMA: Platform for LSL-based Acquisition of Sensor Metrics and Analytics
 
 - `conda create -n plasma python=3.12`
 - `conda activate plasma`
-- `pip install -r requirements.txt`
-- `python -m plasma`
+- `pip install -e ".[all]"` — or a lean subset, e.g. `".[msense]"` / `".[qb2,pupil]"`
+- `python -m plasma` (or the `plasma` console script)
+
+`pip install -r requirements.txt` still works — it's a shim for `-e .[all,build,test]`.
+
+Writable state (device config, gyro-bias calibration, `data/` recordings, session
+log) lives in the working directory by default; set `PLASMA_HOME` to relocate it.
+
+### use PLASMA from another project
+
+```
+pip install "plasma-app[msense] @ git+https://github.com/YuyiChang/PLASMA@v1.0.0"
+```
+
+The distribution is `plasma-app`; the import package is `plasma`. Extras map to
+plugins: `msense`, `qb2`, `pupil`, `shimmer`, `obs` (and `all`).
 
 ## Known issue
 

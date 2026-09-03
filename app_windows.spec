@@ -1,6 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
+#
+# Device plugins are imported dynamically by plasma.plugins, so they are pulled
+# in by plasma/__pyinstaller/hook-plasma.py (auto-discovered via the `pyinstaller`
+# entry point once `pip install -e .` has run) — no hand hiddenimports list here.
 import os, pylsl
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files
 
 datas = []
 datas += collect_data_files('gradio_client')
@@ -14,18 +18,7 @@ a = Analysis(
     pathex=[],
     binaries=[(os.path.join(os.path.dirname(pylsl.__file__), 'lib'), 'pylsl/lib')],
     datas=datas,
-    hiddenimports=[
-        "pylsl",
-        "pupil_labs",
-        # device plugins are imported dynamically — keep in sync with
-        # plasma.plugins._STATIC / ._DISCOVERY
-        "plasma.plugins",
-        "plasma.devices.qb2",
-        "plasma.devices.pupil_labs",
-        "plasma.devices.shimmer",
-        "plasma.devices.obs",
-        "plasma.devices.bitalino",
-    ] + collect_submodules("plasma.devices.msense"),
+    hiddenimports=["pylsl", "pupil_labs"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

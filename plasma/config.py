@@ -3,12 +3,8 @@ import json
 import os
 import tempfile
 
-from plasma import plugins
-
-__version__ = "0.1.0-beta"
-__data_dir__ = "data"
-
-_DEVICE_CONFIG_FILE = "plasma_device_config.json"
+from plasma import plugins, __version__  # noqa: F401  (re-exported for callers)
+from plasma.app_context import app_context
 
 # `enabled_devices` real default is computed in refresh_defaults() once the
 # plugin registry is loaded (the file's own value wins when present).
@@ -36,9 +32,10 @@ class DeviceConfig:
     # ── persistence ──────────────────────────────────────────────────────────
 
     def _load(self):
-        if os.path.exists(_DEVICE_CONFIG_FILE):
+        cfg_path = app_context().config_path
+        if os.path.exists(cfg_path):
             try:
-                with open(_DEVICE_CONFIG_FILE, 'r') as f:
+                with open(cfg_path, 'r') as f:
                     raw = json.load(f)
                 return {
                     "enabled_devices": list(raw.get("enabled_devices", [])),
@@ -59,7 +56,9 @@ class DeviceConfig:
         }
 
     def _save(self):
-        with open(_DEVICE_CONFIG_FILE, 'w') as f:
+        path = app_context().config_path
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, 'w') as f:
             json.dump({
                 "enabled_devices": self._active,
                 "ip_qb2_lidar": self.ip_lidar,
@@ -110,7 +109,7 @@ class DeviceConfig:
             "ip_pupil_labs": ip_pupil_labs,
             "plugins": self.plugins,
         }
-        path = os.path.join(tempfile.mkdtemp(), "plasma_device_config.json")
+        path = os.path.join(tempfile.mkdtemp(), app_context().config_filename)
         with open(path, 'w') as f:
             json.dump(config, f, indent=2)
         return path, f"Config exported with {len(selected)} device(s)"

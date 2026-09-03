@@ -4,13 +4,14 @@ import struct
 
 from plasma.devices.template import PlasmaMemo
 from plasma import journal
+from plasma.app_context import app_context
 from plasma.devices.msense.device import MotionSenseHRV, ERASE_CODE
 
 
 # ── journaler (core leaf) ───────────────────────────────────────────────────
 
 def test_journal_stream_name_and_types():
-    assert journal.JOURNAL_STREAM == "PLASMA"
+    assert app_context().journal_stream == "PLASMA"
     assert journal.MSG_TYPES == ["Task start", "Task end", "Flag"]
 
 
@@ -19,8 +20,8 @@ def test_format_journal_msg():
     assert journal.format_journal_msg("Flag", "", "odd noise") == "Flag [] odd noise"
 
 
-def test_task_labels_default_and_file(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+def test_task_labels_default_and_file(tmp_path):
+    # tmp_path is the app home (see the autouse _isolate_app_state fixture)
     assert journal.task_labels() == ["A", "B", "C", "D", "E"]
     (tmp_path / "task.txt").write_text("walk\nsit\n\nstairs\n")
     assert journal.task_labels() == ["walk", "sit", "stairs"]
