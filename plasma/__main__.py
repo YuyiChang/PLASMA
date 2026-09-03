@@ -2,14 +2,15 @@ import atexit
 import os
 import signal
 import gradio as gr
+from plasma import plugins
 from plasma.integrated_panel import IntegratedPanel
 from plasma.config import device_config
 
 
 def _handle_sigterm(signum, frame):
-    # run atexit hooks (device _shutdown_cleanup — CANCEL + BLE disconnect) then
-    # exit hard, so `kill <pid>` doesn't leave an MSense mid-transfer holding its
-    # single connection slot until the supervision timeout
+    # run atexit hooks (device shutdown-cleanup handlers) then exit hard, so
+    # `kill <pid>` doesn't leave a device mid-transfer holding a resource
+    # (e.g. a BLE connection slot) until its own supervision timeout
     atexit._run_exitfuncs()
     os._exit(143)
 
@@ -30,6 +31,9 @@ def main():
     except ValueError:
         pass  # not the main thread (e.g. imported oddly) — atexit still covers normal exit
 
+    plugins.load_plugins()
+    device_config.refresh_defaults()
+
     ip = IntegratedPanel()
     # pl = PupilLabsDashboard()
 
@@ -38,8 +42,11 @@ def main():
             ip.interface()
         with gr.Tab("Signal visualizer"):
             ip.visualizer_interface()
-        with gr.Tab("ECG/PPG Signal Quality"):
-            ip.signal_quality_interface()
+        # extra tabs contributed by enabled plugins (e.g. MSense SQC / IMU)
+        for plugin in device_config.get_active_table().values():
+            for tab_title, builder in plugin.tabs:
+                with gr.Tab(tab_title):
+                    builder(ip)
         with gr.Tab("Configuration"):
             device_config.interface()
         # with gr.Tab("PL"):

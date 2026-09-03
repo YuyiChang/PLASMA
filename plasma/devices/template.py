@@ -7,14 +7,21 @@ from collections import deque
 DEFAULT_WINDOW_S = 30.0
 
 class PlasmaMemo():
-    def __init__(self, name, channels=None, window_s=DEFAULT_WINDOW_S):
+    def __init__(self, name, channels=None, window_s=DEFAULT_WINDOW_S, label=None,
+                 channel_groups=None):
         self.name = name
+        # human-facing label for UI panels; defaults to name. The identifier
+        # stays `name` (LSL stream, status keys) — `label` is cosmetic.
+        self.label = label or name
         self.sts = "🟦" # status
         self.set_latest("initialized")
         self.window_s = window_s
         # named rolling buffers of (t, value), t = seconds since the caller's
         # own time reference (e.g. session start) — pruned to the last window_s
         self.channels = {ch: deque() for ch in (channels or [])}
+        # optional {group label: [channel names]} the Signal visualizer uses to
+        # put related channels on one shared subplot instead of one row each
+        self.channel_groups = dict(channel_groups or {})
 
     def get_sts(self):
         return {
@@ -61,27 +68,17 @@ class PlasmaDevice:
     def get_sources(self):
         """Map of source-name -> PlasmaMemo for live visualization.
 
-        Most devices expose a single memo under their own tag; devices with
-        multiple physical sub-devices (e.g. MSense wristbands) override
-        self.memo with a {sub_device_name: PlasmaMemo} dict instead."""
+        Most devices expose a single memo under their own tag; a device with
+        multiple physical sub-devices overrides self.memo with a
+        {sub_device_name: PlasmaMemo} dict instead."""
         if isinstance(self.memo, dict):
             return self.memo
         return {self.tag: self.memo}
 
-    def reset_orientation(self):
-        """No-op by default; devices that compose a running orientation
-        estimate (e.g. MSense IMU stream) override this."""
-        pass
-
-    def start_gyro_calibration(self, duration=3.0):
-        """No-op by default; devices with a gyro-bias-correctable orientation
-        estimate (e.g. MSense IMU stream) override this."""
-        pass
-
     def disconnect(self):
-        """No-op by default; devices holding an external connection (e.g.
-        MSense BLE peripherals) override this to tear it down before the
-        instance is discarded on re-initialization."""
+        """No-op by default; a device holding an external connection overrides
+        this to tear it down before the instance is discarded on
+        re-initialization."""
         pass
 
     def info(self, msg):

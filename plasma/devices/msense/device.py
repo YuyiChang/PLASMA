@@ -14,15 +14,15 @@ from pylsl import StreamInfo, StreamOutlet, cf_double64
 import numpy as np
 import struct
 from plasma.config import __data_dir__, __version__, device_config
-from plasma.quaternion import IDENTITY_QUAT, quat_multiply, quat_normalize
-from plasma.gyro_bias import load_gyro_bias, save_gyro_bias
-from plasma import nus_stream
-from plasma.nus_stream import (
+from .quaternion import IDENTITY_QUAT, quat_multiply, quat_normalize
+from .gyro_bias import load_gyro_bias, save_gyro_bias
+from . import nus_stream
+from .nus_stream import (
     StreamSession, ProtocolError, build_command, new_session_id,
     OP_START, OP_CANCEL, PROFILE, DEVICE_PPG,
     HANDSHAKE_TIMEOUT_S,
 )
-from plasma.ppg_ecg_records import decode_ppg, decode_ecg
+from .records import decode_ppg, decode_ecg
 
 yams_dir = __data_dir__
 
@@ -67,8 +67,12 @@ class MotionSenseHRV(PlasmaDevice):
     def __init__(self, session_info, logger, tag):
         super().__init__(session_info, logger, tag)
 
-        self.device_list = device_config.get_active_msense_devices()
-        self.imu_stream_devices = device_config.get_imu_stream_devices()
+        from . import config as mcfg
+        blob = device_config.get_plugin_config("msense")
+        self.device_list = mcfg.active_devices(blob)
+        self.imu_stream_devices = mcfg.imu_stream_devices(blob)
+        # Name -> "Name (Nickname)" for UI panels; identifier stays the Name.
+        self.display_labels = mcfg.display_labels(blob)
 
         bias_by_addr = load_gyro_bias()
 
@@ -83,11 +87,18 @@ class MotionSenseHRV(PlasmaDevice):
         self._state_lock = threading.Lock()
         for k, addr in self.device_list.items():
             channels = ["ENMO", "counter"]
+            groups = {}
             if k in self.imu_stream_devices:
                 channels += ["AccX", "AccY", "AccZ", "Q0", "Q1", "Q2", "Q3", "OrientX", "OrientY", "OrientZ", "OrientW"]
+                groups = {
+                    "Accel (g)": ["AccX", "AccY", "AccZ"],
+                    "Quaternion Δ (per-frame)": ["Q0", "Q1", "Q2", "Q3"],
+                    "Orientation (composed)": ["OrientX", "OrientY", "OrientZ", "OrientW"],
+                }
                 self.orientation_quat[k] = IDENTITY_QUAT
                 self.gyro_bias[k] = bias_by_addr.get(addr, (0.0, 0.0, 0.0))
-            self.memo[k] = PlasmaMemo(k, channels=channels)
+            self.memo[k] = PlasmaMemo(k, channels=channels, label=self.display_labels.get(k, k),
+                                      channel_groups=groups)
             self.sqc_state[k] = self._new_sqc_state()
 
         # fallback reference in case data arrives before start() is clicked;
@@ -487,6 +498,11 @@ class MotionSenseHRV(PlasmaDevice):
     def get_sqc_devices(self):
         """Wristband names currently connected and eligible for an SQC snapshot request."""
         return list(self.active_devices.keys())
+
+    def display_name(self, name):
+        """UI label for a wristband: ``"Name (Nickname)"`` when a nickname is
+        configured, else the bare Name. ``name`` stays the identifier."""
+        return self.display_labels.get(name, name)
 
     def request_sqc_snapshot(self, name, max_seconds=None, history_only=False):
         """Pull a snapshot. max_seconds / history_only enable quick mode: the

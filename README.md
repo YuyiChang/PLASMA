@@ -14,11 +14,14 @@ PLASMA: Platform for LSL-based Acquisition of Sensor Metrics and Analytics
 - [ ] need manually set lidar ip addr
 
 
-## device template
+## developing a sensor plugin
 
-for developing device-specific interface to be integrayed with `plasma.integrated_panel`
+Every sensor is a plugin: a `PlasmaDevice` subclass plus a registration entry in
+`plasma/plugins.py`. Core code never imports a concrete device.
 
-> refer to `PlasmaDevice` in `plasma/devices/template.py`
+> full guide: [`plasma/devices/README.md`](plasma/devices/README.md)
+> base class: `PlasmaDevice` in `plasma/devices/template.py`
+> reference package (config section + tabs + multi-unit): `plasma/devices/msense/`
 
 ## references
 
