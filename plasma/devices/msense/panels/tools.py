@@ -8,6 +8,7 @@ Extractor, Clock Sync, Data viewer, Devices.
 import gradio as gr
 
 from .clocksync import build_clocksync
+from .control import build_control_tab
 from .downloader import build_downloader
 from .extractor import build_extractor, build_extractor_pro
 from .imu import build_imu_tab
@@ -22,6 +23,8 @@ def build_msense_tab(ip=None):
             build_sqc_tab(ip)
         with gr.Tab("🧭 IMU / Orientation"):
             build_imu_tab(ip)
+        with gr.Tab("🎛️ Control"):
+            build_control_tab(ip)
         with gr.Tab("📂 Downloader"):
             build_downloader(ip)
         with gr.Tab("🛠️ Extractor"):

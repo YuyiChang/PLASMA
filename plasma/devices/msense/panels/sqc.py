@@ -72,8 +72,12 @@ def _update_sqc(ip):
         return "⛔ MSense device not initialized — initialize it on the Session dashboard tab first", gr.update()
 
     names = dev.get_sqc_devices()
+    caps_note = dev.caps_summary()
     if not names:
-        return "No MSense wristbands connected.", gr.update()
+        msg = "No NUS-capable MSense wristbands connected."
+        if caps_note:
+            msg += f"\n\n_{caps_note}_"
+        return msg, gr.update()
 
     def _diag_str(status):
         d = status.get("diag") or {}
@@ -135,6 +139,9 @@ def _update_sqc(ip):
             f"- **{disp}** — ✅ {result['device_type']}{quick} · id `{prov.get('device_id', '?')}` · "
             f"fw `{str(prov.get('git_commit', '?'))[:10]}`{dirty} · saved `{status['saved_path']}`"
         )
+
+    if caps_note and "NUS unavailable" in caps_note:
+        lines.append(f"\n_{caps_note}_")
 
     fig = _build_sqc_figure(results) if results else gr.update()
     return "\n".join(lines), fig

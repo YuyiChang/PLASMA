@@ -37,6 +37,16 @@ NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # host -> device (write)
 NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # device -> host (notify)
 
+# control service — start/stop, time sync, participant encoding, flash erase
+CTL_SERVICE_UUID = "da39c930-1d81-48e2-9c68-d0ae4bbd351f"
+CTL_ENC_CHAR_UUID = "da39c933-1d81-48e2-9c68-d0ae4bbd351f"   # participant encoding (write/read)
+CTL_ERASE_CHAR_UUID = "da39c934-1d81-48e2-9c68-d0ae4bbd351f"  # write 68 -> full flash erase
+ERASE_CODE = 68
+
+# standard Bluetooth SIG Battery Service
+BATTERY_SERVICE_UUID = "0000180f-0000-1000-8000-00805f9b34fb"
+BATTERY_CHAR_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
+
 SQC_MIN_MTU = 128
 SQC_DEBUG = True  # emit per-notification telemetry (printed off the BLE thread)
 
@@ -81,12 +91,19 @@ class MotionSenseHRV(PlasmaDevice):
         self.gyro_bias = {}
         self.gyro_calib = {}
         self.sqc_state = {}
+        self.battery = {}          # name -> last battery %
+        # what each wristband actually subscribed to — older firmware lacks NUS,
+        # not every unit has the demo IMU-stream characteristic
+        self.caps = {}             # name -> {"nus": bool, "imu": bool, "battery": bool}
+        self.auto_reconnect = True
+        self._last_reconnect_sweep = 0.0
         # guards orientation_quat/gyro_calib/gyro_bias, mutated from both the
         # Gradio/main thread (start/stop/reset/calibrate) and the BLE notify
         # callback thread (imu_stream_handler)
         self._state_lock = threading.Lock()
         for k, addr in self.device_list.items():
-            channels = ["ENMO", "counter"]
+            channels = ["ENMO", "counter", "battery"]
+            self.caps[k] = {"nus": False, "imu": False, "battery": False}
             groups = {}
             if k in self.imu_stream_devices:
                 channels += ["AccX", "AccY", "AccZ", "Q0", "Q1", "Q2", "Q3", "OrientX", "OrientY", "OrientZ", "OrientW"]
@@ -206,8 +223,16 @@ class MotionSenseHRV(PlasmaDevice):
                     self.active_outlets[name] = MsenseOutlet(n, p)
                     try:
                         self.register_nus_notify(p, name)
+                        self.caps[name]["nus"] = True
                     except Exception as e:
                         self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
+                    try:
+                        pct = p.read(BATTERY_SERVICE_UUID, BATTERY_CHAR_UUID)[0]
+                        self.battery[name] = pct
+                        self.caps[name]["battery"] = True
+                        self.memo[name].set_latest(f"🔋 {pct}%")
+                    except Exception as e:
+                        self.info(f"battery read unavailable on {n}: {e}")
                 except Exception as e:
                     self.info(f"Error connecting to {n}: {e}")
                     self.memo[name].sts = "⛔ connect failed"
@@ -221,8 +246,9 @@ class MotionSenseHRV(PlasmaDevice):
             else:
                 self.memo[name].sts = "⛔ device not found"
 
-        # self.info(f"All target devices connected")
-        # self.ctl_state = "Device(s) connected"
+        # run the 1 Hz supervisor as soon as anything is connected — it now also
+        # does the auto-reconnect sweep, not just SQC stall recovery
+        self._ensure_sqc_threads()
 
     def start(self):
         timestamp = time.strftime("%y%m%d_%H%M")
@@ -292,6 +318,91 @@ class MotionSenseHRV(PlasmaDevice):
         self.active_devices = {}
         self.active_outlets = {}
 
+    # ── manual controls (surfaced in the MSense > Control sub-tab) ───────────
+
+    def reconnect_all(self):
+        """One-shot reconnect of any dropped wristband."""
+        n = 0
+        for name, p in list(self.active_devices.items()):
+            try:
+                if not p.is_connected():
+                    self._reconnect_peripheral(name, "manual reconnect")
+                    n += 1
+            except Exception as e:
+                self.info(f"reconnect {name} failed: {e}")
+        return f"Reconnect attempted on {n} wristband(s)" if n else "All wristbands connected"
+
+    def erase_flash_data(self, passcode):
+        """Full on-device flash erase — gated on the fixed passcode 68.
+
+        Byte-for-byte identical to YAMS: a 4-byte LE `68` to the reset
+        characteristic on the control service. The device wipes NAND and
+        resets, dropping the BLE link on its own — like YAMS we just clear our
+        device dicts here rather than force-disconnecting mid-reset.
+        """
+        try:
+            code = int(passcode)
+        except (TypeError, ValueError):
+            code = None
+        if code != ERASE_CODE:
+            return "⛔ wrong erase code"
+
+        done, failed = 0, []
+        for name, p in list(self.active_devices.items()):
+            try:
+                p.write_request(CTL_SERVICE_UUID, CTL_ERASE_CHAR_UUID,
+                                struct.pack("<I", ERASE_CODE))
+                self.memo[name].sts = "🧨 erased — re-Initialize"
+                done += 1
+            except Exception as e:
+                self.info(f"erase write failed on {name}: {e}")
+                failed.append(f"{name}: {e}")
+
+        self.info(f"Flash erase issued to {done} wristband(s); failed: {failed}")
+        self._sqc_threads_stopped = True        # let the watchdog loop exit
+        self.active_devices = {}
+        self.active_outlets = {}
+
+        if done:
+            msg = (f"🧨 erase issued to {done} wristband(s) — wait for the lights out, "
+                   f"then re-Initialize on the Session dashboard")
+        else:
+            msg = "⚠️ erase failed on every wristband"
+        if failed:
+            msg += "\n" + "\n".join(f"- {f}" for f in failed)
+        return msg
+
+    def get_services(self):
+        """A text dump of every GATT service/characteristic on each connected wristband."""
+        if not self.active_devices:
+            return "No wristband connected."
+        out = []
+        for name, p in list(self.active_devices.items()):
+            out.append(f"### {name}")
+            try:
+                for service in p.services():
+                    for ch in service.characteristics():
+                        out.append(f"- `{service.uuid()}` / `{ch.uuid()}`")
+            except Exception as e:
+                out.append(f"  (error: {e})")
+        return "\n".join(out)
+
+    def write_enc(self, enc):
+        """Write an arbitrary participant-encoding int to every wristband and read it back."""
+        try:
+            val = int(enc)
+        except (TypeError, ValueError):
+            return "⛔ enter an integer"
+        lines = []
+        for name, p in list(self.active_devices.items()):
+            try:
+                p.write_request(CTL_SERVICE_UUID, CTL_ENC_CHAR_UUID, struct.pack("<I", val))
+                back = struct.unpack("<I", p.read(CTL_SERVICE_UUID, CTL_ENC_CHAR_UUID))[0]
+                lines.append(f"{name}: wrote {val}, read back {back}")
+            except Exception as e:
+                lines.append(f"{name}: {e}")
+        return "\n".join(lines) or "No wristband connected."
+
     def start_gyro_calibration(self, duration=3.0):
         now = time.time()
         for name in self.imu_stream_devices:
@@ -340,19 +451,17 @@ class MotionSenseHRV(PlasmaDevice):
         # stop streaming, not stack another notify callback on top
         if start:
             self.register_enmo(peripheral, name)
+            try:
+                self.register_battery(peripheral, name)
+            except Exception as e:
+                self.info(f"battery notify unavailable on {name}: {e}")
 
             if name in self.imu_stream_devices:
                 try:
                     self.register_imu_stream(peripheral, name)
+                    self.caps[name]["imu"] = True
                 except Exception as e:
                     self.info(f"IMU stream unavailable on {name} (demo firmware not present?): {e}")
-
-        #
-        # if start and self.auto_reconnect:
-        #     self.start_device_monitor()
-        # elif not start:
-        #     self.stop_device_monitor()
-            
 
     def register_enmo(self, peripheral, name):
         # ENMO 
@@ -383,6 +492,21 @@ class MotionSenseHRV(PlasmaDevice):
             self.memo[name].set_data("counter", packet_counter[0], elapsed)
         except Exception as e:
             self.info(f"Error handling ENMO packet from {name}: {e}")
+
+    def register_battery(self, peripheral, name):
+        peripheral.notify(BATTERY_SERVICE_UUID, BATTERY_CHAR_UUID,
+                          lambda data: self.battery_handler(data, peripheral, name))
+
+    def battery_handler(self, data, peripheral, name):
+        # runs on the BLE callback thread — never let an exception escape
+        try:
+            pct = int(data[0])
+            self.battery[name] = pct
+            self.caps[name]["battery"] = True
+            self.memo[name].set_data("battery", pct, time.time() - self.t_start)
+            self.memo[name].set_latest(f"🔋 {pct}%")
+        except Exception as e:
+            self.info(f"Error handling battery packet from {name}: {e}")
 
     # demo feature: real-time accel + orientation, only on wristbands with the
     # demo firmware (see data/IMU_STREAM_BLE_CHARACTERISTIC.md)
@@ -496,8 +620,25 @@ class MotionSenseHRV(PlasmaDevice):
                            lambda data: self._nus_data_handler(data, name))
 
     def get_sqc_devices(self):
-        """Wristband names currently connected and eligible for an SQC snapshot request."""
-        return list(self.active_devices.keys())
+        """Wristband names currently connected and eligible for an SQC snapshot
+        request — i.e. those whose NUS characteristic actually subscribed
+        (older firmware without NUS is silently skipped)."""
+        return [n for n in self.active_devices if self.caps.get(n, {}).get("nus")]
+
+    def caps_summary(self):
+        """One-line 'NUS on 2/2 · IMU on 0/2 · battery on 2/2' over connected wristbands."""
+        conn = list(self.active_devices)
+        if not conn:
+            return ""
+        parts = []
+        for cap in ("nus", "imu", "battery"):
+            on = sum(1 for n in conn if self.caps.get(n, {}).get(cap))
+            parts.append(f"{cap.upper() if cap == 'nus' else cap.capitalize()} on {on}/{len(conn)}")
+        missing_nus = [n for n in conn if not self.caps.get(n, {}).get("nus")]
+        s = " · ".join(parts)
+        if missing_nus:
+            s += f" — NUS unavailable on: {', '.join(missing_nus)}"
+        return s
 
     def display_name(self, name):
         """UI label for a wristband: ``"Name (Nickname)"`` when a nickname is
@@ -775,10 +916,14 @@ class MotionSenseHRV(PlasmaDevice):
             "rssi": d["rssi"],
         }
 
+    # how often the watchdog checks connected wristbands for a dropped link
+    RECONNECT_SWEEP_S = 10.0
+
     def _sqc_watchdog_loop(self):
-        """1 Hz supervisor for every active stream (runs off the BLE callback
-        thread). Per stream, in priority order: quick-mode early terminate →
-        quick-mode grace finalize → no-progress recovery."""
+        """1 Hz supervisor (runs off the BLE callback thread). Per active SQC
+        stream, in priority order: quick-mode early terminate → quick-mode grace
+        finalize → no-progress recovery. Also, every RECONNECT_SWEEP_S, an
+        auto-reconnect sweep over every connected wristband."""
         while not getattr(self, "_sqc_threads_stopped", False):
             time.sleep(1.0)
             now = time.time()
@@ -793,6 +938,16 @@ class MotionSenseHRV(PlasmaDevice):
                         self._sqc_recover(name, f"no notification for {now - last:.1f}s")
                 except Exception as e:
                     self.info(f"SQC watchdog error for {name}: {e}")
+
+            if self.auto_reconnect and now - self._last_reconnect_sweep > self.RECONNECT_SWEEP_S:
+                self._last_reconnect_sweep = now
+                for name, p in list(self.active_devices.items()):
+                    try:
+                        if not p.is_connected():
+                            self.info(f"{name} link down — auto-reconnecting")
+                            self._reconnect_peripheral(name, "connection watchdog")
+                    except Exception as e:
+                        self.info(f"reconnect sweep error for {name}: {e}")
 
     def _sqc_quick_check(self, name, state, now):
         """Quick-mode handling. Returns True if it acted (skip no-progress)."""
@@ -858,7 +1013,15 @@ class MotionSenseHRV(PlasmaDevice):
         time.sleep(1.5)
         try:
             peripheral.connect()
-            self.register_nus_notify(peripheral, name)
+            try:
+                self.register_nus_notify(peripheral, name)
+                self.caps[name]["nus"] = True
+            except Exception as e:
+                self._sqc_debug(name, f"  NUS re-subscribe failed: {e}")
+            try:
+                self.register_battery(peripheral, name)
+            except Exception as e:
+                self._sqc_debug(name, f"  battery re-subscribe failed: {e}")
             if getattr(self, "log_dir", None):
                 try:
                     self.register_enmo(peripheral, name)

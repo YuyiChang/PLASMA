@@ -2,6 +2,7 @@ import gradio as gr
 import struct
 import os
 from plasma.lsl_session import encode_participant
+from plasma.journal import task_labels, format_journal_msg, open_journal_outlet, MSG_TYPES
 import logging, datetime
 from logging import Logger
 from plasma import plugins
@@ -23,6 +24,15 @@ class IntegratedPanel():
 
         self.logger = get_logger(__data_dir__)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
+
+        # session task-marker LSL stream (None if liblsl is unavailable)
+        self.journal_outlet = open_journal_outlet()
+
+    def journal(self, msg):
+        """Push a task/flag marker onto the journaler LSL stream + the session log."""
+        if self.journal_outlet is not None:
+            self.journal_outlet.push_sample([msg])
+        self.logger.info(f"JOURNAL: {msg}")
 
     def visualizer_interface(self):
         with gr.Column():
@@ -192,6 +202,17 @@ class IntegratedPanel():
                     self.btn_start.click(self.start_collection)
                     self.btn_stop.click(self.stop_collection)
 
+                with gr.Accordion(label="🗒️ Journaler", open=False):
+                    with gr.Row():
+                        j_type = gr.Radio(MSG_TYPES, value=MSG_TYPES[0], label="Message type")
+                        j_task = gr.Dropdown(task_labels(), label="Task")
+                        j_refresh = gr.Button("🔄", scale=0)
+                    j_free = gr.Text(label="Free text", placeholder="optional")
+                    j_send = gr.Button("✍️ Record marker", variant="primary")
+
+                    j_refresh.click(lambda: gr.Dropdown(choices=task_labels()), outputs=j_task)
+                    j_send.click(self._record_journal, inputs=[j_type, j_task, j_free])
+
                 self.params = {"Memo": {"type": "welcome!"}}
                 params = gr.ParamViewer(self.params)
                 timer = gr.Timer(value=1)
@@ -262,6 +283,11 @@ class IntegratedPanel():
         # print(params)
         return params
 
+
+    def _record_journal(self, msg_type, task, free_text):
+        msg = format_journal_msg(msg_type, task or "", free_text or "")
+        self.journal(msg)
+        gr.Info(f"Recorded: {msg}")
 
     def get_participant_encoding(self, sub, ses):
         integer_representation = encode_participant(sub, ses)
