@@ -1,9 +1,12 @@
 """NUS bounded sensor-stream protocol (version 1) — pure codec + session FSM.
 
 No BLE / device state lives here: this module turns raw notification byte
-strings into validated protocol events and reassembles the fixed 96 KiB sensor
-payload. See local_docs/NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md for the wire
-contract; plasma/devices/msense.py drives it over an actual BLE link and
+strings into validated protocol events and reassembles the bounded sensor
+payload whose size START_ACK reports for that session (historically a fixed
+96 KiB in protocol version 1, but firmware has since shipped other
+geometries — see TOTAL_SENSOR_BYTES/MAX_RECORD_MULTIPLE below). See
+local_docs/NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md for the wire contract;
+plasma/devices/msense.py drives it over an actual BLE link and
 plasma/ppg_ecg_records.py decodes the reassembled payload.
 """
 from dataclasses import dataclass, field
@@ -26,7 +29,21 @@ START_ACK_PAYLOAD_LEN = 96
 RESULT_PAYLOAD_LEN = 4
 END_PAYLOAD_LEN = 24
 DATA_PREFIX_LEN = 12
-TOTAL_SENSOR_BYTES = 98304  # fixed in protocol version 1
+
+# Historical protocol-version-1 total, both device types, at doc-writing time.
+# No longer enforced as an equality gate (firmware geometry has since moved:
+# an ECG build was observed reporting 131,076). Kept only as a reference/
+# fallback for callers that want *a* number before a session's START_ACK
+# arrives. See PROFILE below and MAX_RECORD_MULTIPLE for what's actually
+# validated.
+TOTAL_SENSOR_BYTES = 98304
+
+# START_ACK's own history_records/forward_records/total_bytes are trusted as
+# long as they're internally consistent (see parse_start_ack) and not
+# absurd — this bounds a single device-type's total record count to guard
+# against a garbled ACK causing unbounded host-side buffering, without
+# pinning to one exact historical geometry that firmware is free to change.
+MAX_RECORD_MULTIPLE = 4
 
 PHASE_HISTORY = 0
 PHASE_FORWARD = 1
@@ -200,8 +217,6 @@ def parse_start_ack(payload):
         raise ProtocolError("START_ACK git commit is not 40 lowercase hex chars")
     if any(reserved):
         raise ProtocolError("START_ACK reserved bytes nonzero")
-    if total_bytes != TOTAL_SENSOR_BYTES:
-        raise ProtocolError(f"START_ACK total bytes {total_bytes} != {TOTAL_SENSOR_BYTES}")
     if (history_records + forward_records) * record_size != total_bytes:
         raise ProtocolError("START_ACK counts * record_size != total bytes")
 
@@ -212,10 +227,20 @@ def parse_start_ack(payload):
         raise ProtocolError(
             f"START_ACK record size {record_size} != {profile['record_size']} for {profile['name']}"
         )
-    if history_records != profile["history_records"] or forward_records != profile["forward_records"]:
+    # Exact history/forward counts are firmware's to choose (this has already
+    # changed once across firmware revisions); only guard against a garbled
+    # ACK requesting an unreasonable amount of host-side buffering.
+    known_total = profile["history_records"] + profile["forward_records"]
+    reported_total = history_records + forward_records
+    if history_records <= 0 or forward_records <= 0:
         raise ProtocolError(
-            f"START_ACK record geometry {history_records}/{forward_records} != "
-            f"{profile['history_records']}/{profile['forward_records']} for {profile['name']}"
+            f"START_ACK record geometry {history_records}/{forward_records} not positive"
+        )
+    if reported_total > known_total * MAX_RECORD_MULTIPLE:
+        raise ProtocolError(
+            f"START_ACK record geometry {history_records}/{forward_records} "
+            f"({reported_total} records) exceeds sane bound "
+            f"({known_total * MAX_RECORD_MULTIPLE}) for {profile['name']}"
         )
 
     device_name = name_field[:name_len].decode("utf-8", errors="replace")
@@ -328,7 +353,8 @@ _TERMINAL = {COMPLETE, REJECTED, CANCELLED, FAILED}
 class StreamSession:
     """Feed one whole TX notification at a time via ``feed``; never concatenate
     notifications. Terminal state is one of COMPLETE / REJECTED / CANCELLED /
-    FAILED. On COMPLETE, ``payload`` holds exactly 98,304 validated bytes."""
+    FAILED. On COMPLETE, ``payload`` holds exactly ``start_ack.total_bytes``
+    validated bytes (the size is session-reported, not a fixed constant)."""
 
     session_id: int
     state: str = START_PENDING
@@ -494,9 +520,9 @@ class StreamSession:
             failures.append(f"history {end.history_records_sent} != {a.history_records}")
         if end.forward_records_captured != a.forward_records:
             failures.append(f"forward {end.forward_records_captured} != {a.forward_records}")
-        if end.total_bytes_sent != TOTAL_SENSOR_BYTES or len(self.payload) != TOTAL_SENSOR_BYTES:
+        if end.total_bytes_sent != a.total_bytes or len(self.payload) != a.total_bytes:
             failures.append(
-                f"bytes end={end.total_bytes_sent} local={len(self.payload)} != {TOTAL_SENSOR_BYTES}"
+                f"bytes end={end.total_bytes_sent} local={len(self.payload)} != {a.total_bytes}"
             )
         if end.data_message_count != self._data_message_count:
             failures.append(

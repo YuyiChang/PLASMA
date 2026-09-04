@@ -41,16 +41,23 @@ def _start_ack_payload(device_type, *, name=b"MSense4X-TEST", commit=b"a" * 40,
     return body
 
 
-def _data_msgs(device_type, chunk_records):
-    """A full valid history+forward DATA sequence, `chunk_records` per message."""
+def _data_msgs(device_type, chunk_records, *, history=None, forward=None):
+    """A full valid history+forward DATA sequence, `chunk_records` per message.
+
+    `history`/`forward` default to the PROFILE table but can be overridden to
+    exercise a different (still self-consistent) geometry, e.g. a newer
+    firmware's record counts.
+    """
     p = PROFILE[device_type]
     rs = p["record_size"]
-    total = p["history_records"] + p["forward_records"]
+    history = p["history_records"] if history is None else history
+    forward = p["forward_records"] if forward is None else forward
+    total = history + forward
     msgs, seq, idx = [], 0, 0
     while idx < total:
-        phase = 0 if idx < p["history_records"] else 1
+        phase = 0 if idx < history else 1
         # never cross the history/forward boundary
-        room = (p["history_records"] - idx) if phase == 0 else (total - idx)
+        room = (history - idx) if phase == 0 else (total - idx)
         count = min(chunk_records, room)
         prefix = struct.pack("<IIHBB", seq, idx, count, phase, 0)
         msgs.append(_msg(MSG_DATA, prefix + b"\x5a" * (count * rs)))
@@ -59,11 +66,14 @@ def _data_msgs(device_type, chunk_records):
     return msgs, seq
 
 
-def _end_payload(device_type, data_count, *, status=0, detail=0, override=None):
+def _end_payload(device_type, data_count, *, status=0, detail=0, override=None,
+                  history=None, forward=None):
     p = PROFILE[device_type]
+    history = p["history_records"] if history is None else history
+    forward = p["forward_records"] if forward is None else forward
     fields = dict(
-        status=status, state=2, history=p["history_records"],
-        forward=p["forward_records"], total=TOTAL_SENSOR_BYTES,
+        status=status, state=2, history=history,
+        forward=forward, total=(history + forward) * p["record_size"],
         data_count=data_count, detail=detail,
     )
     if override:
@@ -145,14 +155,70 @@ def test_start_ack_nonzero_reserved():
         parse_start_ack(_start_ack_payload(DEVICE_PPG, reserved=b"\x00\x00\x01\x00\x00\x00"))
 
 
-def test_start_ack_bad_geometry():
+def test_start_ack_inconsistent_geometry_rejected():
+    """history/forward changed without recomputing total -> arithmetic
+    self-consistency check ((history+forward)*record_size == total) fires.
+    Exact history/forward counts are no longer pinned to PROFILE, but the
+    reported fields must still agree with each other."""
     with pytest.raises(ProtocolError):
         parse_start_ack(_start_ack_payload(DEVICE_PPG, override={"history": 999}))
 
 
-def test_start_ack_wrong_total():
+def test_start_ack_inconsistent_total_rejected():
     with pytest.raises(ProtocolError):
         parse_start_ack(_start_ack_payload(DEVICE_ECG, override={"total": 1234}))
+
+
+def test_start_ack_new_firmware_geometry_accepted():
+    """A self-consistent geometry that differs from the historical PROFILE
+    counts (e.g. an ECG firmware build with a larger forward window) is
+    accepted. Regression test for the 131,076-vs-98,304 outage: only
+    self-consistency and the sane-record-count bound are enforced now, not
+    an exact match against one memorized geometry."""
+    history, forward, rs = 2731, 8192, PROFILE[DEVICE_ECG]["record_size"]
+    total = (history + forward) * rs
+    assert total == 131076 and total != TOTAL_SENSOR_BYTES
+    ack = parse_start_ack(_start_ack_payload(DEVICE_ECG, override={
+        "history": history, "forward": forward, "total": total,
+    }))
+    assert ack.history_records == history
+    assert ack.forward_records == forward
+    assert ack.total_bytes == total
+
+
+def test_start_ack_record_size_mismatch_rejected():
+    """record_size must still match the known per-device-type record format
+    — the decoders are written for exactly 16-byte PPG / 12-byte ECG
+    frames, so this is not relaxed."""
+    p = PROFILE[DEVICE_PPG]
+    bad_size = 99
+    with pytest.raises(ProtocolError):
+        parse_start_ack(_start_ack_payload(DEVICE_PPG, override={
+            "record_size": bad_size,
+            "total": (p["history_records"] + p["forward_records"]) * bad_size,
+        }))
+
+
+def test_start_ack_geometry_exceeds_sane_bound_rejected():
+    """A self-consistent but absurdly large record count is still rejected,
+    so a garbled ACK can't make the host buffer an unbounded payload."""
+    p = PROFILE[DEVICE_ECG]
+    known_total = p["history_records"] + p["forward_records"]
+    huge = known_total * (ns.MAX_RECORD_MULTIPLE + 1)
+    history, forward, rs = huge // 2, huge - huge // 2, p["record_size"]
+    with pytest.raises(ProtocolError):
+        parse_start_ack(_start_ack_payload(DEVICE_ECG, override={
+            "history": history, "forward": forward, "total": (history + forward) * rs,
+        }))
+
+
+def test_start_ack_nonpositive_geometry_rejected():
+    p = PROFILE[DEVICE_ECG]
+    with pytest.raises(ProtocolError):
+        parse_start_ack(_start_ack_payload(DEVICE_ECG, override={
+            "history": 0, "forward": p["forward_records"],
+            "total": p["forward_records"] * p["record_size"],
+        }))
 
 
 # ── happy path + reassembly ─────────────────────────────────────────────────
@@ -222,6 +288,48 @@ def test_data_after_end_is_error():
 
 
 # ── END validation ──────────────────────────────────────────────────────────
+
+def test_full_stream_new_geometry_reassembles():
+    """End-to-end run with new-firmware-style ECG geometry (a different
+    total than the historical 98,304): the session must complete, proving
+    the whole pipeline (not just parse_start_ack) is geometry-agnostic."""
+    history, forward = 2731, 8192
+    rs = PROFILE[DEVICE_ECG]["record_size"]
+    total = (history + forward) * rs
+    s = StreamSession(SID)
+    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG, override={
+        "history": history, "forward": forward, "total": total,
+    })))
+    data, n = _data_msgs(DEVICE_ECG, 200, history=history, forward=forward)
+    for m in data:
+        s.feed(m)
+    s.feed(_msg(MSG_END, _end_payload(DEVICE_ECG, n, history=history, forward=forward)))
+    assert s.state == ns.COMPLETE
+    assert len(s.payload) == total == 131076
+
+
+def test_end_bytes_checked_against_session_total_not_global():
+    """Regression test: _accept_end must compare END's total_bytes_sent (and
+    the locally accumulated payload) against *this session's own*
+    start_ack.total_bytes, not the historical TOTAL_SENSOR_BYTES constant.
+    An END that reports the old global total instead of this session's real
+    (larger) total must fail, not silently pass."""
+    history, forward = 2731, 8192
+    rs = PROFILE[DEVICE_ECG]["record_size"]
+    total = (history + forward) * rs
+    s = StreamSession(SID)
+    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG, override={
+        "history": history, "forward": forward, "total": total,
+    })))
+    data, n = _data_msgs(DEVICE_ECG, 200, history=history, forward=forward)
+    for m in data:
+        s.feed(m)
+    bad_end = _end_payload(DEVICE_ECG, n, history=history, forward=forward,
+                            override={"total": TOTAL_SENSOR_BYTES})
+    s.feed(_msg(MSG_END, bad_end))
+    assert s.state == ns.FAILED
+    assert "bytes" in s.error
+
 
 def test_end_wrong_data_count_fails():
     s = StreamSession(SID)

@@ -19,21 +19,23 @@ def build_sqc_tab(ip):
             "saved to disk (session log dir if a recording is running, else "
             "`data/sqc_snapshots/`).\n\n"
             "The device always streams a fixed 96 KiB (a pre-buffered *history* window then a "
-            "*forward* window it acquires live — ~16 s total ECG / ~24 s PPG). **Quick mode** "
-            "(default) sends CANCEL once *N* seconds have arrived and keeps the partial; with "
-            "*N* ≤ the history window (~5 s ECG / ~8 s PPG) the whole live-acquisition wait is "
-            "skipped. Clear the field (and leave *History only* off) for a full capture.\n"
+            "*forward* window it acquires live — ~16 s total ECG / ~24 s PPG). Pick a capture "
+            "mode: **All** takes the full stream; **History Only** sends CANCEL at the "
+            "history→forward boundary (~5 s ECG / ~8 s PPG), skipping the live-acquisition wait; "
+            "**Custom** sends CANCEL once the given *N* seconds have arrived and keeps the "
+            "partial.\n"
         )
         with gr.Row():
             btn_refresh_sqc = gr.Button("🔄 Refresh")
             btn_request_sqc = gr.Button("📡 Snapshot all wristbands (sequential)", variant="primary")
             btn_cancel_sqc = gr.Button("✖ Cancel all")
         with gr.Row():
+            sqc_mode = gr.Radio(
+                choices=["All", "History Only", "Custom"], value="Custom",
+                label="Capture mode")
             sqc_max_s = gr.Number(
                 value=5, precision=1, minimum=0,
-                label="Quick mode — stop after N s (clear for full capture)")
-            sqc_hist_only = gr.Checkbox(
-                value=False, label="History only (stop at the history→forward boundary)")
+                label="Custom — stop after N s", interactive=True)
 
         sqc_status = gr.Markdown()
         sqc_plot = gr.Plot(show_label=False)
@@ -42,17 +44,20 @@ def build_sqc_tab(ip):
         # keeps re-decoding / re-plotting the growing signal cheap
         sqc_timer = gr.Timer(value=1.0, active=True)
 
-        def _request(max_seconds=None, history_only=False):
+        def _request(mode, max_seconds=None):
             dev = _msense_device(ip)
             if dev is None:
                 return "⛔ MSense device not initialized — initialize it on the Session dashboard tab first"
-            try:
-                ms = float(max_seconds) if max_seconds not in (None, "", 0) else None
-            except (TypeError, ValueError):
-                ms = None
-            if ms is not None and ms <= 0:
-                ms = None
-            return dev.request_all_sqc_snapshots(max_seconds=ms, history_only=bool(history_only))
+            history_only = (mode == "History Only")
+            ms = None
+            if mode == "Custom":
+                try:
+                    ms = float(max_seconds) if max_seconds not in (None, "", 0) else None
+                except (TypeError, ValueError):
+                    ms = None
+                if ms is not None and ms <= 0:
+                    ms = None
+            return dev.request_all_sqc_snapshots(max_seconds=ms, history_only=history_only)
 
         def _cancel():
             dev = _msense_device(ip)
@@ -60,9 +65,13 @@ def build_sqc_tab(ip):
                 return "⛔ MSense device not initialized"
             return dev.cancel_all_sqc_snapshots()
 
+        def _on_mode_change(mode):
+            return gr.update(interactive=(mode == "Custom"))
+
         btn_refresh_sqc.click(lambda: _update_sqc(ip), outputs=[sqc_status, sqc_plot])
-        btn_request_sqc.click(_request, inputs=[sqc_max_s, sqc_hist_only], outputs=sqc_status)
+        btn_request_sqc.click(_request, inputs=[sqc_mode, sqc_max_s], outputs=sqc_status)
         btn_cancel_sqc.click(_cancel, outputs=sqc_status)
+        sqc_mode.change(_on_mode_change, inputs=sqc_mode, outputs=sqc_max_s)
         sqc_timer.tick(fn=lambda: _update_sqc(ip), outputs=[sqc_status, sqc_plot])
 
 
