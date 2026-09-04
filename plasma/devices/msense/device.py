@@ -64,6 +64,17 @@ SQC_DEBUG = True  # emit per-notification telemetry (printed off the BLE thread)
 SQC_NOPROGRESS_TIMEOUT_S = 5.0
 SQC_AUTO_RECONNECT = True
 
+# simplepyble's connect()/disconnect() are blocking C++ calls with no timeout
+# of their own — against an unreachable peripheral (e.g. right after an
+# unexpected disconnect) connect() can hang indefinitely, which stalls
+# whichever thread calls it inline forever (observed in production: the
+# whole app froze, browser unresponsive, Ctrl-C inert — consistent with the
+# shared watchdog thread, and possibly the whole process depending on
+# whether this simplepyble build releases the GIL during the call, being
+# stuck inside an unguarded connect()). RECONNECT_OP_TIMEOUT_S bounds how
+# long any caller waits via _run_ble_op below.
+RECONNECT_OP_TIMEOUT_S = 15.0
+
 # Quick-mode capture: the protocol always sends the full 96 KiB (history +
 # a live-acquired forward window). When the operator only wants the first N s
 # for a contact check, we let START run, then write CANCEL once enough records
@@ -218,7 +229,13 @@ class MotionSenseHRV(PlasmaDevice):
                     # device happened to be last when the loop finished
                     p.set_callback_on_connected(lambda n=n, p=p: self.info(f"{n} {p.identifier()} is connected"))
                     p.set_callback_on_disconnected(lambda nm=name: self._on_unexpected_disconnect(nm))
-                    p.connect()
+                    # bounded: simplepyble's connect() has no timeout of its
+                    # own and can hang indefinitely against an unreachable
+                    # device — don't let one bad device freeze the whole
+                    # connect loop (or the app, depending on GIL release)
+                    ok, _, err = self._run_ble_op(p.connect, RECONNECT_OP_TIMEOUT_S, f"{n} connect")
+                    if not ok:
+                        raise err
                     self.active_devices[name] = p
                     self.active_outlets[name] = MsenseOutlet(n, p)
                     try:
@@ -227,7 +244,12 @@ class MotionSenseHRV(PlasmaDevice):
                     except Exception as e:
                         self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
                     try:
-                        pct = p.read(BATTERY_SERVICE_UUID, BATTERY_CHAR_UUID)[0]
+                        ok, raw, err = self._run_ble_op(
+                            lambda: p.read(BATTERY_SERVICE_UUID, BATTERY_CHAR_UUID),
+                            RECONNECT_OP_TIMEOUT_S, f"{n} battery read")
+                        if not ok:
+                            raise err
+                        pct = raw[0]
                         self.battery[name] = pct
                         self.caps[name]["battery"] = True
                         self.memo[name].set_latest(f"🔋 {pct}%")
@@ -240,7 +262,7 @@ class MotionSenseHRV(PlasmaDevice):
                     self.active_outlets.pop(name, None)
                     try:
                         if p.is_connected():
-                            p.disconnect()
+                            self._run_ble_op(p.disconnect, RECONNECT_OP_TIMEOUT_S, f"{n} cleanup disconnect")
                     except Exception:
                         pass
             else:
@@ -335,9 +357,12 @@ class MotionSenseHRV(PlasmaDevice):
     def erase_flash_data(self, passcode):
         """Full on-device flash erase — gated on the fixed passcode 68.
 
-        Byte-for-byte identical to YAMS: a 4-byte LE `68` to the reset
-        characteristic on the control service. The device wipes NAND and
-        resets, dropping the BLE link on its own — like YAMS we just clear our
+        A single unsigned byte `68` to the reset characteristic on the
+        control service (confirmed against firmware: a 4-byte write, as an
+        earlier ported version of this code sent, is rejected by the
+        peripheral's GATT server with CBATTErrorInvalidAttributeValueLength —
+        this characteristic expects exactly 1 byte). The device wipes NAND
+        and resets, dropping the BLE link on its own — we just clear our
         device dicts here rather than force-disconnecting mid-reset.
         """
         try:
@@ -351,7 +376,7 @@ class MotionSenseHRV(PlasmaDevice):
         for name, p in list(self.active_devices.items()):
             try:
                 p.write_request(CTL_SERVICE_UUID, CTL_ERASE_CHAR_UUID,
-                                struct.pack("<I", ERASE_CODE))
+                                struct.pack("<B", ERASE_CODE))
                 self.memo[name].sts = "🧨 erased — re-Initialize"
                 done += 1
             except Exception as e:
@@ -464,10 +489,18 @@ class MotionSenseHRV(PlasmaDevice):
                     self.info(f"IMU stream unavailable on {name} (demo firmware not present?): {e}")
 
     def register_enmo(self, peripheral, name):
-        # ENMO 
+        # ENMO
         service_uuid = "da39c950-1d81-48e2-9c68-d0ae4bbd351f"
         characteristic_uuid = "da39c951-1d81-48e2-9c68-d0ae4bbd351f"
-        contents = peripheral.notify(service_uuid, characteristic_uuid, lambda data: self.enmo_handler(data, peripheral, name))
+        # bounded: peripheral.notify() is a blocking simplepyble call with no
+        # timeout of its own and can hang indefinitely (e.g. right after a
+        # reconnect on a still-marginal link) — see _run_ble_op.
+        ok, _, err = self._run_ble_op(
+            lambda: peripheral.notify(service_uuid, characteristic_uuid,
+                                      lambda data: self.enmo_handler(data, peripheral, name)),
+            RECONNECT_OP_TIMEOUT_S, f"{name} ENMO notify subscribe")
+        if not ok:
+            raise err
 
 
     def enmo_handler(self, data, peripheral, name):
@@ -494,8 +527,13 @@ class MotionSenseHRV(PlasmaDevice):
             self.info(f"Error handling ENMO packet from {name}: {e}")
 
     def register_battery(self, peripheral, name):
-        peripheral.notify(BATTERY_SERVICE_UUID, BATTERY_CHAR_UUID,
-                          lambda data: self.battery_handler(data, peripheral, name))
+        # bounded — see register_enmo
+        ok, _, err = self._run_ble_op(
+            lambda: peripheral.notify(BATTERY_SERVICE_UUID, BATTERY_CHAR_UUID,
+                                      lambda data: self.battery_handler(data, peripheral, name)),
+            RECONNECT_OP_TIMEOUT_S, f"{name} battery notify subscribe")
+        if not ok:
+            raise err
 
     def battery_handler(self, data, peripheral, name):
         # runs on the BLE callback thread — never let an exception escape
@@ -513,7 +551,13 @@ class MotionSenseHRV(PlasmaDevice):
     def register_imu_stream(self, peripheral, name):
         service_uuid = "da39c950-1d81-48e2-9c68-d0ae4bbd351f"
         characteristic_uuid = "da39c953-1d81-48e2-9c68-d0ae4bbd351f"
-        peripheral.notify(service_uuid, characteristic_uuid, lambda data: self.imu_stream_handler(data, peripheral, name))
+        # bounded — see register_enmo
+        ok, _, err = self._run_ble_op(
+            lambda: peripheral.notify(service_uuid, characteristic_uuid,
+                                      lambda data: self.imu_stream_handler(data, peripheral, name)),
+            RECONNECT_OP_TIMEOUT_S, f"{name} IMU notify subscribe")
+        if not ok:
+            raise err
 
     def imu_stream_handler(self, data, peripheral, name):
         # runs on the BLE library's callback thread — never let an exception
@@ -611,13 +655,19 @@ class MotionSenseHRV(PlasmaDevice):
             "history_only": False,    # stop at the history->forward boundary
             "early_cancel_sent": False,
             "early_cancel_at": None,
-            "partial": False,         # this capture was cut short on purpose
+            "partial": False,         # this capture was cut short (on purpose or not)
             "quick_seconds": None,    # seconds of signal actually kept
+            "warning": None,          # non-blocking note on why it's incomplete, if any
         }
 
     def register_nus_notify(self, peripheral, name):
-        peripheral.notify(NUS_SERVICE_UUID, NUS_TX_CHAR_UUID,
-                           lambda data: self._nus_data_handler(data, name))
+        # bounded — see register_enmo
+        ok, _, err = self._run_ble_op(
+            lambda: peripheral.notify(NUS_SERVICE_UUID, NUS_TX_CHAR_UUID,
+                                      lambda data: self._nus_data_handler(data, name)),
+            RECONNECT_OP_TIMEOUT_S, f"{name} NUS notify subscribe")
+        if not ok:
+            raise err
 
     def get_sqc_devices(self):
         """Wristband names currently connected and eligible for an SQC snapshot
@@ -684,7 +734,7 @@ class MotionSenseHRV(PlasmaDevice):
             saved_path=None, error=None, diag=diag,
             max_seconds=max_seconds, history_only=bool(history_only),
             early_cancel_sent=False, early_cancel_at=None,
-            partial=False, quick_seconds=None,
+            partial=False, quick_seconds=None, warning=None,
         )
         try:
             peripheral.write_request(NUS_SERVICE_UUID, NUS_RX_CHAR_UUID,
@@ -700,32 +750,78 @@ class MotionSenseHRV(PlasmaDevice):
         self._sqc_debug(name, f"START session={sid:#010x} mtu={mtu} rssi={rssi} mode={mode}")
         return f"📡 {name}: waiting for START_ACK…"
 
-    # generous per-device ceiling for the sequential runner; real stalls are
+    # terminal statuses shared by every SQC runner's completion polling and by
+    # the hybrid history/forward handoff predicate below
+    _SQC_TERMINAL_STATUSES = ("ready", "error", "rejected", "idle", "unavailable")
+
+    # generous per-device ceiling for a run's completion polling (shared by
+    # all three runners' tails, not just sequential's); real stalls are
     # caught much sooner by _sqc_watchdog_loop / the handshake timeout
     SQC_SEQ_PER_DEVICE_TIMEOUT_S = 180.0
 
-    def request_all_sqc_snapshots(self, max_seconds=None, history_only=False):
-        """Snapshot every connected wristband ONE AT A TIME. The Mac has a single
-        BLE radio time-sliced across all connections, so running pulls in
-        parallel makes each ~N× slower and multiplies stall risk — sequential is
-        faster per device and easier to reason about. max_seconds / history_only
-        pass through to quick mode."""
+    # hybrid mode: how long to wait for one device's history phase to finish
+    # before giving up and starting the next device anyway. The history burst
+    # is normally ~5-8s (see the SQC tab help text), so this is a generous
+    # backstop for a stuck device, not the normal path.
+    SQC_HYBRID_STAGE_TIMEOUT_S = 30.0
+
+    @staticmethod
+    def _sqc_history_phase_done(status):
+        """True once it's safe to start the next wristband in a hybrid
+        pipeline: the device's history phase gave way to the live forward
+        phase, or it reached a terminal status without ever entering forward
+        (history-only quick mode ending exactly at that boundary, an early
+        error, a rejection)."""
+        if status["phase"] == "forward":
+            return True
+        return status["status"] in MotionSenseHRV._SQC_TERMINAL_STATUSES
+
+    def request_all_sqc_snapshots(self, max_seconds=None, history_only=False,
+                                   stream_mode="sequential"):
+        """Snapshot every connected wristband. stream_mode selects how the
+        pulls are scheduled across wristbands:
+          - "sequential" (default, safest): one wristband fully finishes
+            before the next starts. The Mac has a single BLE radio time-sliced
+            across all connections, so this is the most reliable choice for
+            the bandwidth-heavy NUS burst transfer.
+          - "parallel": every wristband starts at once and streams
+            concurrently; fastest wall-clock time, at the cost of per-device
+            throughput (radio time-sliced N ways) and higher stall risk.
+          - "hybrid": a pipeline — start the first wristband alone; once it
+            moves past its brief history burst into the lighter live forward
+            phase, start the next wristband (now running alongside it);
+            repeat down the list. Only one wristband is ever in the heavy
+            history phase at a time — a middle ground between the other two.
+        max_seconds / history_only pass through to quick mode, applied
+        uniformly to every wristband regardless of stream_mode."""
+        if stream_mode not in ("sequential", "parallel", "hybrid"):
+            return f"⛔ unknown streaming mode: {stream_mode!r}"
         names = self.get_sqc_devices()
         if not names:
             return "⛔ No MSense wristbands connected"
-        if getattr(self, "_sqc_seq_thread", None) and self._sqc_seq_thread.is_alive():
+        if getattr(self, "_sqc_run_thread", None) and self._sqc_run_thread.is_alive():
             return "⏳ A snapshot run is already in progress"
         self._ensure_sqc_threads()
-        self._sqc_seq_thread = threading.Thread(
-            target=self._run_sqc_sequential, args=(names, max_seconds, bool(history_only)),
-            name="sqc-sequential", daemon=True)
-        self._sqc_seq_thread.start()
+
+        runner = {
+            "sequential": self._run_sqc_sequential,
+            "parallel": self._run_sqc_parallel,
+            "hybrid": self._run_sqc_hybrid,
+        }[stream_mode]
+        self._sqc_run_thread = threading.Thread(
+            target=runner, args=(names, max_seconds, bool(history_only)),
+            name=f"sqc-{stream_mode}", daemon=True)
+        self._sqc_run_thread.start()
+
         mode = ("history-only" if history_only
                 else f"quick {max_seconds:g}s" if max_seconds else "full")
-        return f"📡 Snapshotting {len(names)} wristband(s) one at a time ({mode}): {', '.join(names)}"
+        if stream_mode == "sequential":
+            return f"📡 Snapshotting {len(names)} wristband(s) one at a time ({mode}): {', '.join(names)}"
+        if stream_mode == "parallel":
+            return f"📡 Snapshotting {len(names)} wristband(s) in parallel ({mode}): {', '.join(names)}"
+        return f"📡 Snapshotting {len(names)} wristband(s) pipelined (hybrid, {mode}): {', '.join(names)}"
 
     def _run_sqc_sequential(self, names, max_seconds=None, history_only=False):
-        _TERMINAL = ("ready", "error", "rejected", "idle", "unavailable")
         for name in names:
             msg = self.request_sqc_snapshot(name, max_seconds=max_seconds,
                                             history_only=history_only)
@@ -734,11 +830,52 @@ class MotionSenseHRV(PlasmaDevice):
             while time.time() < deadline:
                 time.sleep(0.5)
                 # get_sqc_status() also evaluates the handshake timeout
-                if self.get_sqc_status(name)["status"] in _TERMINAL:
+                if self.get_sqc_status(name)["status"] in self._SQC_TERMINAL_STATUSES:
                     break
             self.info(f"SQC sequential: {name} finished — "
                       f"{self.get_sqc_status(name)['status']}")
         self.info("SQC sequential: run complete")
+
+    def _run_sqc_parallel(self, names, max_seconds=None, history_only=False):
+        for name in names:
+            msg = self.request_sqc_snapshot(name, max_seconds=max_seconds,
+                                            history_only=history_only)
+            self.info(f"SQC parallel: {name} — {msg}")
+        # fired back-to-back, no waiting in between — devices stream
+        # concurrently; the watchdog (already running) supervises every
+        # "receiving" device regardless of which runner started it.
+        deadline = time.time() + self.SQC_SEQ_PER_DEVICE_TIMEOUT_S
+        while time.time() < deadline:
+            time.sleep(0.5)
+            if all(self.get_sqc_status(n)["status"] in self._SQC_TERMINAL_STATUSES
+                   for n in names):
+                break
+        self.info("SQC parallel: run complete")
+
+    def _run_sqc_hybrid(self, names, max_seconds=None, history_only=False):
+        for i, name in enumerate(names):
+            msg = self.request_sqc_snapshot(name, max_seconds=max_seconds,
+                                            history_only=history_only)
+            self.info(f"SQC hybrid: {name} — {msg}")
+            if i == len(names) - 1:
+                break  # last device — nothing to pipeline into
+            deadline = time.time() + self.SQC_HYBRID_STAGE_TIMEOUT_S
+            while time.time() < deadline:
+                time.sleep(0.25)
+                if self._sqc_history_phase_done(self.get_sqc_status(name)):
+                    break
+            else:
+                self.info(f"SQC hybrid: {name} history phase timed out after "
+                          f"{self.SQC_HYBRID_STAGE_TIMEOUT_S:.0f}s — "
+                          "advancing pipeline anyway")
+
+        deadline = time.time() + self.SQC_SEQ_PER_DEVICE_TIMEOUT_S
+        while time.time() < deadline:
+            time.sleep(0.5)
+            if all(self.get_sqc_status(n)["status"] in self._SQC_TERMINAL_STATUSES
+                   for n in names):
+                break
+        self.info("SQC hybrid: run complete")
 
     def cancel_sqc_snapshot(self, name):
         state = self.sqc_state.get(name)
@@ -790,7 +927,16 @@ class MotionSenseHRV(PlasmaDevice):
             try:
                 events = session.feed(data)
             except ProtocolError as e:
-                state.update(status="error", error=f"protocol violation: {e}")
+                # a mid-stream violation still leaves whatever was decoded so
+                # far in session.payload — don't throw it away if there's
+                # something to show, just flag why it's incomplete
+                if session is not None and len(session.payload) > 0:
+                    state["status"] = "finishing"
+                    threading.Thread(target=self._finish_sqc_snapshot, args=(name,),
+                                     kwargs={"partial": True, "warning": f"protocol violation: {e}"},
+                                     daemon=True).start()
+                else:
+                    state.update(status="error", error=f"protocol violation: {e}")
                 self._sqc_debug(name, f"  PROTOCOL VIOLATION: {e}")
                 self.info(f"SQC protocol violation from {name}: {e}")
                 return
@@ -843,11 +989,16 @@ class MotionSenseHRV(PlasmaDevice):
                         state["status"] = "finishing"
                         threading.Thread(target=self._finish_sqc_snapshot, args=(name,),
                                          daemon=True).start()
-                    elif session.state == nus_stream.CANCELLED and state.get("early_cancel_sent"):
+                    elif len(session.payload) > 0:
+                        # cancelled (cleanly, or with a data-loss note) or
+                        # failed after some data already arrived — still
+                        # worth decoding/plotting, just flagged with why
                         state["status"] = "finishing"
                         threading.Thread(target=self._finish_sqc_snapshot, args=(name,),
-                                         kwargs={"partial": True}, daemon=True).start()
+                                         kwargs={"partial": True, "warning": session.error},
+                                         daemon=True).start()
                     else:
+                        # nothing was ever received — genuinely nothing to show
                         state.update(status="error",
                                      error=f"{obj.status_name}: {session.error}")
                         self.info(f"SQC END non-success for {name}: {session.error}")
@@ -904,6 +1055,8 @@ class MotionSenseHRV(PlasmaDevice):
         kbps = (d["bytes"] / 1024.0 / dur) if dur > 0 else 0.0
         return {
             "notifs": d["count"],
+            "bytes": d["bytes"],
+            "duration_s": round(dur, 2),
             "kib_s": round(kbps, 1),
             "notif_s": round(d["count"] / dur, 1) if dur > 0 else 0.0,
             "mean_notif_bytes": round(d["bytes"] / d["count"]) if d["count"] else 0,
@@ -923,7 +1076,15 @@ class MotionSenseHRV(PlasmaDevice):
         """1 Hz supervisor (runs off the BLE callback thread). Per active SQC
         stream, in priority order: quick-mode early terminate → quick-mode grace
         finalize → no-progress recovery. Also, every RECONNECT_SWEEP_S, an
-        auto-reconnect sweep over every connected wristband."""
+        auto-reconnect sweep over every connected wristband.
+
+        NOTE: this loop processes stalled devices one at a time within a
+        single tick — if several devices stall in the same tick (more likely
+        under the "parallel"/"hybrid" streaming modes than "sequential"),
+        their recovery (_sqc_recover -> _reconnect_peripheral, ~2-4s each)
+        runs serially, adding that much extra delay per additional
+        simultaneously-stalled device. Each device still recovers correctly,
+        just later — a known, accepted latency cost, not a correctness issue."""
         while not getattr(self, "_sqc_threads_stopped", False):
             time.sleep(1.0)
             now = time.time()
@@ -998,49 +1159,85 @@ class MotionSenseHRV(PlasmaDevice):
             self._sqc_debug(name, f"  quick: CANCEL write failed: {e}")
         return True
 
+    @staticmethod
+    def _run_ble_op(fn, timeout_s, description):
+        """Run a blocking simplepyble call on its own daemon thread and wait
+        up to timeout_s for it. simplepyble exposes no timeout/cancel of its
+        own, so this is the only way to keep a hung call (observed: an
+        unreachable peripheral's connect() blocking indefinitely) from
+        stalling the caller forever. Returns (ok, result, error) — result is
+        fn's return value on success, error is a TimeoutError on timeout or
+        whatever fn raised. NOTE: on timeout the underlying call may still be
+        running on its own leaked daemon thread; there is no way to cancel it
+        from here."""
+        outcome = {}
+
+        def _target():
+            try:
+                outcome["result"] = fn()
+                outcome["ok"] = True
+            except Exception as e:
+                outcome["error"] = e
+
+        t = threading.Thread(target=_target, name=f"ble-op-{description}", daemon=True)
+        t.start()
+        t.join(timeout_s)
+        if t.is_alive():
+            return False, None, TimeoutError(f"{description} timed out after {timeout_s:.0f}s")
+        if "error" in outcome:
+            return False, None, outcome["error"]
+        return True, outcome.get("result"), None
+
     def _reconnect_peripheral(self, name, reason):
         """disconnect → wait → connect → re-subscribe NUS (+ ENMO/IMU if a
-        recording session is running). Runs on the watchdog thread."""
+        recording session is running). Runs on the watchdog thread. Both BLE
+        calls are bounded (RECONNECT_OP_TIMEOUT_S) — simplepyble's connect()
+        has no timeout of its own and can hang indefinitely against an
+        unreachable peripheral; without a bound here that stalls the shared
+        watchdog thread forever (observed in production)."""
         if not SQC_AUTO_RECONNECT:
             return
         peripheral = self.active_devices.get(name)
         if peripheral is None:
             return
-        try:
-            peripheral.disconnect()
-        except Exception as e:
-            self._sqc_debug(name, f"  disconnect failed: {e}")
+
+        ok, _, err = self._run_ble_op(peripheral.disconnect, RECONNECT_OP_TIMEOUT_S, f"{name} disconnect")
+        if not ok:
+            self._sqc_debug(name, f"  disconnect failed/timed out: {err}")
+
         time.sleep(1.5)
-        try:
-            peripheral.connect()
-            try:
-                self.register_nus_notify(peripheral, name)
-                self.caps[name]["nus"] = True
-            except Exception as e:
-                self._sqc_debug(name, f"  NUS re-subscribe failed: {e}")
-            try:
-                self.register_battery(peripheral, name)
-            except Exception as e:
-                self._sqc_debug(name, f"  battery re-subscribe failed: {e}")
-            if getattr(self, "log_dir", None):
-                try:
-                    self.register_enmo(peripheral, name)
-                except Exception as e:
-                    self._sqc_debug(name, f"  ENMO re-subscribe failed: {e}")
-                if name in self.imu_stream_devices:
-                    try:
-                        self.register_imu_stream(peripheral, name)
-                    except Exception as e:
-                        self._sqc_debug(name, f"  IMU re-subscribe failed: {e}")
-            self.info(f"SQC: {name} reconnected + re-subscribed ({reason})")
-            self._sqc_debug(name, "  reconnected + re-subscribed")
-            if name in self.memo:
-                self.memo[name].sts = "🔄 reconnected"
-        except Exception as e:
-            self.info(f"SQC: {name} reconnect FAILED: {e}")
-            self._sqc_debug(name, f"  reconnect FAILED: {e}")
+
+        ok, _, err = self._run_ble_op(peripheral.connect, RECONNECT_OP_TIMEOUT_S, f"{name} connect")
+        if not ok:
+            self.info(f"SQC: {name} reconnect FAILED ({reason}): {err}")
+            self._sqc_debug(name, f"  reconnect FAILED/timed out: {err}")
             if name in self.memo:
                 self.memo[name].sts = "🔌 reconnect failed"
+            return
+
+        try:
+            self.register_nus_notify(peripheral, name)
+            self.caps[name]["nus"] = True
+        except Exception as e:
+            self._sqc_debug(name, f"  NUS re-subscribe failed: {e}")
+        try:
+            self.register_battery(peripheral, name)
+        except Exception as e:
+            self._sqc_debug(name, f"  battery re-subscribe failed: {e}")
+        if getattr(self, "log_dir", None):
+            try:
+                self.register_enmo(peripheral, name)
+            except Exception as e:
+                self._sqc_debug(name, f"  ENMO re-subscribe failed: {e}")
+            if name in self.imu_stream_devices:
+                try:
+                    self.register_imu_stream(peripheral, name)
+                except Exception as e:
+                    self._sqc_debug(name, f"  IMU re-subscribe failed: {e}")
+        self.info(f"SQC: {name} reconnected + re-subscribed ({reason})")
+        self._sqc_debug(name, "  reconnected + re-subscribed")
+        if name in self.memo:
+            self.memo[name].sts = "🔄 reconnected"
 
     def _sqc_recover(self, name, reason):
         """CANCEL a wedged stream, then disconnect + reconnect. Runs on the
@@ -1077,7 +1274,7 @@ class MotionSenseHRV(PlasmaDevice):
 
     _NON_CHANNEL_KEYS = ("fs", "tick", "rtc_tick", "crc_ok_frac", "oob_frac")
 
-    def _finish_sqc_snapshot(self, name, partial=False):
+    def _finish_sqc_snapshot(self, name, partial=False, warning=None):
         state = self.sqc_state[name]
         session = state["session"]
         payload = bytes(session.payload)
@@ -1102,6 +1299,11 @@ class MotionSenseHRV(PlasmaDevice):
             )
             state["partial"] = True
             state["quick_seconds"] = secs
+        if warning:
+            # non-blocking note on why this is incomplete/suspect — shown
+            # alongside the plotted result, never withholds it
+            provenance["warning"] = warning
+            state["warning"] = warning
 
         # save the raw payload + sidecar FIRST — a decode hiccup must never lose
         # a captured payload
@@ -1187,6 +1389,7 @@ class MotionSenseHRV(PlasmaDevice):
         if state is None or state["status"] != "ready" or not state["decoded"]:
             return None
         d = state["decoded"]
+        session = state["session"]
         return {
             "device_type": PROFILE[state["device_type"]]["name"],
             "channels": d["channels"],
@@ -1194,7 +1397,10 @@ class MotionSenseHRV(PlasmaDevice):
             "tick": d["tick"],
             "provenance": state["provenance"],
             "partial": False,               # not a live preview
-            "quick_seconds": state.get("quick_seconds"),  # set if cut short on purpose
+            "quick_seconds": state.get("quick_seconds"),  # set if cut short
+            "warning": state.get("warning"),  # non-blocking note, if any
+            # history-record count, for drawing the history/forward boundary
+            "history_records": session.start_ack.history_records if session and session.start_ack else None,
         }
 
     # min seconds between live-preview re-decodes (the transfer is slow, so a
@@ -1234,6 +1440,7 @@ class MotionSenseHRV(PlasmaDevice):
             "tick": decoded.get("tick", decoded.get("rtc_tick")),
             "provenance": None,
             "partial": True,
+            "history_records": session.start_ack.history_records if session.start_ack else None,
         }
         state["preview"] = {"result": result, "_len": len(session.payload), "_at": now}
         return result

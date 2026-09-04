@@ -513,34 +513,52 @@ class StreamSession:
         end = parse_end(payload)
         self.end = end
 
-        failures = []
-        if end.status != STATUS_SUCCESS:
-            failures.append(f"status {end.status_name}")
-        if end.history_records_sent != a.history_records:
-            failures.append(f"history {end.history_records_sent} != {a.history_records}")
-        if end.forward_records_captured != a.forward_records:
-            failures.append(f"forward {end.forward_records_captured} != {a.forward_records}")
-        if end.total_bytes_sent != a.total_bytes or len(self.payload) != a.total_bytes:
-            failures.append(
-                f"bytes end={end.total_bytes_sent} local={len(self.payload)} != {a.total_bytes}"
-            )
+        # integrity: what we actually received must match what the device
+        # says it sent, regardless of whether the stream ran to completion
+        # or was cut short — a real data-loss signal either way.
+        integrity_failures = []
+        if end.total_bytes_sent != len(self.payload):
+            integrity_failures.append(
+                f"bytes end={end.total_bytes_sent} local={len(self.payload)}")
         if end.data_message_count != self._data_message_count:
-            failures.append(
-                f"DATA count end={end.data_message_count} local={self._data_message_count}"
-            )
-        if end.detail != 0:
-            failures.append(f"detail {end.detail}")
-        if self._next_record_index != a.history_records + a.forward_records:
-            failures.append(
-                f"records received {self._next_record_index} != {a.history_records + a.forward_records}"
-            )
+            integrity_failures.append(
+                f"DATA count end={end.data_message_count} local={self._data_message_count}")
 
-        if failures:
-            if end.status == 0x0008:  # CANCELLED
-                self.state = CANCELLED
-            else:
+        if end.status == STATUS_SUCCESS:
+            # completeness: only meaningful when the device claims it
+            # finished — compare against the originally-requested total.
+            failures = list(integrity_failures)
+            if end.history_records_sent != a.history_records:
+                failures.append(f"history {end.history_records_sent} != {a.history_records}")
+            if end.forward_records_captured != a.forward_records:
+                failures.append(f"forward {end.forward_records_captured} != {a.forward_records}")
+            if end.total_bytes_sent != a.total_bytes:
+                failures.append(f"total bytes {end.total_bytes_sent} != {a.total_bytes}")
+            if self._next_record_index != a.history_records + a.forward_records:
+                failures.append(
+                    f"records received {self._next_record_index} != "
+                    f"{a.history_records + a.forward_records}"
+                )
+            if end.detail != 0:
+                failures.append(f"detail {end.detail}")
+            if failures:
                 self.state = FAILED
-            self.error = "; ".join(failures)
+                self.error = "; ".join(failures)
+            else:
+                self.state = COMPLETE
+        elif end.status == 0x0008:  # CANCELLED — a legitimate early stop.
+            # Not requiring the full-target counts here is the whole point:
+            # a cancel is *supposed* to fall short of history/forward/total.
+            # Only a genuine integrity mismatch (data actually lost, not
+            # merely "stopped early") is worth flagging.
+            self.state = CANCELLED
+            self.error = ("data loss during cancel: " + "; ".join(integrity_failures)
+                          if integrity_failures else None)
         else:
-            self.state = COMPLETE
+            # a genuine device-reported fault (STORAGE_ERROR, INTERNAL_ERROR,
+            # ...), not a deliberate/expected early stop.
+            failures = list(integrity_failures)
+            failures.insert(0, f"status {end.status_name}")
+            self.state = FAILED
+            self.error = "; ".join(failures)
         return end

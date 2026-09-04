@@ -23,6 +23,38 @@ function refresh() {
         url.searchParams.set('__theme', 'light');
         window.location.href = url.href;
     }
+
+    // Some tabs (e.g. MSense SQC) redraw a Plotly chart on a timer; Plotly
+    // recreates the chart's DOM on every redraw, which resets the whole
+    // page's scroll position back to top. Rather than hook into Gradio's
+    // per-event dependency chain (fragile — a first attempt broke plot
+    // rendering entirely), passively watch known plot containers and
+    // silently re-apply the scroll position that was in effect just before
+    // each redraw. Containers opt in via elem_id, listed here.
+    const scrollGuardIds = ['sqc-plot-container'];
+    let lastScrollY = window.scrollY;
+    window.addEventListener('scroll', () => { lastScrollY = window.scrollY; }, {passive: true});
+
+    const attachScrollGuards = () => {
+        for (const id of scrollGuardIds) {
+            const el = document.getElementById(id);
+            if (!el || el.__scrollGuardAttached) continue;
+            el.__scrollGuardAttached = true;
+            new MutationObserver(() => {
+                if (Math.abs(window.scrollY - lastScrollY) > 1) {
+                    window.scrollTo(0, lastScrollY);
+                }
+            }).observe(el, {childList: true, subtree: true});
+        }
+    };
+    attachScrollGuards();
+    // Gradio tabs can mount lazily, so the container may not exist yet
+    const scrollGuardInterval = setInterval(() => {
+        attachScrollGuards();
+        if (scrollGuardIds.every(id => document.getElementById(id)?.__scrollGuardAttached)) {
+            clearInterval(scrollGuardInterval);
+        }
+    }, 500);
 }
 """
 

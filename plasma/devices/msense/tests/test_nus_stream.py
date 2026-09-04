@@ -395,3 +395,66 @@ def test_quick_mode_cancel_retains_partial_payload():
     assert s.is_terminal
     assert len(s.payload) == kept * rs           # payload retained, decodable
     assert s.records_received == kept
+    assert s.error is None                       # clean cancel, nothing to warn about
+
+
+def test_cancel_without_data_loss_has_no_warning():
+    """A CANCELLED end whose byte/DATA-message counts match what was locally
+    received (regardless of how far short of the full history/forward target
+    it fell) is a clean, expected outcome — not a validation failure."""
+    rs = PROFILE[DEVICE_ECG]["record_size"]
+    s = StreamSession(SID)
+    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG)))
+
+    data, _ = _data_msgs(DEVICE_ECG, 100)
+    fed = 0
+    for m in data[:5]:
+        s.feed(m)
+        fed += 1
+    local_bytes = fed * 100 * rs
+
+    end = _end_payload(DEVICE_ECG, fed, status=0x0008,
+                       override={"history": fed * 100, "forward": 0, "total": local_bytes})
+    s.feed(_msg(MSG_END, end))
+
+    assert s.state == ns.CANCELLED
+    assert s.error is None
+
+
+def test_cancel_with_data_loss_stays_cancelled_but_warns():
+    """A CANCELLED end whose self-reported counts DON'T match what was
+    locally received (a real dropped/miscounted notification) still lands in
+    CANCELLED (not escalated to FAILED — the device did answer the cancel
+    cleanly) but carries a non-None warning naming the mismatch."""
+    rs = PROFILE[DEVICE_ECG]["record_size"]
+    s = StreamSession(SID)
+    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG)))
+
+    data, _ = _data_msgs(DEVICE_ECG, 100)
+    for m in data[:5]:
+        s.feed(m)
+    local_bytes = 5 * 100 * rs
+
+    # device claims fewer bytes were sent than we actually received locally
+    end = _end_payload(DEVICE_ECG, 5, status=0x0008,
+                       override={"history": 500, "forward": 0, "total": local_bytes - rs})
+    s.feed(_msg(MSG_END, end))
+
+    assert s.state == ns.CANCELLED
+    assert s.error is not None
+    assert "data loss during cancel" in s.error
+    assert "bytes" in s.error
+    assert len(s.payload) == local_bytes           # payload still retained/decodable
+
+
+def test_end_non_success_non_cancelled_status_fails():
+    """A genuine device-reported fault (not a cancel, not a success) is a
+    real error and stays FAILED."""
+    s = StreamSession(SID)
+    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG)))
+    data, n = _data_msgs(DEVICE_ECG, 200)
+    for m in data:
+        s.feed(m)
+    s.feed(_msg(MSG_END, _end_payload(DEVICE_ECG, n, status=0x0009)))  # STORAGE_ERROR
+    assert s.state == ns.FAILED
+    assert s.error.startswith("status STORAGE_ERROR")
