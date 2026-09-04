@@ -39,9 +39,9 @@ def main():
     # pl = PupilLabsDashboard()
 
     with gr.Blocks(title=app_context().app_name, theme=gr.themes.Ocean(), js=js_func) as app:
-        with gr.Tab("Session dashboard"):
+        with gr.Tab("Session Dashboard"):
             ip.interface()
-        with gr.Tab("Signal visualizer"):
+        with gr.Tab("Data Dashboard"):
             ip.visualizer_interface()
         # extra tabs contributed by enabled plugins (e.g. MSense SQC / IMU)
         for plugin in device_config.get_active_table().values():

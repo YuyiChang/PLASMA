@@ -24,6 +24,6 @@ def register(register_fn):
         class_name="MotionSenseHRV",
         config_section=_config.config_section,
         tabs=(
-            ("MSense", _panels.build_msense_tab),
+            ("🍠 YAMS (MSense Tools)", _panels.build_msense_tab),
         ),
     ))

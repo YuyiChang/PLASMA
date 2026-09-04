@@ -11,31 +11,20 @@ from ._common import msense_device as _msense_device
 
 def build_sqc_tab(ip):
     with gr.Column():
-        gr.Markdown(
-            "On-demand raw ECG/PPG snapshot for every connected MSense wristband so you can "
-            "eyeball electrode / optical contact before starting a full session. Initialize the "
-            "MSense device on the **Session dashboard** tab first, then Refresh here. Wristbands "
-            "are snapshotted **one at a time** (the Mac has a single BLE radio); each capture is "
-            "saved to disk (session log dir if a recording is running, else "
-            "`data/sqc_snapshots/`).\n\n"
-            "The device always streams a fixed 96 KiB (a pre-buffered *history* window then a "
-            "*forward* window it acquires live — ~16 s total ECG / ~24 s PPG). Pick a capture "
-            "mode: **All** takes the full stream; **History Only** sends CANCEL at the "
-            "history→forward boundary (~5 s ECG / ~8 s PPG), skipping the live-acquisition wait; "
-            "**Custom** sends CANCEL once the given *N* seconds have arrived and keeps the "
-            "partial.\n"
-        )
         with gr.Row():
-            btn_refresh_sqc = gr.Button("🔄 Refresh")
-            btn_request_sqc = gr.Button("📡 Snapshot all wristbands (sequential)", variant="primary")
-            btn_cancel_sqc = gr.Button("✖ Cancel all")
-        with gr.Row():
-            sqc_mode = gr.Radio(
-                choices=["All", "History Only", "Custom"], value="Custom",
-                label="Capture mode")
-            sqc_max_s = gr.Number(
-                value=5, precision=1, minimum=0,
-                label="Custom — stop after N s", interactive=True)
+            with gr.Column():
+                btn_request_sqc = gr.Button("📡 Snapshot all wristbands (sequential)", variant="primary")
+                with gr.Row():
+                    btn_refresh_sqc = gr.Button("🔄 Refresh")
+                    btn_cancel_sqc = gr.Button("✖ Cancel all")
+            with gr.Column():
+                with gr.Row():
+                    sqc_mode = gr.Radio(
+                        choices=["All", "History Only", "Custom"], value="Custom",
+                        label="Capture mode")
+                    sqc_max_s = gr.Number(
+                        value=5, precision=1, minimum=0,
+                        label="Custom — stop after N s", interactive=True)
 
         sqc_status = gr.Markdown()
         sqc_plot = gr.Plot(show_label=False)
@@ -73,6 +62,22 @@ def build_sqc_tab(ip):
         btn_cancel_sqc.click(_cancel, outputs=sqc_status)
         sqc_mode.change(_on_mode_change, inputs=sqc_mode, outputs=sqc_max_s)
         sqc_timer.tick(fn=lambda: _update_sqc(ip), outputs=[sqc_status, sqc_plot])
+
+    with gr.Accordion(open=False, label="Help"):
+        gr.Markdown(
+                    "On-demand raw ECG/PPG snapshot for every connected MSense wristband so you can "
+                    "eyeball electrode / optical contact before starting a full session. Initialize the "
+                    "MSense device on the **Session dashboard** tab first, then Refresh here. Wristbands "
+                    "are snapshotted **one at a time** (the Mac has a single BLE radio); each capture is "
+                    "saved to disk (session log dir if a recording is running, else "
+                    "`data/sqc_snapshots/`).\n\n"
+                    "The device always streams a fixed 96 KiB (a pre-buffered *history* window then a "
+                    "*forward* window it acquires live — ~16 s total ECG / ~24 s PPG). Pick a capture "
+                    "mode: **All** takes the full stream; **History Only** sends CANCEL at the "
+                    "history→forward boundary (~5 s ECG / ~8 s PPG), skipping the live-acquisition wait; "
+                    "**Custom** sends CANCEL once the given *N* seconds have arrived and keeps the "
+                    "partial.\n"
+                )
 
 
 def _update_sqc(ip):
