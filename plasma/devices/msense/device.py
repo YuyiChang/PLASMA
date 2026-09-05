@@ -1,5 +1,7 @@
 from plasma.devices.template import PlasmaDevice, PlasmaMemo
-import simplepyble
+from bleak import BleakClient, BleakScanner
+import asyncio
+import concurrent.futures
 import atexit
 import datetime
 import json
@@ -25,6 +27,12 @@ from .nus_stream import (
     HANDSHAKE_TIMEOUT_S,
 )
 from .records import decode_ppg, decode_ecg
+
+# NOTE: the *_SERVICE_UUID constants below are documentary only — bleak's
+# read/write/notify calls are addressed by characteristic UUID alone (it
+# looks up the owning service internally), so they're never passed as call
+# arguments. Kept for readability/grouping and because external docs
+# (BLE_PROTOCOL_OVERVIEW.md) reference them by name.
 
 # --- ECG/PPG signal-quality-check (SQC) snapshot, via Nordic UART Service ---
 # Protocol v1 bounded sensor stream — see
@@ -64,16 +72,19 @@ SQC_DEBUG = True  # emit per-notification telemetry (printed off the BLE thread)
 SQC_NOPROGRESS_TIMEOUT_S = 5.0
 SQC_AUTO_RECONNECT = True
 
-# simplepyble's connect()/disconnect() are blocking C++ calls with no timeout
-# of their own — against an unreachable peripheral (e.g. right after an
-# unexpected disconnect) connect() can hang indefinitely, which stalls
-# whichever thread calls it inline forever (observed in production: the
-# whole app froze, browser unresponsive, Ctrl-C inert — consistent with the
-# shared watchdog thread, and possibly the whole process depending on
-# whether this simplepyble build releases the GIL during the call, being
-# stuck inside an unguarded connect()). RECONNECT_OP_TIMEOUT_S bounds how
-# long any caller waits via _run_ble_op below.
-RECONNECT_OP_TIMEOUT_S = 15.0
+# We used to run on simplepyble, whose connect()/disconnect() are blocking
+# C++ calls with no timeout of their own. Confirmed via a macOS thread dump
+# (sample <pid>) that a stuck connect() held the Python GIL hostage inside
+# native code (an NSThread sleepForTimeInterval: retry loop) for the whole
+# capture window — freezing the entire app (browser unresponsive, Ctrl-C
+# inert), since nothing in Python, including a Thread.join(timeout), can
+# make progress without the GIL. Replaced with `bleak`, an asyncio-native
+# library (PyObjC on macOS, not a compiled blocking call) — its own docs
+# note OS X connect-timeout handling was added specifically so "connect
+# cannot hang forever". All BLE calls now run as coroutines on a dedicated
+# event-loop thread (_start_ble_loop/_run_async below); BLE_OP_TIMEOUT_S
+# bounds how long any caller waits for one.
+BLE_OP_TIMEOUT_S = 15.0
 
 # Quick-mode capture: the protocol always sends the full 96 KiB (history +
 # a live-acquired forward window). When the operator only wants the first N s
@@ -103,6 +114,11 @@ class MotionSenseHRV(PlasmaDevice):
         self.gyro_calib = {}
         self.sqc_state = {}
         self.battery = {}          # name -> last battery %
+        # rssi at connect time — bleak has no live RSSI query on a connected
+        # client (that's not a standard GATT op; RSSI only comes from
+        # advertisement data during a scan), so we cache what the scan saw
+        # and use that for the SQC diagnostic instead of a fresh per-request read
+        self._connect_rssi = {}
         # what each wristband actually subscribed to — older firmware lacks NUS,
         # not every unit has the demo IMU-stream characteristic
         self.caps = {}             # name -> {"nus": bool, "imu": bool, "battery": bool}
@@ -133,7 +149,7 @@ class MotionSenseHRV(PlasmaDevice):
         # start() resets this to the true session-start time
         self.t_start = time.time()
 
-        self.init_adapter()
+        self._start_ble_loop()
 
         self.active_devices = {}
         self.active_outlets = {}
@@ -154,58 +170,92 @@ class MotionSenseHRV(PlasmaDevice):
                 st = self.sqc_state.get(name)
                 sess = st.get("session") if st else None
                 if sess is not None and not sess.is_terminal:
-                    p.write_request(NUS_SERVICE_UUID, NUS_RX_CHAR_UUID,
-                                    build_command(OP_CANCEL, sess.session_id))
+                    # short timeout here — this is the atexit/SIGTERM path,
+                    # which should exit promptly rather than wait the full
+                    # interactive BLE_OP_TIMEOUT_S
+                    self._run_async(p.write_gatt_char(NUS_RX_CHAR_UUID,
+                                                       build_command(OP_CANCEL, sess.session_id),
+                                                       response=True),
+                                    timeout_s=3.0)
             except Exception:
                 pass
         try:
             self.disconnect()
         except Exception:
             pass
+        try:
+            self._stop_ble_loop()
+        except Exception:
+            pass
 
-    def init_adapter(self):
-        adapters = simplepyble.Adapter.get_adapters()
-        assert len(adapters) > 0, "No BT adapter found"
-        
-        self.adapter = adapters[0]
+    def _start_ble_loop(self):
+        """All bleak calls run as coroutines on this dedicated event-loop
+        thread — never on the Gradio/watchdog/SQC-runner threads directly.
+        See _run_async."""
+        self._ble_loop = asyncio.new_event_loop()
+        self._ble_loop_thread = threading.Thread(
+            target=self._ble_loop.run_forever, name="ble-loop", daemon=True)
+        self._ble_loop_thread.start()
 
-        # print(f"Selected adapter: {self.adapter.identifier()} [{self.adapter.address()}]")
-        self.info(f"Selected adapter: {self.adapter.identifier()} [{self.adapter.address()}]")
+    def _stop_ble_loop(self):
+        loop = getattr(self, "_ble_loop", None)
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(loop.stop)
+        thread = getattr(self, "_ble_loop_thread", None)
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+    def _run_async(self, coro, timeout_s=None):
+        """Submit a coroutine to the dedicated BLE event-loop thread and wait
+        up to timeout_s for it, from whatever thread calls this (Gradio
+        thread, watchdog thread, an SQC runner thread). Returns the
+        coroutine's result, or raises (its own exception, or TimeoutError).
+
+        Unlike simplepyble's blocking calls (confirmed via a macOS thread
+        dump to hold the GIL hostage inside native code, defeating any
+        Python-level timeout), this wait is a plain threading
+        condition-variable wait on a *different* thread than the one running
+        the coroutine — it actually times out even if bleak itself is slow,
+        because bleak's asyncio-native code yields the GIL cooperatively
+        instead of blocking inside a native call."""
+        timeout_s = BLE_OP_TIMEOUT_S if timeout_s is None else timeout_s
+        future = asyncio.run_coroutine_threadsafe(coro, self._ble_loop)
+        try:
+            return future.result(timeout=timeout_s)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError(f"BLE op timed out after {timeout_s:.0f}s")
 
     def scan_devices(self, filter_name="MSense"):
         print("start scanning devices")
         self.info("start device scanning")
         self.ctl_state = "Start device scanning"
-        self.adapter.scan_for(5000)
-        peripherals = self.adapter.scan_get_results()
+        try:
+            found = self._run_async(BleakScanner.discover(timeout=5.0, return_adv=True),
+                                    timeout_s=10.0)
+        except Exception as e:
+            self.info(f"scan failed: {e}")
+            found = {}
 
         self.devices = {}
-        for i, peripheral in enumerate(peripherals):
-            if filter_name in peripheral.identifier():
-                self.info(f"{i}: {peripheral.identifier()} [{peripheral.address()}]")
-                # try to look up device alias
-                addr = peripheral.address().upper()
-                if addr in self.device_list.keys():
-                    alias = self.device_list[addr]
-                    name = f"{alias} ({peripheral.identifier()}) [{peripheral.address()}]"
-                else:
-                    name = f"{peripheral.identifier()} [{peripheral.address()}]"
-
-                # self.devices[name] = 
-                self.devices[peripheral.address().upper()] = {
-                    "name": name,
-                    "pheripheral": peripheral
+        for i, (addr, (ble_device, adv)) in enumerate(found.items()):
+            identifier = ble_device.name or adv.local_name or ""
+            if filter_name in identifier:
+                addr_u = addr.upper()
+                self.info(f"{i}: {identifier} [{addr_u}]")
+                self.devices[addr_u] = {
+                    "name": f"{identifier} [{addr_u}]",
+                    "address": addr_u,
+                    "rssi": adv.rssi,
                 }
-
 
         print(self.devices)
         self.info("device scanning completed")
         self.ctl_state = "Device scanning completed"
 
     def connect_devices(self):
-        del(self.active_devices)
         self.active_devices = {}
-        del(self.active_outlets)
         self.active_outlets = {}
         self.ctl_state = "Start device connection"
 
@@ -216,39 +266,34 @@ class MotionSenseHRV(PlasmaDevice):
 
             if addr in self.devices.keys():
                 dev = self.devices[addr]
-                p = dev['pheripheral']
                 n = dev['name']
 
                 self.info(f"Starting to connect to {n}")
                 # gr.Info(f"Connecting to devices: {n}")
                 print(f'==== {n}')
-                print(f"=== {p.identifier()} at {p.address()}")
+                print(f"=== {n} at {addr}")
+                p = None
                 try:
-                    # bind n/p/name by default arg — otherwise every callback
-                    # closes over the loop variable and fires with whichever
-                    # device happened to be last when the loop finished
-                    p.set_callback_on_connected(lambda n=n, p=p: self.info(f"{n} {p.identifier()} is connected"))
-                    p.set_callback_on_disconnected(lambda nm=name: self._on_unexpected_disconnect(nm))
-                    # bounded: simplepyble's connect() has no timeout of its
-                    # own and can hang indefinitely against an unreachable
-                    # device — don't let one bad device freeze the whole
-                    # connect loop (or the app, depending on GIL release)
-                    ok, _, err = self._run_ble_op(p.connect, RECONNECT_OP_TIMEOUT_S, f"{n} connect")
-                    if not ok:
-                        raise err
+                    # bind nm by default arg — otherwise the callback closes
+                    # over the loop variable and fires with whichever device
+                    # happened to be last when the loop finished
+                    p = BleakClient(addr, disconnected_callback=lambda c, nm=name: self._on_unexpected_disconnect(nm))
+                    # bounded: bleak's connect() actually respects this
+                    # timeout (unlike simplepyble's, confirmed via a macOS
+                    # thread dump to hold the GIL hostage indefinitely) —
+                    # don't let one bad device freeze the whole connect loop
+                    self._run_async(p.connect())
+                    self.info(f"{n} connected")
                     self.active_devices[name] = p
-                    self.active_outlets[name] = MsenseOutlet(n, p)
+                    self.active_outlets[name] = MsenseOutlet(n, addr)
+                    self._connect_rssi[name] = dev.get("rssi")
                     try:
                         self.register_nus_notify(p, name)
                         self.caps[name]["nus"] = True
                     except Exception as e:
                         self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
                     try:
-                        ok, raw, err = self._run_ble_op(
-                            lambda: p.read(BATTERY_SERVICE_UUID, BATTERY_CHAR_UUID),
-                            RECONNECT_OP_TIMEOUT_S, f"{n} battery read")
-                        if not ok:
-                            raise err
+                        raw = self._run_async(p.read_gatt_char(BATTERY_CHAR_UUID))
                         pct = raw[0]
                         self.battery[name] = pct
                         self.caps[name]["battery"] = True
@@ -261,8 +306,8 @@ class MotionSenseHRV(PlasmaDevice):
                     self.active_devices.pop(name, None)
                     self.active_outlets.pop(name, None)
                     try:
-                        if p.is_connected():
-                            self._run_ble_op(p.disconnect, RECONNECT_OP_TIMEOUT_S, f"{n} cleanup disconnect")
+                        if p is not None and p.is_connected:
+                            self._run_async(p.disconnect())
                     except Exception:
                         pass
             else:
@@ -291,7 +336,7 @@ class MotionSenseHRV(PlasmaDevice):
         self.info(f"Participant encoding = {self.session_info['participant_enc']}")
 
         for name, p in list(self.active_devices.items()):
-            print(name, p.is_connected(), p.is_connectable())
+            print(name, p.is_connected)
             try:
                 self.collection_ctl(name, True)
                 self.active_outlets[name].log_dir = self.log_dir
@@ -306,7 +351,7 @@ class MotionSenseHRV(PlasmaDevice):
         gr.Info("🛑 Stop data collection...")
         self.info("Data collection stopped")
         for name, p in list(self.active_devices.items()):
-            print(name, p.is_connected(), p.is_connectable())
+            print(name, p.is_connected)
             try:
                 self.collection_ctl(name, False)
                 self.memo[name].sts = "🛑"
@@ -322,9 +367,9 @@ class MotionSenseHRV(PlasmaDevice):
                 self.orientation_quat[name] = IDENTITY_QUAT
 
     def _on_unexpected_disconnect(self, name):
-        """Fired by simplepyble when a wristband drops BLE on its own
-        (out of range, battery) — without this the UI never reflected an
-        in-session disconnect until the next Stop press."""
+        """Fired by bleak when a wristband drops BLE on its own (out of
+        range, battery) — without this the UI never reflected an in-session
+        disconnect until the next Stop press."""
         self.info(f"{name} disconnected unexpectedly")
         if name in self.memo:
             self.memo[name].sts = "🔌 disconnected"
@@ -333,8 +378,8 @@ class MotionSenseHRV(PlasmaDevice):
         self._sqc_threads_stopped = True  # let the SQC watchdog loop exit
         for name, p in list(self.active_devices.items()):
             try:
-                if p.is_connected():
-                    p.disconnect()
+                if p.is_connected:
+                    self._run_async(p.disconnect())
             except Exception as e:
                 self.info(f"Error disconnecting {name}: {e}")
         self.active_devices = {}
@@ -347,7 +392,7 @@ class MotionSenseHRV(PlasmaDevice):
         n = 0
         for name, p in list(self.active_devices.items()):
             try:
-                if not p.is_connected():
+                if not p.is_connected:
                     self._reconnect_peripheral(name, "manual reconnect")
                     n += 1
             except Exception as e:
@@ -375,8 +420,9 @@ class MotionSenseHRV(PlasmaDevice):
         done, failed = 0, []
         for name, p in list(self.active_devices.items()):
             try:
-                p.write_request(CTL_SERVICE_UUID, CTL_ERASE_CHAR_UUID,
-                                struct.pack("<B", ERASE_CODE))
+                self._run_async(p.write_gatt_char(CTL_ERASE_CHAR_UUID,
+                                                   struct.pack("<B", ERASE_CODE),
+                                                   response=True))
                 self.memo[name].sts = "🧨 erased — re-Initialize"
                 done += 1
             except Exception as e:
@@ -405,9 +451,9 @@ class MotionSenseHRV(PlasmaDevice):
         for name, p in list(self.active_devices.items()):
             out.append(f"### {name}")
             try:
-                for service in p.services():
-                    for ch in service.characteristics():
-                        out.append(f"- `{service.uuid()}` / `{ch.uuid()}`")
+                for service in p.services:
+                    for ch in service.characteristics:
+                        out.append(f"- `{service.uuid}` / `{ch.uuid}`")
             except Exception as e:
                 out.append(f"  (error: {e})")
         return "\n".join(out)
@@ -421,8 +467,8 @@ class MotionSenseHRV(PlasmaDevice):
         lines = []
         for name, p in list(self.active_devices.items()):
             try:
-                p.write_request(CTL_SERVICE_UUID, CTL_ENC_CHAR_UUID, struct.pack("<I", val))
-                back = struct.unpack("<I", p.read(CTL_SERVICE_UUID, CTL_ENC_CHAR_UUID))[0]
+                self._run_async(p.write_gatt_char(CTL_ENC_CHAR_UUID, struct.pack("<I", val), response=True))
+                back = struct.unpack("<I", self._run_async(p.read_gatt_char(CTL_ENC_CHAR_UUID)))[0]
                 lines.append(f"{name}: wrote {val}, read back {back}")
             except Exception as e:
                 lines.append(f"{name}: {e}")
@@ -453,24 +499,24 @@ class MotionSenseHRV(PlasmaDevice):
     def collection_ctl(self, name, start=True):
         peripheral = self.active_devices[name]
 
-        if not peripheral.is_connected():
+        if not peripheral.is_connected:
             raise RuntimeError(f"{name} is not connected (BLE link dropped)")
 
         # if starting, do the initialization
         if start:
             # write unix time
-            peripheral.write_request("da39c930-1d81-48e2-9c68-d0ae4bbd351f",
-                                     "da39c932-1d81-48e2-9c68-d0ae4bbd351f",
-                                     struct.pack("<Q", int(time.time())))
+            self._run_async(peripheral.write_gatt_char(
+                "da39c932-1d81-48e2-9c68-d0ae4bbd351f",
+                struct.pack("<Q", int(time.time())), response=True))
             # write participant hash
             self.participant_byte = struct.pack("<I", self.session_info['participant_enc'])
-            peripheral.write_request("da39c930-1d81-48e2-9c68-d0ae4bbd351f",
-                                     "da39c933-1d81-48e2-9c68-d0ae4bbd351f",
-                                     self.participant_byte)
+            self._run_async(peripheral.write_gatt_char(
+                "da39c933-1d81-48e2-9c68-d0ae4bbd351f",
+                self.participant_byte, response=True))
 
-        service_uuid = "da39c930-1d81-48e2-9c68-d0ae4bbd351f"
         characteristic_uuid = "da39c931-1d81-48e2-9c68-d0ae4bbd351f"
-        peripheral.write_request(service_uuid, characteristic_uuid, struct.pack("<I", int(start)))
+        self._run_async(peripheral.write_gatt_char(characteristic_uuid,
+                                                    struct.pack("<I", int(start)), response=True))
 
         # only (re-)subscribe on start; stop should just tell the firmware to
         # stop streaming, not stack another notify callback on top
@@ -490,20 +536,14 @@ class MotionSenseHRV(PlasmaDevice):
 
     def register_enmo(self, peripheral, name):
         # ENMO
-        service_uuid = "da39c950-1d81-48e2-9c68-d0ae4bbd351f"
         characteristic_uuid = "da39c951-1d81-48e2-9c68-d0ae4bbd351f"
-        # bounded: peripheral.notify() is a blocking simplepyble call with no
-        # timeout of its own and can hang indefinitely (e.g. right after a
-        # reconnect on a still-marginal link) — see _run_ble_op.
-        ok, _, err = self._run_ble_op(
-            lambda: peripheral.notify(service_uuid, characteristic_uuid,
-                                      lambda data: self.enmo_handler(data, peripheral, name)),
-            RECONNECT_OP_TIMEOUT_S, f"{name} ENMO notify subscribe")
-        if not ok:
-            raise err
+        # bounded — bleak's start_notify actually respects this timeout
+        # (unlike simplepyble's notify(), confirmed via a macOS thread dump
+        # to hold the GIL hostage indefinitely against a marginal link).
+        self._run_async(peripheral.start_notify(
+            characteristic_uuid, lambda ch, data: self.enmo_handler(data, name)))
 
-
-    def enmo_handler(self, data, peripheral, name):
+    def enmo_handler(self, data, name):
         # runs on the BLE library's callback thread — never let an exception
         # escape here, it would otherwise silently kill notifications for
         # this device with no visible status change
@@ -528,14 +568,10 @@ class MotionSenseHRV(PlasmaDevice):
 
     def register_battery(self, peripheral, name):
         # bounded — see register_enmo
-        ok, _, err = self._run_ble_op(
-            lambda: peripheral.notify(BATTERY_SERVICE_UUID, BATTERY_CHAR_UUID,
-                                      lambda data: self.battery_handler(data, peripheral, name)),
-            RECONNECT_OP_TIMEOUT_S, f"{name} battery notify subscribe")
-        if not ok:
-            raise err
+        self._run_async(peripheral.start_notify(
+            BATTERY_CHAR_UUID, lambda ch, data: self.battery_handler(data, name)))
 
-    def battery_handler(self, data, peripheral, name):
+    def battery_handler(self, data, name):
         # runs on the BLE callback thread — never let an exception escape
         try:
             pct = int(data[0])
@@ -549,17 +585,12 @@ class MotionSenseHRV(PlasmaDevice):
     # demo feature: real-time accel + orientation, only on wristbands with the
     # demo firmware (see data/IMU_STREAM_BLE_CHARACTERISTIC.md)
     def register_imu_stream(self, peripheral, name):
-        service_uuid = "da39c950-1d81-48e2-9c68-d0ae4bbd351f"
         characteristic_uuid = "da39c953-1d81-48e2-9c68-d0ae4bbd351f"
         # bounded — see register_enmo
-        ok, _, err = self._run_ble_op(
-            lambda: peripheral.notify(service_uuid, characteristic_uuid,
-                                      lambda data: self.imu_stream_handler(data, peripheral, name)),
-            RECONNECT_OP_TIMEOUT_S, f"{name} IMU notify subscribe")
-        if not ok:
-            raise err
+        self._run_async(peripheral.start_notify(
+            characteristic_uuid, lambda ch, data: self.imu_stream_handler(data, name)))
 
-    def imu_stream_handler(self, data, peripheral, name):
+    def imu_stream_handler(self, data, name):
         # runs on the BLE library's callback thread — never let an exception
         # escape here, it would otherwise silently kill notifications for
         # this device with no visible status change
@@ -662,12 +693,8 @@ class MotionSenseHRV(PlasmaDevice):
 
     def register_nus_notify(self, peripheral, name):
         # bounded — see register_enmo
-        ok, _, err = self._run_ble_op(
-            lambda: peripheral.notify(NUS_SERVICE_UUID, NUS_TX_CHAR_UUID,
-                                      lambda data: self._nus_data_handler(data, name)),
-            RECONNECT_OP_TIMEOUT_S, f"{name} NUS notify subscribe")
-        if not ok:
-            raise err
+        self._run_async(peripheral.start_notify(
+            NUS_TX_CHAR_UUID, lambda ch, data: self._nus_data_handler(data, name)))
 
     def get_sqc_devices(self):
         """Wristband names currently connected and eligible for an SQC snapshot
@@ -700,7 +727,7 @@ class MotionSenseHRV(PlasmaDevice):
         stream is CANCELled early and the partial payload kept (see
         _sqc_watchdog_loop)."""
         peripheral = self.active_devices.get(name)
-        if peripheral is None or not peripheral.is_connected():
+        if peripheral is None or not peripheral.is_connected:
             return f"⛔ {name} not connected"
 
         state = self.sqc_state.setdefault(name, self._new_sqc_state())
@@ -711,7 +738,7 @@ class MotionSenseHRV(PlasmaDevice):
             max_seconds = None
 
         try:
-            mtu = peripheral.mtu()
+            mtu = peripheral.mtu_size
         except Exception:
             mtu = None
         if mtu is not None and mtu < SQC_MIN_MTU:
@@ -719,10 +746,9 @@ class MotionSenseHRV(PlasmaDevice):
             return f"⛔ {name}: MTU {mtu} < {SQC_MIN_MTU}"
 
         self._ensure_sqc_threads()
-        try:
-            rssi = peripheral.rssi()
-        except Exception:
-            rssi = None
+        # rssi at connect time, not live — bleak has no connected-client RSSI
+        # query (see self._connect_rssi's definition in __init__)
+        rssi = self._connect_rssi.get(name)
 
         sid = new_session_id()
         diag = self._new_sqc_diag()
@@ -737,8 +763,8 @@ class MotionSenseHRV(PlasmaDevice):
             partial=False, quick_seconds=None, warning=None,
         )
         try:
-            peripheral.write_request(NUS_SERVICE_UUID, NUS_RX_CHAR_UUID,
-                                     build_command(OP_START, sid))
+            self._run_async(peripheral.write_gatt_char(NUS_RX_CHAR_UUID,
+                                                        build_command(OP_START, sid), response=True))
         except Exception as e:
             state.update(status="error", error=f"request failed: {e}")
             self.info(f"SQC START failed for {name}: {e}")
@@ -746,8 +772,8 @@ class MotionSenseHRV(PlasmaDevice):
 
         mode = ("history-only" if history_only
                 else f"quick {max_seconds:g}s" if max_seconds else "full")
-        self.info(f"SQC START sent to {name} (session {sid:#010x}, mtu={mtu}, rssi={rssi}, {mode})")
-        self._sqc_debug(name, f"START session={sid:#010x} mtu={mtu} rssi={rssi} mode={mode}")
+        self.info(f"SQC START sent to {name} (session {sid:#010x}, mtu={mtu}, rssi={rssi} @connect, {mode})")
+        self._sqc_debug(name, f"START session={sid:#010x} mtu={mtu} rssi={rssi}@connect mode={mode}")
         return f"📡 {name}: waiting for START_ACK…"
 
     # terminal statuses shared by every SQC runner's completion polling and by
@@ -883,8 +909,8 @@ class MotionSenseHRV(PlasmaDevice):
         if not state or not state.get("session") or peripheral is None:
             return f"⛔ {name}: nothing to cancel"
         try:
-            peripheral.write_request(NUS_SERVICE_UUID, NUS_RX_CHAR_UUID,
-                                     build_command(OP_CANCEL, state["session"].session_id))
+            self._run_async(peripheral.write_gatt_char(
+                NUS_RX_CHAR_UUID, build_command(OP_CANCEL, state["session"].session_id), response=True))
         except Exception as e:
             return f"⛔ {name} cancel failed: {e}"
         return f"✖ {name}: cancel sent"
@@ -1104,7 +1130,7 @@ class MotionSenseHRV(PlasmaDevice):
                 self._last_reconnect_sweep = now
                 for name, p in list(self.active_devices.items()):
                     try:
-                        if not p.is_connected():
+                        if not p.is_connected:
                             self.info(f"{name} link down — auto-reconnecting")
                             self._reconnect_peripheral(name, "connection watchdog")
                     except Exception as e:
@@ -1144,8 +1170,8 @@ class MotionSenseHRV(PlasmaDevice):
         if peripheral is None:
             return False
         try:
-            peripheral.write_request(NUS_SERVICE_UUID, NUS_RX_CHAR_UUID,
-                                     build_command(OP_CANCEL, session.session_id))
+            self._run_async(peripheral.write_gatt_char(
+                NUS_RX_CHAR_UUID, build_command(OP_CANCEL, session.session_id), response=True))
             state["early_cancel_sent"] = True
             state["early_cancel_at"] = now
             self._sqc_debug(
@@ -1159,61 +1185,38 @@ class MotionSenseHRV(PlasmaDevice):
             self._sqc_debug(name, f"  quick: CANCEL write failed: {e}")
         return True
 
-    @staticmethod
-    def _run_ble_op(fn, timeout_s, description):
-        """Run a blocking simplepyble call on its own daemon thread and wait
-        up to timeout_s for it. simplepyble exposes no timeout/cancel of its
-        own, so this is the only way to keep a hung call (observed: an
-        unreachable peripheral's connect() blocking indefinitely) from
-        stalling the caller forever. Returns (ok, result, error) — result is
-        fn's return value on success, error is a TimeoutError on timeout or
-        whatever fn raised. NOTE: on timeout the underlying call may still be
-        running on its own leaked daemon thread; there is no way to cancel it
-        from here."""
-        outcome = {}
-
-        def _target():
-            try:
-                outcome["result"] = fn()
-                outcome["ok"] = True
-            except Exception as e:
-                outcome["error"] = e
-
-        t = threading.Thread(target=_target, name=f"ble-op-{description}", daemon=True)
-        t.start()
-        t.join(timeout_s)
-        if t.is_alive():
-            return False, None, TimeoutError(f"{description} timed out after {timeout_s:.0f}s")
-        if "error" in outcome:
-            return False, None, outcome["error"]
-        return True, outcome.get("result"), None
-
     def _reconnect_peripheral(self, name, reason):
-        """disconnect → wait → connect → re-subscribe NUS (+ ENMO/IMU if a
-        recording session is running). Runs on the watchdog thread. Both BLE
-        calls are bounded (RECONNECT_OP_TIMEOUT_S) — simplepyble's connect()
-        has no timeout of its own and can hang indefinitely against an
-        unreachable peripheral; without a bound here that stalls the shared
-        watchdog thread forever (observed in production)."""
+        """disconnect → wait → connect (a fresh BleakClient, not the old one
+        — reusing a client across a disconnect isn't reliable on macOS's
+        CoreBluetooth backend) → re-subscribe NUS (+ ENMO/IMU if a recording
+        session is running). Runs on the watchdog thread. Both BLE calls are
+        bounded (BLE_OP_TIMEOUT_S, via _run_async) — this is the exact path
+        that used to hang forever with simplepyble (confirmed via a macOS
+        thread dump); bleak's connect() actually respects the timeout."""
         if not SQC_AUTO_RECONNECT:
             return
-        peripheral = self.active_devices.get(name)
-        if peripheral is None:
+        old = self.active_devices.get(name)
+        if old is None:
             return
+        addr = old.address
 
-        ok, _, err = self._run_ble_op(peripheral.disconnect, RECONNECT_OP_TIMEOUT_S, f"{name} disconnect")
-        if not ok:
-            self._sqc_debug(name, f"  disconnect failed/timed out: {err}")
+        try:
+            self._run_async(old.disconnect())
+        except Exception as e:
+            self._sqc_debug(name, f"  disconnect failed/timed out: {e}")
 
         time.sleep(1.5)
 
-        ok, _, err = self._run_ble_op(peripheral.connect, RECONNECT_OP_TIMEOUT_S, f"{name} connect")
-        if not ok:
-            self.info(f"SQC: {name} reconnect FAILED ({reason}): {err}")
-            self._sqc_debug(name, f"  reconnect FAILED/timed out: {err}")
+        peripheral = BleakClient(addr, disconnected_callback=lambda c, nm=name: self._on_unexpected_disconnect(nm))
+        try:
+            self._run_async(peripheral.connect())
+        except Exception as e:
+            self.info(f"SQC: {name} reconnect FAILED ({reason}): {e}")
+            self._sqc_debug(name, f"  reconnect FAILED/timed out: {e}")
             if name in self.memo:
                 self.memo[name].sts = "🔌 reconnect failed"
             return
+        self.active_devices[name] = peripheral
 
         try:
             self.register_nus_notify(peripheral, name)
@@ -1265,8 +1268,8 @@ class MotionSenseHRV(PlasmaDevice):
         # it lets the firmware tear down its stream thread and free TX slots
         if session is not None:
             try:
-                peripheral.write_request(NUS_SERVICE_UUID, NUS_RX_CHAR_UUID,
-                                         build_command(OP_CANCEL, session.session_id))
+                self._run_async(peripheral.write_gatt_char(
+                    NUS_RX_CHAR_UUID, build_command(OP_CANCEL, session.session_id), response=True))
                 self._sqc_debug(name, "  CANCEL written")
             except Exception as e:
                 self._sqc_debug(name, f"  CANCEL write failed: {e}")
@@ -1447,7 +1450,7 @@ class MotionSenseHRV(PlasmaDevice):
 
 
 class MsenseOutlet(StreamOutlet):
-    def __init__(self, name, peripheral, chunk_size=32, max_buffered=360, use_lsl=True):
+    def __init__(self, name, address, chunk_size=32, max_buffered=360, use_lsl=True):
         self.name = name.replace(':', '-')
         self.use_lsl = use_lsl
 
@@ -1456,7 +1459,7 @@ class MsenseOutlet(StreamOutlet):
         self.msg_fun = f"📻 {self.tic()} LSL {lsl_status}. Ready to start..."
 
         if self.use_lsl:
-            info = StreamInfo(name, "MotionSenSE", 3, 2, cf_double64, peripheral.address())
+            info = StreamInfo(name, "MotionSenSE", 3, 2, cf_double64, address)
             super().__init__(info, chunk_size, max_buffered)
 
         self.log_dir = os.path.join(app_context().data_dir, "default")

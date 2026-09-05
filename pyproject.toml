@@ -21,7 +21,7 @@ Homepage = "https://github.com/YuyiChang/PLASMA"
 Repository = "https://github.com/YuyiChang/PLASMA"
 
 [project.optional-dependencies]
-msense = ["simplepyble", "scipy", "matplotlib", "psutil", "Pillow", "pandas", "tqdm"]
+msense = ["simplepyble", "bleak", "scipy", "matplotlib", "psutil", "Pillow", "pandas", "tqdm"]
 qb2 = ["blickfeld-qb2"]
 pupil = ["pupil-labs-realtime-api"]
 shimmer = ["pyshimmer", "pyserial"]

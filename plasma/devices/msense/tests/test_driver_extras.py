@@ -1,5 +1,8 @@
 """Ported YAMS driver extras — journaler helpers, flash-erase passcode gate,
-capability-flag SQC filtering, battery packet parse. No BLE."""
+capability-flag SQC filtering, battery packet parse. No real BLE — fakes are
+bleak-shaped (see _FakePeripheral) and run against a real asyncio event loop
+via _bare_driver's _start_ble_loop(), exercising the actual _run_async bridge."""
+import asyncio
 import struct
 import threading
 import time
@@ -38,18 +41,31 @@ def test_task_labels_default_and_file(tmp_path):
 # ── driver helpers (constructed without going through __init__) ──────────────
 
 class _FakePeripheral:
-    def __init__(self, connected=True):
-        self._connected = connected
+    """Bleak-shaped fake: is_connected/address are plain attributes (bleak
+    itself exposes is_connected as a property — reading it works the same
+    either way); connect/disconnect/write_gatt_char/read_gatt_char/
+    start_notify are coroutines, matching BleakClient's real API. Used
+    against a real asyncio loop (via _bare_driver's _start_ble_loop), so
+    tests exercise the actual _run_async bridge, not a mock of it."""
+    def __init__(self, address="AA:BB:CC:DD:EE:FF", connected=True):
+        self.address = address
+        self.is_connected = connected
         self.writes = []
 
-    def is_connected(self):
-        return self._connected
+    async def connect(self):
+        self.is_connected = True
 
-    def write_request(self, svc, ch, data):
-        self.writes.append((svc, ch, data))
+    async def disconnect(self):
+        self.is_connected = False
 
-    def disconnect(self):
-        self._connected = False
+    async def write_gatt_char(self, char_uuid, data, response=True):
+        self.writes.append((char_uuid, bytes(data)))
+
+    async def read_gatt_char(self, char_uuid):
+        return b"\x00"
+
+    async def start_notify(self, char_uuid, callback):
+        pass
 
 
 def _bare_driver():
@@ -62,6 +78,8 @@ def _bare_driver():
     d.memo = {}
     d.t_start = 0.0
     d._sqc_threads_stopped = False
+    d._connect_rssi = {}
+    d._start_ble_loop()
     return d
 
 
@@ -89,7 +107,7 @@ def test_erase_right_code_writes_68_and_disconnects():
 
     assert "erase issued to 1" in msg
     assert len(p.writes) == 1
-    _svc, _ch, data = p.writes[0]
+    _ch, data = p.writes[0]
     assert len(data) == 1  # single unsigned byte, not a 4-byte word
     assert struct.unpack("<B", data)[0] == ERASE_CODE
     assert d.active_devices == {} and d.active_outlets == {}
@@ -112,7 +130,7 @@ def test_battery_handler_parses_and_stores():
     d.memo = {"w1": PlasmaMemo("w1", channels=["battery"])}
     d.caps = {"w1": {"nus": True, "imu": False, "battery": False}}
 
-    d.battery_handler(bytes([90]), None, "w1")
+    d.battery_handler(bytes([90]), "w1")
 
     assert d.battery["w1"] == 90
     assert d.caps["w1"]["battery"] is True
@@ -256,67 +274,56 @@ def test_nus_data_handler_finalizes_cancel_with_data_loss_as_warned_partial(monk
 
 # ── bounded BLE calls (auto-reconnect freeze fix) ───────────────────────────
 #
-# simplepyble's connect()/disconnect() are blocking C calls with no timeout
-# of their own; observed in production hanging the shared watchdog thread
-# (and possibly the whole app) forever against an unreachable peripheral.
-# _run_ble_op bounds that; these tests never let a "hung" fn actually run
-# unbounded — they prove the caller gets control back promptly regardless.
+# We used to run on simplepyble, whose connect()/disconnect() are blocking C
+# calls with no timeout of their own — confirmed via a macOS thread dump to
+# hold the GIL hostage inside native code, freezing the whole app with no
+# way for a Python-level timeout to recover. Replaced with bleak (asyncio-
+# native); _run_async submits a coroutine to a dedicated event-loop thread
+# and waits with a real, working timeout. These tests use a REAL asyncio
+# loop (via _bare_driver's _start_ble_loop) with fake coroutines that never
+# complete, proving the actual bridge mechanism recovers promptly.
 
-def test_run_ble_op_success():
-    ok, result, err = MotionSenseHRV._run_ble_op(lambda: None, 1.0, "noop")
-    assert ok is True
-    assert result is None
-    assert err is None
-
-
-def test_run_ble_op_returns_fns_result():
-    ok, result, err = MotionSenseHRV._run_ble_op(lambda: b"\x5a", 1.0, "read")
-    assert ok is True
-    assert result == b"\x5a"
-    assert err is None
+def test_run_async_success():
+    d = _bare_driver()
+    async def _coro():
+        return "ok"
+    assert d._run_async(_coro()) == "ok"
 
 
-def test_run_ble_op_propagates_exception():
-    def _boom():
+def test_run_async_propagates_exception():
+    d = _bare_driver()
+    async def _boom():
         raise RuntimeError("nope")
-    ok, result, err = MotionSenseHRV._run_ble_op(_boom, 1.0, "boom")
-    assert ok is False
-    assert result is None
-    assert isinstance(err, RuntimeError)
-    assert str(err) == "nope"
+    with pytest.raises(RuntimeError, match="nope"):
+        d._run_async(_boom())
 
 
-def test_run_ble_op_times_out_without_waiting_for_the_blocked_call():
-    release = threading.Event()
-
-    def _hangs():
-        release.wait()  # simulates a stuck simplepyble call — never returns
+def test_run_async_times_out_without_waiting_for_the_blocked_coroutine():
+    d = _bare_driver()
+    async def _hangs():
+        await asyncio.sleep(999)  # simulates a stuck/slow BLE op — never returns in time
 
     start = time.time()
-    ok, result, err = MotionSenseHRV._run_ble_op(_hangs, 0.2, "hangs")
+    with pytest.raises(TimeoutError):
+        d._run_async(_hangs(), timeout_s=0.2)
     elapsed = time.time() - start
 
-    assert ok is False
-    assert result is None
-    assert isinstance(err, TimeoutError)
-    assert elapsed < 1.0  # returned promptly at ~timeout_s, not stuck forever
-    release.set()  # let the leaked daemon thread finish, don't outlive the test
+    assert elapsed < 1.0  # returned promptly at ~timeout_s, not stuck for 999s
 
 
 def test_register_nus_notify_bounded_when_notify_hangs(monkeypatch):
-    """peripheral.notify() is just as unbounded as connect()/disconnect() in
-    simplepyble — a hang here (e.g. subscribing right after a reconnect, on a
-    still-marginal link) must not stall the caller forever either. All four
-    register_* methods share this same _run_ble_op-wrapped shape; NUS stands
-    in for the group."""
-    monkeypatch.setattr("plasma.devices.msense.device.RECONNECT_OP_TIMEOUT_S", 0.2)
-    release = threading.Event()
+    """start_notify() is just as capable of being slow/stuck as connect()/
+    disconnect() — a hang here (e.g. subscribing right after a reconnect, on
+    a still-marginal link) must not stall the caller forever either. All
+    four register_* methods share this same _run_async-wrapped shape; NUS
+    stands in for the group."""
+    monkeypatch.setattr("plasma.devices.msense.device.BLE_OP_TIMEOUT_S", 0.2)
+    d = _bare_driver()
 
     class _HangingPeripheral(_FakePeripheral):
-        def notify(self, svc, ch, callback):
-            release.wait()  # never returns within the test
+        async def start_notify(self, char_uuid, callback):
+            await asyncio.sleep(999)
 
-    d = _bare_driver()
     p = _HangingPeripheral()
 
     start = time.time()
@@ -325,24 +332,27 @@ def test_register_nus_notify_bounded_when_notify_hangs(monkeypatch):
     elapsed = time.time() - start
 
     assert elapsed < 1.0
-    release.set()  # let the leaked daemon thread finish
 
 
 def test_reconnect_peripheral_bounded_when_connect_hangs(monkeypatch):
-    """A peripheral.connect() that never returns must not stall
-    _reconnect_peripheral forever — it should give up after the bounded
-    timeout and mark the device as failed instead of hanging."""
-    monkeypatch.setattr("plasma.devices.msense.device.RECONNECT_OP_TIMEOUT_S", 0.2)
+    """A connect() that never returns must not stall _reconnect_peripheral
+    forever — it should give up after the bounded timeout and mark the
+    device as failed instead of hanging. _reconnect_peripheral builds a
+    fresh BleakClient for the reconnect attempt (not reusing the old one —
+    reconnecting on the same client isn't reliable on macOS's CoreBluetooth
+    backend), so the hang is injected via a patched BleakClient constructor."""
+    monkeypatch.setattr("plasma.devices.msense.device.BLE_OP_TIMEOUT_S", 0.2)
     monkeypatch.setattr(time, "sleep", lambda s: None)  # skip the real 1.5s pause
 
-    release = threading.Event()
-
     class _HangingPeripheral(_FakePeripheral):
-        def connect(self):
-            release.wait()  # never returns within the test
+        async def connect(self):
+            await asyncio.sleep(999)
+
+    monkeypatch.setattr("plasma.devices.msense.device.BleakClient",
+                        lambda address, **kwargs: _HangingPeripheral(address=address))
 
     d = _bare_driver()
-    p = _HangingPeripheral()
+    p = _FakePeripheral()  # the "old" (already connected) client being replaced
     d.active_devices = {"w1": p}
     d.caps = {"w1": {}}
     d.memo = {"w1": PlasmaMemo("w1")}
@@ -354,4 +364,3 @@ def test_reconnect_peripheral_bounded_when_connect_hangs(monkeypatch):
 
     assert elapsed < 1.0
     assert d.memo["w1"].sts == "🔌 reconnect failed"
-    release.set()  # let the leaked daemon thread finish
