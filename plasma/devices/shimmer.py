@@ -3,6 +3,7 @@ import time
 from serial import Serial
 from pyshimmer import ShimmerBluetooth, DEFAULT_BAUDRATE, DataPacket, EChannelType
 from pylsl import StreamInfo, StreamOutlet
+from plasma.lsl_util import mark_plasma_origin
 
 def handler(pkt: DataPacket) -> None:
     # Access the GSR raw data channel
@@ -18,7 +19,7 @@ class ShimmerGSR(PlasmaDevice):
         self.memo = PlasmaMemo("ShimmerGSR")
 
         info = StreamInfo('ShimmerGSR', 'GSR', 1, 50, 'int32')
-        self.outlet = StreamOutlet(info)
+        self.outlet = StreamOutlet(mark_plasma_origin(info))
 
         try:
             print("Initializing SimmerGSR on COM5")

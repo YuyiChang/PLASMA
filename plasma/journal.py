@@ -40,8 +40,9 @@ def open_journal_outlet():
     None if LSL is unavailable (missing liblsl, etc.) — never fatal to startup."""
     try:
         from pylsl import StreamInfo, StreamOutlet
+        from plasma.lsl_util import mark_plasma_origin
         info = StreamInfo(name=app_context().journal_stream, type="string",
                           channel_count=1, channel_format="string")
-        return StreamOutlet(info)
+        return StreamOutlet(mark_plasma_origin(info))
     except Exception:
         return None

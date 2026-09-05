@@ -1,6 +1,7 @@
 import blickfeld_qb2
 import numpy as np
 from pylsl import StreamInfo, StreamOutlet
+from plasma.lsl_util import mark_plasma_origin
 import threading
 import time
 import asyncio
@@ -34,7 +35,7 @@ class Qb2(PlasmaDevice):
         
     # def init_device(self):
         info = StreamInfo('blickfield_qb2', 'Image', 1, 8, 'int32', 'qb2-xxxx')
-        self.outlet = StreamOutlet(info)
+        self.outlet = StreamOutlet(mark_plasma_origin(info))
 
         try:
             channel = blickfeld_qb2.Channel(fqdn_or_ip=self.addr)
@@ -43,6 +44,9 @@ class Qb2(PlasmaDevice):
         except Exception as e:
             gr.Error(str(e))
             self.memo.sts = f"⛔ {str(e)}"
+
+    def lsl_streams(self):
+        return {"blickfield_qb2": self.tag}
 
     def interface(self):
         pass

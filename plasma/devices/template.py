@@ -55,6 +55,12 @@ class PlasmaMemo():
 
 
 class PlasmaDevice:
+    # Set by IntegratedPanel.start_collection() right before start(), to the one
+    # timestamped folder the XDF recorder and every device share for a session.
+    # None when a device is constructed outside the panel (tests/scripts) — the
+    # device then falls back to its own path logic.
+    session_dir = None
+
     def __init__(self, session_info, logger=None, tag=None):
         self.session_info = session_info
         self.logger = logger
@@ -74,6 +80,16 @@ class PlasmaDevice:
         if isinstance(self.memo, dict):
             return self.memo
         return {self.tag: self.memo}
+
+    def lsl_streams(self):
+        """{LSL stream name -> key in self.get_sources()} for every LSL outlet
+        this device publishes, so the dashboard can fold the recorder's
+        per-stream stats into the right memo row. Default: a single-memo device
+        whose stream name matches its memo name (bitalino, shimmer). Devices
+        whose stream name differs (msense, qb2, pupil_labs) override this."""
+        if isinstance(self.memo, dict):
+            return {}
+        return {self.memo.name: self.tag}
 
     def disconnect(self):
         """No-op by default; a device holding an external connection overrides

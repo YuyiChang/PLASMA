@@ -2,6 +2,7 @@ from plasma.devices.template import PlasmaDevice, PlasmaMemo
 import time
 from serial import Serial
 from pylsl import StreamInfo, StreamOutlet
+from plasma.lsl_util import mark_plasma_origin
 # from bitalino import BITalino
 from lib.revolution_python_api.bitalino import BITalino
 import numpy as np
@@ -27,7 +28,7 @@ class PlasmaBitalino(PlasmaDevice):
         digitalOutput_off = [0, 0]
 
         info = StreamInfo('BITalino', 'bitalino', 11, self.fs, 'int64')
-        self.outlet = StreamOutlet(info)
+        self.outlet = StreamOutlet(mark_plasma_origin(info))
 
         mac_addr = "98:D3:41:FE:16:F7"
 

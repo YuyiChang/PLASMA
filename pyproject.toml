@@ -28,7 +28,7 @@ shimmer = ["pyshimmer", "pyserial"]
 obs = ["obsws-python"]
 all = ["plasma-app[msense,qb2,pupil,shimmer,obs]"]
 build = ["pyinstaller"]
-test = ["pytest"]
+test = ["pytest", "pyxdf"]
 
 [project.scripts]
 plasma = "plasma.__main__:main"

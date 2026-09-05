@@ -31,7 +31,7 @@ function refresh() {
     // rendering entirely), passively watch known plot containers and
     // silently re-apply the scroll position that was in effect just before
     // each redraw. Containers opt in via elem_id, listed here.
-    const scrollGuardIds = ['sqc-plot-container'];
+    const scrollGuardIds = ['sqc-plot-container', 'plasma-memo-panel'];
     let lastScrollY = window.scrollY;
     window.addEventListener('scroll', () => { lastScrollY = window.scrollY; }, {passive: true});
 

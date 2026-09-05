@@ -7,6 +7,7 @@ from pupil_labs.realtime_api.streaming.eye_events import (
 import gradio as gr
 from plasma.devices.template import PlasmaDevice, PlasmaMemo
 from pylsl import StreamInfo, StreamOutlet, cf_string
+from plasma.lsl_util import mark_plasma_origin
 # from plasma.config import IP_PUPIL_LABS
 # from plasma.config import plasma_config
 import plasma.config as c
@@ -33,7 +34,10 @@ class PupilLabsIMU(PlasmaDevice):
             # raise SystemExit()
 
         info = StreamInfo('pupil_labs_imu', 'pupillabs', 11, 8)
-        self.outlet = StreamOutlet(info)
+        self.outlet = StreamOutlet(mark_plasma_origin(info))
+
+    def lsl_streams(self):
+        return {"pupil_labs_imu": self.tag}
 
     def streaming(self):
         while not self._stop_event.is_set():
@@ -79,9 +83,12 @@ class PupilLabsEyeEventBlink(PlasmaDevice):
             self.memo.sts = "❌ Fault"
             # raise SystemExit()
 
-        info = StreamInfo('pupil_labs_blink', 'pupillabs', 
+        info = StreamInfo('pupil_labs_blink', 'pupillabs',
                           channel_count=1, channel_format=cf_string)
-        self.outlet = StreamOutlet(info)
+        self.outlet = StreamOutlet(mark_plasma_origin(info))
+
+    def lsl_streams(self):
+        return {"pupil_labs_blink": self.tag}
 
     def streaming(self):
         while not self._stop_event.is_set():
@@ -136,9 +143,12 @@ class PupilLabsEyeEventFixation(PlasmaDevice):
             self.memo.sts = "❌ Fault"
             # raise SystemExit()
 
-        info = StreamInfo('pupil_labs_fixation', 'pupillabs', 
+        info = StreamInfo('pupil_labs_fixation', 'pupillabs',
                           channel_count=1, channel_format=cf_string)
-        self.outlet = StreamOutlet(info)
+        self.outlet = StreamOutlet(mark_plasma_origin(info))
+
+    def lsl_streams(self):
+        return {"pupil_labs_fixation": self.tag}
 
     def streaming(self):
         while not self._stop_event.is_set():

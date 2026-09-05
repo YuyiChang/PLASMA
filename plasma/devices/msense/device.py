@@ -13,6 +13,7 @@ import threading
 import time
 from collections import deque
 from pylsl import StreamInfo, StreamOutlet, cf_double64
+from plasma.lsl_util import mark_plasma_origin
 import numpy as np
 import struct
 from plasma import __version__
@@ -317,13 +318,26 @@ class MotionSenseHRV(PlasmaDevice):
         # does the auto-reconnect sweep, not just SQC stall recovery
         self._ensure_sqc_threads()
 
+    def lsl_streams(self):
+        return {o.stream_name: cfg for cfg, o in
+                dict(getattr(self, "active_outlets", {})).items()
+                if getattr(o, "use_lsl", False)}
+
+    def _resolve_log_dir(self):
+        """Where MSense .txt / SQC captures go. Prefer the unified session dir
+        injected by IntegratedPanel.start_collection(); fall back to a
+        self-computed sibling dir when started outside the panel."""
+        sdir = getattr(self, "session_dir", None)
+        if sdir:
+            return os.path.join(sdir, "msense")
+        timestamp = time.strftime("%y%m%d_%H%M")  # legacy minute precision
+        return os.path.join(app_context().data_dir,
+                            self.session_info['sub_id'],
+                            self.session_info['ses_id'],
+                            f"{self.session_info['participant_enc']}_{timestamp}")
+
     def start(self):
-        timestamp = time.strftime("%y%m%d_%H%M")
-        # create log dir
-        self.log_dir = os.path.join(app_context().data_dir,
-                                    self.session_info['sub_id'],
-                                    self.session_info['ses_id'], 
-                                    f"{self.session_info['participant_enc']}_{timestamp}")
+        self.log_dir = self._resolve_log_dir()
         print(f"create log dir {self.log_dir}")
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -1452,6 +1466,10 @@ class MotionSenseHRV(PlasmaDevice):
 class MsenseOutlet(StreamOutlet):
     def __init__(self, name, address, chunk_size=32, max_buffered=360, use_lsl=True):
         self.name = name.replace(':', '-')
+        # exact string handed to StreamInfo below (keeps colons) — this is what
+        # the LSL recorder resolves the stream by; MotionSenseHRV.lsl_streams()
+        # maps it back to the memo key.
+        self.stream_name = name
         self.use_lsl = use_lsl
 
         lsl_status = "OK" if self.use_lsl else "disabled"
@@ -1460,7 +1478,7 @@ class MsenseOutlet(StreamOutlet):
 
         if self.use_lsl:
             info = StreamInfo(name, "MotionSenSE", 3, 2, cf_double64, address)
-            super().__init__(info, chunk_size, max_buffered)
+            super().__init__(mark_plasma_origin(info), chunk_size, max_buffered)
 
         self.log_dir = os.path.join(app_context().data_dir, "default")
 
