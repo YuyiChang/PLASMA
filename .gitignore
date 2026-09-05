@@ -36,6 +36,7 @@ MANIFEST
 *.manifest
 *.spec
 !app_macos.spec
+!app_linux.spec
 !app_windows.spec
 
 # Installer logs

@@ -74,7 +74,7 @@ All devices stream data over **LSL** (Lab Streaming Layer) for synchronized, tim
 
 ## 📦 Distribution
 
-Pre-built app bundles are available for macOS and Windows (see `app_macos.spec` / `app_windows.spec`).
+Pre-built app bundles are available for macOS, Linux and Windows (see `app_macos.spec` / `app_linux.spec` / `app_windows.spec`), built in CI by `.github/workflows/build.yml`.
 
 To run from source:
 
