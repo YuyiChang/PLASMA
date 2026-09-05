@@ -33,7 +33,7 @@ test = ["pytest", "pyxdf"]
 [project.scripts]
 plasma = "plasma.__main__:main"
 
-[project.entry-points.pyinstaller]
+[project.entry-points.pyinstaller40]
 hook-dirs = "plasma.__pyinstaller:get_hook_dirs"
 
 [tool.setuptools.dynamic]

@@ -1,6 +1,6 @@
 """PyInstaller hook directory for the ``plasma`` package.
 
-Registered via the ``pyinstaller`` entry point in ``pyproject.toml`` so any
+Registered via the ``pyinstaller40`` entry point in ``pyproject.toml`` so any
 ``pyinstaller`` build of an app that imports ``plasma`` picks up
 ``hook-plasma.py`` automatically — no hand-maintained ``hiddenimports`` list in
 the spec files.

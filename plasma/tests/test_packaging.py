@@ -36,3 +36,14 @@ def test_every_plugin_extra_exists():
 def test_console_script_entrypoint():
     pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text())
     assert pyproject["project"]["scripts"]["plasma"] == "plasma.__main__:main"
+
+
+def test_pyinstaller_hook_entrypoint_uses_the_pyinstaller40_group():
+    # PyInstaller discovers hook dirs via the `pyinstaller40` entry-point group
+    # (build_main.discover_hook_directories). A plain `pyinstaller` group is
+    # silently ignored, so hook-plasma.py never runs and the dynamically-imported
+    # device plugins (plasma.devices.*) drop out of the frozen build.
+    pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    eps = pyproject["project"]["entry-points"]
+    assert "pyinstaller40" in eps, eps
+    assert eps["pyinstaller40"]["hook-dirs"] == "plasma.__pyinstaller:get_hook_dirs"

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
 # Device plugins are imported dynamically by plasma.plugins, so they are pulled
-# in by plasma/__pyinstaller/hook-plasma.py (auto-discovered via the `pyinstaller`
+# in by plasma/__pyinstaller/hook-plasma.py (auto-discovered via the `pyinstaller40`
 # entry point once `pip install -e .` has run) — no hand hiddenimports list here.
 import glob
 import os
