@@ -154,6 +154,10 @@ class MotionSenseHRV(PlasmaDevice):
 
         self.active_devices = {}
         self.active_outlets = {}
+        # (name, char_uuid) -> the BleakClient the notify is live on; used by
+        # _ensure_notify to make (re-)subscribing idempotent across a
+        # Start/Stop/Start cycle or a reconnect.
+        self._notify_state = {}
 
         self.scan_devices()
         self.connect_devices()
@@ -258,6 +262,7 @@ class MotionSenseHRV(PlasmaDevice):
     def connect_devices(self):
         self.active_devices = {}
         self.active_outlets = {}
+        self._notify_state = {}
         self.ctl_state = "Start device connection"
 
         # quick sanity check
@@ -398,6 +403,7 @@ class MotionSenseHRV(PlasmaDevice):
                 self.info(f"Error disconnecting {name}: {e}")
         self.active_devices = {}
         self.active_outlets = {}
+        self._notify_state = {}
 
     # ── manual controls (surfaced in the MSense > Control sub-tab) ───────────
 
@@ -447,6 +453,7 @@ class MotionSenseHRV(PlasmaDevice):
         self._sqc_threads_stopped = True        # let the watchdog loop exit
         self.active_devices = {}
         self.active_outlets = {}
+        self._notify_state = {}
 
         if done:
             msg = (f"🧨 erase issued to {done} wristband(s) — wait for the lights out, "
@@ -548,14 +555,27 @@ class MotionSenseHRV(PlasmaDevice):
                 except Exception as e:
                     self.info(f"IMU stream unavailable on {name} (demo firmware not present?): {e}")
 
+    def _ensure_notify(self, peripheral, name, char_uuid, handler):
+        """Idempotent start_notify. A Start/Stop/Start cycle (stop doesn't
+        unsubscribe, by design) or a reconnect-then-Start would otherwise call
+        start_notify twice on the same client — which CoreBluetooth rejects
+        with 'Characteristic notifications already started'. Keyed by the live
+        client object, so a fresh BleakClient after a reconnect still
+        re-subscribes."""
+        if getattr(self, "_notify_state", None) is None:
+            self._notify_state = {}
+        key = (name, char_uuid)
+        if self._notify_state.get(key) is peripheral:
+            return
+        # bounded — bleak's start_notify actually respects this timeout (unlike
+        # simplepyble's notify(), confirmed via a macOS thread dump to hold the
+        # GIL hostage indefinitely against a marginal link).
+        self._run_async(peripheral.start_notify(char_uuid, handler))
+        self._notify_state[key] = peripheral
+
     def register_enmo(self, peripheral, name):
-        # ENMO
-        characteristic_uuid = "da39c951-1d81-48e2-9c68-d0ae4bbd351f"
-        # bounded — bleak's start_notify actually respects this timeout
-        # (unlike simplepyble's notify(), confirmed via a macOS thread dump
-        # to hold the GIL hostage indefinitely against a marginal link).
-        self._run_async(peripheral.start_notify(
-            characteristic_uuid, lambda ch, data: self.enmo_handler(data, name)))
+        self._ensure_notify(peripheral, name, "da39c951-1d81-48e2-9c68-d0ae4bbd351f",
+                            lambda ch, data: self.enmo_handler(data, name))
 
     def enmo_handler(self, data, name):
         # runs on the BLE library's callback thread — never let an exception
@@ -581,9 +601,8 @@ class MotionSenseHRV(PlasmaDevice):
             self.info(f"Error handling ENMO packet from {name}: {e}")
 
     def register_battery(self, peripheral, name):
-        # bounded — see register_enmo
-        self._run_async(peripheral.start_notify(
-            BATTERY_CHAR_UUID, lambda ch, data: self.battery_handler(data, name)))
+        self._ensure_notify(peripheral, name, BATTERY_CHAR_UUID,
+                            lambda ch, data: self.battery_handler(data, name))
 
     def battery_handler(self, data, name):
         # runs on the BLE callback thread — never let an exception escape
@@ -599,10 +618,8 @@ class MotionSenseHRV(PlasmaDevice):
     # demo feature: real-time accel + orientation, only on wristbands with the
     # demo firmware (see data/IMU_STREAM_BLE_CHARACTERISTIC.md)
     def register_imu_stream(self, peripheral, name):
-        characteristic_uuid = "da39c953-1d81-48e2-9c68-d0ae4bbd351f"
-        # bounded — see register_enmo
-        self._run_async(peripheral.start_notify(
-            characteristic_uuid, lambda ch, data: self.imu_stream_handler(data, name)))
+        self._ensure_notify(peripheral, name, "da39c953-1d81-48e2-9c68-d0ae4bbd351f",
+                            lambda ch, data: self.imu_stream_handler(data, name))
 
     def imu_stream_handler(self, data, name):
         # runs on the BLE library's callback thread — never let an exception
@@ -706,9 +723,8 @@ class MotionSenseHRV(PlasmaDevice):
         }
 
     def register_nus_notify(self, peripheral, name):
-        # bounded — see register_enmo
-        self._run_async(peripheral.start_notify(
-            NUS_TX_CHAR_UUID, lambda ch, data: self._nus_data_handler(data, name)))
+        self._ensure_notify(peripheral, name, NUS_TX_CHAR_UUID,
+                            lambda ch, data: self._nus_data_handler(data, name))
 
     def get_sqc_devices(self):
         """Wristband names currently connected and eligible for an SQC snapshot

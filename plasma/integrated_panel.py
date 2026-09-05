@@ -96,7 +96,8 @@ def build_memo_html(session_sts, session_info, devices, snap, ext_streams=(),
     )
 
     if snap is not None:
-        rc = {"recording": "ok", "unavailable": "err"}.get(snap["state"], "idle")
+        rc = {"recording": "ok", "stopped": "err",
+              "unavailable": "err"}.get(snap["state"], "idle")
         out.append(
             f'<div class="m-row"><span class="m-name" style="color:{_STATUS_HEX[rc]}">'
             f'📼 {esc(snap["summary"])}</span>'
@@ -478,6 +479,12 @@ class IntegratedPanel():
         self.logger.info(f"Session dir: {self.session_dir}")
         for dev in self.available_devices:
             try:
+                # re-point at the current session identity: SessionInfo is
+                # rebuilt on every Subject/Session-ID edit, but the device only
+                # snapshotted it at Initialize — without this a post-Initialize
+                # ID change never reaches the wristband's participant-encoding
+                # characteristic (it keeps writing the Initialize-time value).
+                dev.session_info = self.session_info
                 dev.session_dir = self.session_dir
                 dev.start()
             except Exception as e:

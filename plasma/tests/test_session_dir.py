@@ -42,16 +42,19 @@ class _FakeDev:
     def __init__(self, tag):
         self.tag = tag
         self.session_dir = None
+        self.session_info = None
         self.started = False
 
     def start(self):
-        self.started = True
+        # capture what the panel injected, at the moment start() runs
+        self.started = self.session_info
 
 
 def _panel(tmp_path):
     p = IntegratedPanel.__new__(IntegratedPanel)
     p.logger = logging.getLogger("test-session-dir")
-    p.session_info = SessionInfo("sub-1000", "ses-00", 100000, str(tmp_path / "data"))
+    p.log_root = str(tmp_path / "data")
+    p.session_info = SessionInfo("sub-1000", "ses-00", 100000, p.log_root)
     p.available_devices = []
     p.record_lsl = False
     p.lsl_recorder = None
@@ -71,6 +74,25 @@ def test_start_collection_injects_one_session_dir(tmp_path):
     assert p.session_dir.startswith(p.session_info["log_dir"])
     assert re.search(r"100000_\d{6}_\d{6}$", p.session_dir)
     assert p.sts == "Collection in progress"
+
+
+def test_start_collection_repoints_stale_session_info(tmp_path):
+    """A device Initialized with one encoding must pick up a later ID change
+    at Start (the participant-encoding-not-written bug)."""
+    p = _panel(tmp_path)
+    dev = _FakeDev("msense")
+    dev.session_info = SessionInfo("sub-1000", "ses-00", 100000, str(tmp_path / "data"))
+    p.available_devices = [dev]
+
+    # operator edits the IDs after Initialize -> panel rebuilds session_info
+    p.get_participant_encoding("sub-2345", "ses-06")
+    assert p.session_info["participant_enc"] == 234506
+
+    p.start_collection()
+
+    # what the device saw when start() ran, not the Initialize-time value
+    assert dev.session_info["participant_enc"] == 234506
+    assert dev.started["participant_enc"] == 234506
 
 
 def test_recorder_gets_the_same_session_dir(tmp_path, monkeypatch):

@@ -12,7 +12,11 @@ PLASMA: Platform for LSL-based Acquisition of Sensor Metrics and Analytics
 `pip install -r requirements.txt` still works — it's a shim for `-e .[all,build,test]`.
 
 Writable state (device config, gyro-bias calibration, `data/` recordings, session
-log) lives in the working directory by default; set `PLASMA_HOME` to relocate it.
+log) location, in order: `$PLASMA_HOME` if set → a per-user app-data dir when
+running as a packaged app (`~/Library/Application Support/PLASMA` on macOS,
+`%LOCALAPPDATA%\PLASMA` on Windows, `~/.local/share/plasma` on Linux) → the
+working directory when running from source. Resolved once at import — set
+`PLASMA_HOME` before launching to override.
 
 ### use PLASMA from another project
 
@@ -26,6 +30,10 @@ plugins: `msense`, `qb2`, `pupil`, `shimmer`, `obs` (and `all`).
 ## Known issue
 
 - [ ] need manually set lidar ip addr
+- [ ] the built-in LSL→XDF recorder captures **every** stream on the default
+      liblsl session, so a concurrent `pytest` run or another lab tool leaks
+      into the recording; re-Initialize doesn't fully tear down old outlets.
+      Direction (SessionID scoping, outlet lifecycle): [`docs/lsl-lifecycle-and-scoping.md`](docs/lsl-lifecycle-and-scoping.md)
 
 
 ## developing a sensor plugin

@@ -334,6 +334,37 @@ def test_register_nus_notify_bounded_when_notify_hangs(monkeypatch):
     assert elapsed < 1.0
 
 
+def test_ensure_notify_idempotent_across_start_stop_start():
+    """collection_ctl(False) doesn't unsubscribe, so a second Start re-calls
+    register_* on the same client — CoreBluetooth rejects a double
+    start_notify. _ensure_notify must no-op the repeat, but still re-subscribe
+    on a fresh client (post-reconnect)."""
+    d = _bare_driver()
+    d._notify_state = {}
+
+    class _CountingPeripheral(_FakePeripheral):
+        def __init__(self):
+            super().__init__()
+            self.notify_calls = 0
+
+        async def start_notify(self, char_uuid, callback):
+            self.notify_calls += 1
+
+    p1 = _CountingPeripheral()
+    d.register_enmo(p1, "w1")
+    d.register_enmo(p1, "w1")            # Start / Stop / Start on same client
+    d.register_battery(p1, "w1")
+    assert p1.notify_calls == 2          # ENMO once, battery once — not 3
+
+    p2 = _CountingPeripheral()           # fresh client after a reconnect
+    d.register_enmo(p2, "w1")
+    assert p2.notify_calls == 1
+
+    d._notify_state = {}                 # connect_devices / disconnect / erase
+    d.register_enmo(p2, "w1")
+    assert p2.notify_calls == 2
+
+
 def test_reconnect_peripheral_bounded_when_connect_hangs(monkeypatch):
     """A connect() that never returns must not stall _reconnect_peripheral
     forever — it should give up after the bounded timeout and mark the

@@ -158,6 +158,16 @@ def test_exactly_one_recorder_header():
     assert "plasma_recording_260905_104945.xdf" in h
 
 
+def test_recorder_header_colour_by_state():
+    dev = _Dev(_Memo("Shimmer"))
+    rec = build_memo_html("x", _SI, [dev], _snap([], state="recording"))
+    assert f'color:{"#15803d"}">📼 0 streams' in rec           # green while recording
+    stop = build_memo_html("x", _SI, [dev], _snap([], state="stopped"))
+    assert f'color:{"#b91c1c"}">📼 0 streams' in stop           # red once stopped
+    una = build_memo_html("x", _SI, [dev], _snap([], state="unavailable"))
+    assert f'color:{"#b91c1c"}">📼 0 streams' in una
+
+
 def test_html_is_escaped():
     dev = _Dev(_Memo("X", sts="🟢",
                      latest="12:00 <img src=x onerror=alert(1)>"))

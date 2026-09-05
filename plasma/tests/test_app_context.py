@@ -1,8 +1,11 @@
 """`plasma.app_context` — env resolution, `configure()` overrides, path composition."""
 import os
+import sys
+
+import pytest
 
 from plasma import app_context
-from plasma.app_context import AppContext, configure
+from plasma.app_context import AppContext, configure, _user_data_dir
 
 
 def test_defaults_derive_from_plasma_home(tmp_path, monkeypatch):
@@ -21,9 +24,42 @@ def test_defaults_derive_from_plasma_home(tmp_path, monkeypatch):
 
 def test_falls_back_to_cwd_without_plasma_home(tmp_path, monkeypatch):
     monkeypatch.delenv("PLASMA_HOME", raising=False)
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
     monkeypatch.chdir(tmp_path)
     app_context.reset()
     assert app_context.app_context().home == str(tmp_path)
+
+
+def test_frozen_bundle_uses_per_os_user_data_dir(tmp_path, monkeypatch):
+    monkeypatch.delenv("PLASMA_HOME", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.chdir(tmp_path)   # cwd must be ignored
+    app_context.reset()
+    assert app_context.app_context().home == _user_data_dir("PLASMA")
+    assert str(tmp_path) not in app_context.app_context().home
+
+
+def test_plasma_home_wins_over_frozen(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLASMA_HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    app_context.reset()
+    assert app_context.app_context().home == str(tmp_path)
+
+
+@pytest.mark.parametrize("plat,env,expected_tail", [
+    ("win32", {"LOCALAPPDATA": "C:\\Users\\x\\AppData\\Local"},
+     os.path.join("C:\\Users\\x\\AppData\\Local", "PLASMA")),
+    ("darwin", {}, os.path.join("Library", "Application Support", "PLASMA")),
+    ("linux", {"XDG_DATA_HOME": "/home/x/.xdg"}, os.path.join("/home/x/.xdg", "plasma")),
+    ("linux", {}, os.path.join(".local", "share", "plasma")),
+])
+def test_user_data_dir_per_platform(plat, env, expected_tail, monkeypatch):
+    monkeypatch.setattr(sys, "platform", plat)
+    for k in ("LOCALAPPDATA", "XDG_DATA_HOME"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert _user_data_dir("PLASMA").endswith(expected_tail)
 
 
 def test_configure_overrides_and_is_sticky(tmp_path, monkeypatch):
