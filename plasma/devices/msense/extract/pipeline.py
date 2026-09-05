@@ -92,6 +92,31 @@ def get_device_version(folder_path):
     return (0, 0, 0)
 
 
+_UUID_NAME_RE = re.compile(r'^\s*name\s*[:=]\s*(\S.*?)\s*$', re.IGNORECASE | re.MULTILINE)
+
+
+def get_device_name(folder_path):
+    """The ``Name:`` field from a device's ``uuid.txt``, sanitised for use as a
+    folder name — ``None`` when there is no ``uuid.txt`` or no ``Name`` line.
+
+    New firmware (v5+) writes e.g. ``Name: MSense4ECG-EX4BT``; this replaces the
+    old BLE-address → configured-name lookup table for per-device folders.
+    ``folder_path`` may be the device folder or the ``uuid.txt`` itself.
+    """
+    uuid_path = (folder_path if os.path.basename(folder_path) == "uuid.txt"
+                 else os.path.join(folder_path, "uuid.txt"))
+    try:
+        with open(uuid_path, "r") as f:
+            content = f.read()
+    except OSError:
+        return None
+    m = _UUID_NAME_RE.search(content)
+    if not m:
+        return None
+    safe = re.sub(r'[^\w.\-]+', '_', m.group(1)).strip('_.')
+    return safe or None
+
+
 def sniff_ppg_format(filepath, n_probe=2000, threshold=0.9):
     """Detect a PPG file's layout from its contents. None if inconclusive."""
     return detect.sniff_file(filepath, "ppg", threshold=threshold)
@@ -450,8 +475,17 @@ def extract_zip(zip_path, out_dir="./data", options=None,
             zip_ref.extractall(tmpdir)
         for dev in os.listdir(tmpdir):
             in_dir = os.path.join(tmpdir, dev)
-            if os.path.isdir(in_dir):
-                extract_dir(in_dir, in_dir, df=df, note=dev, options=options)
+            if not os.path.isdir(in_dir):
+                continue
+            # Prefer the device's own Name from uuid.txt over whatever the
+            # folder happens to be called (a BLE address on older downloads).
+            name = get_device_name(in_dir)
+            if name and name != dev:
+                renamed = os.path.join(tmpdir, name)
+                if not os.path.exists(renamed):
+                    os.rename(in_dir, renamed)
+                    in_dir, dev = renamed, name
+            extract_dir(in_dir, in_dir, df=df, note=dev, options=options)
         with zipfile.ZipFile(out_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, _dirs, files in os.walk(tmpdir):
                 for file in files:

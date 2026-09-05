@@ -30,6 +30,10 @@ Each filename encodes the **subject ID** and a **reference timestamp**, which th
 
 ![File extraction illustration](src/file_extraction_illu.png)
 
+### Per-device folders
+
+A download (**📂 File downloader**, or a `<...>_msense.zip` fed to **🛠️ Data extractor pro**) holds one sub-folder per device, each with its own `uuid.txt`. The folder is named after the device: v5+ firmware writes a `Name:` line in `uuid.txt` (e.g. `Name: MSense4ECG-EX4BT`) and that name is used verbatim. Older firmware without a `Name:` line falls back to the BLE address (and, for the downloader only, the legacy address→name table from the MSense config tab — deprecated). `extract_zip` also renames an address-named folder to its `uuid.txt` name on the way through, so re-extracting an old download picks up the device names.
+
 
 ## Output Format
 

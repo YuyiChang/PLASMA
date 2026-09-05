@@ -6,9 +6,11 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zipfile
 
-from plasma.devices.msense.extract import ExtractionReport, extract_dir
+from plasma.devices.msense.extract import ExtractionReport, extract_dir, extract_zip
 from plasma.devices.msense.extract.options import ExtractionOptions
+from plasma.devices.msense.extract.pipeline import get_device_name
 
 
 def _w_ppg_v2(n, start=0, step=2):
@@ -60,3 +62,54 @@ def test_extract_dir_dry_run_writes_nothing():
             f.write(_w_ppg_v2(200))
         extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True, dry_run=True))
         assert os.listdir(out) == []
+
+
+# ── uuid.txt device Name → per-device folder ────────────────────────────────
+
+_UUID_V5 = (
+    "EA:94:11:E5:D4:34 (random)\n"
+    "Name: MSense4ECG-EX4BT\n"
+    "Device ID: 74A3A7257D5D5F0F\n"
+    "Version: 5.0.2 NAND\n"
+)
+
+
+def test_get_device_name_parses_name_field(tmp_path):
+    (tmp_path / "uuid.txt").write_text(_UUID_V5)
+    assert get_device_name(str(tmp_path)) == "MSense4ECG-EX4BT"
+    assert get_device_name(str(tmp_path / "uuid.txt")) == "MSense4ECG-EX4BT"
+
+
+def test_get_device_name_none_without_name_line(tmp_path):
+    (tmp_path / "uuid.txt").write_text("EA:94:11:E5:D4:34 (random)\nVersion: 4.6.3\n")
+    assert get_device_name(str(tmp_path)) is None
+    assert get_device_name(str(tmp_path / "missing")) is None
+
+
+def test_get_device_name_sanitises(tmp_path):
+    (tmp_path / "uuid.txt").write_text("NAME = weird / name!!\n")
+    assert get_device_name(str(tmp_path)) == "weird_name"
+
+
+def test_extract_zip_renames_device_folders_to_uuid_name(tmp_path):
+    src = tmp_path / "src"
+    for mac, name in [("D8-92-0E-46-16-0D", "MSense4PPG-KA5SA"),
+                      ("EA-94-11-E5-D4-34", "MSense4ECG-EX4BT")]:
+        d = src / mac
+        d.mkdir(parents=True)
+        (d / "ppg1700000000.bin").write_bytes(_w_ppg_v2(200))
+        (d / "ac1700000000.bin").write_bytes(_w_ac_v2(200))
+        (d / "uuid.txt").write_text(f"{mac.replace('-', ':')} (random)\nName: {name}\nVersion: 5.1.4\n")
+
+    zip_path = tmp_path / "2609051705_msense.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        for root, _d, files in os.walk(src):
+            for f in files:
+                fp = os.path.join(root, f)
+                z.write(fp, os.path.relpath(fp, src))
+
+    out_zip = extract_zip(str(zip_path), out_dir=str(tmp_path / "out"),
+                          options=ExtractionOptions(ignore_id_parsing=True))
+    with zipfile.ZipFile(out_zip) as z:
+        tops = sorted({n.split("/")[0] for n in z.namelist() if "/" in n})
+    assert tops == ["MSense4ECG-EX4BT", "MSense4PPG-KA5SA"]
