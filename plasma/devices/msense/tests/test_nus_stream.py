@@ -1,9 +1,15 @@
-"""Offline coverage for the NUS bounded-stream protocol codec / session FSM."""
+"""Offline coverage for the NUS bounded-stream protocol codec / session FSM.
+
+The message builders live in the shipped :mod:`plasma.devices.msense.nus_sim`
+module (the simulated wristband in ``plasma.devices.msense_demo`` streams the
+same frames), so the tests and the simulator can't drift from each other. The
+thin wrappers below just pin the test session id and the historical geometry.
+"""
 import struct
 
 import pytest
 
-from plasma.devices.msense import nus_stream as ns
+from plasma.devices.msense import nus_stream as ns, nus_sim
 from plasma.devices.msense.nus_stream import (
     StreamSession, ProtocolError, parse_start_ack, build_command,
     OP_START, MSG_START_ACK, MSG_DATA, MSG_END, MSG_RESULT,
@@ -14,74 +20,23 @@ SID = 0x11223344
 
 
 def _msg(msg_type, payload, sid=SID):
-    return ns.MAGIC + bytes([ns.PROTOCOL_VERSION, msg_type]) + sid.to_bytes(4, "little") \
-        + len(payload).to_bytes(2, "little") + b"\x00\x00" + payload
+    return nus_sim.message(msg_type, payload, sid)
 
 
-def _start_ack_payload(device_type, *, name=b"MSense4X-TEST", commit=b"a" * 40,
-                       tree_state=0, reserved=b"\x00" * 6, override=None):
-    p = PROFILE[device_type]
-    fields = dict(
-        device_type=device_type, fmt_ver=1, record_size=p["record_size"],
-        rate_num=int(p["rate_hz"]), rate_den=1,
-        history=p["history_records"], forward=p["forward_records"],
-        total=TOTAL_SENSOR_BYTES,
-    )
-    if override:
-        fields.update(override)
-    body = struct.pack(
-        "<BBHIIIII", fields["device_type"], fields["fmt_ver"], fields["record_size"],
-        fields["rate_num"], fields["rate_den"], fields["history"], fields["forward"],
-        fields["total"],
-    )
-    body += b"\xde\xad\xbe\xef\x01\x02\x03\x04"          # 8-byte device id
-    body += bytes([len(name)]) + name + b"\x00" * (16 - len(name))
-    body += commit + bytes([tree_state]) + reserved
-    assert len(body) == 96, len(body)
-    return body
+def _start_ack_payload(device_type, *, name=b"MSense4X-TEST", **kw):
+    return nus_sim.start_ack_payload(device_type, name=name, **kw)
 
 
 def _data_msgs(device_type, chunk_records, *, history=None, forward=None):
-    """A full valid history+forward DATA sequence, `chunk_records` per message.
-
-    `history`/`forward` default to the PROFILE table but can be overridden to
-    exercise a different (still self-consistent) geometry, e.g. a newer
-    firmware's record counts.
-    """
-    p = PROFILE[device_type]
-    rs = p["record_size"]
-    history = p["history_records"] if history is None else history
-    forward = p["forward_records"] if forward is None else forward
-    total = history + forward
-    msgs, seq, idx = [], 0, 0
-    while idx < total:
-        phase = 0 if idx < history else 1
-        # never cross the history/forward boundary
-        room = (history - idx) if phase == 0 else (total - idx)
-        count = min(chunk_records, room)
-        prefix = struct.pack("<IIHBB", seq, idx, count, phase, 0)
-        msgs.append(_msg(MSG_DATA, prefix + b"\x5a" * (count * rs)))
-        seq += 1
-        idx += count
-    return msgs, seq
+    return nus_sim.data_messages(device_type, chunk_records, session_id=SID,
+                                 history=history, forward=forward)
 
 
 def _end_payload(device_type, data_count, *, status=0, detail=0, override=None,
-                  history=None, forward=None):
-    p = PROFILE[device_type]
-    history = p["history_records"] if history is None else history
-    forward = p["forward_records"] if forward is None else forward
-    fields = dict(
-        status=status, state=2, history=history,
-        forward=forward, total=(history + forward) * p["record_size"],
-        data_count=data_count, detail=detail,
-    )
-    if override:
-        fields.update(override)
-    return struct.pack(
-        "<HBBIIIIi", fields["status"], fields["state"], 0, fields["history"],
-        fields["forward"], fields["total"], fields["data_count"], fields["detail"],
-    )
+                 history=None, forward=None):
+    return nus_sim.end_payload(device_type, data_count, status=status,
+                               detail=detail, override=override,
+                               history=history, forward=forward)
 
 
 def _run(device_type, chunk_records=64):

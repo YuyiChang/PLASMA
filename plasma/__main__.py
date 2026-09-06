@@ -75,9 +75,16 @@ def main():
             ip.interface()
         with gr.Tab("Data Dashboard"):
             ip.visualizer_interface()
-        # extra tabs contributed by enabled plugins (e.g. MSense SQC / IMU)
+        # extra tabs contributed by enabled plugins (e.g. MSense SQC / IMU).
+        # The real and the simulated MSense plugins both contribute the same
+        # "🍠 YAMS (MSense Tools)" tab — de-dupe by title so enabling both
+        # doesn't build it twice.
+        seen_tabs = set()
         for plugin in device_config.get_active_table().values():
             for tab_title, builder in plugin.tabs:
+                if tab_title in seen_tabs:
+                    continue
+                seen_tabs.add(tab_title)
                 with gr.Tab(tab_title):
                     builder(ip)
         with gr.Tab("Configuration"):

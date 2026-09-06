@@ -4,6 +4,24 @@
 
 ---
 
+## 🚀 vNext (unreleased)
+
+### 🧪 Simulated MSense device
+
+- New **"Demo mode"** switch in the Configuration tab (or `PLASMA_DEMO=1`) adds a
+  fully simulated MSense wristband to the sensor catalog — no hardware, no
+  Bluetooth. It connects, streams live ENMO / battery / IMU-orientation to a real
+  LSL outlet (recorded to XDF, shown on both dashboards and the IMU panel), and
+  serves realistic ECG/PPG signal-quality snapshots, all through the real driver
+  and the existing "🍠 YAMS (MSense Tools)" tab.
+- Its Configuration section can inject faults per device — *device not found*,
+  *drop BLE mid-session then auto-reconnect*, *SQC stream stall* — to exercise the
+  watchdog / reconnect / journaler paths without a wristband.
+- Offline features (USB download, `.bin` extraction) are out of scope for the
+  simulated device.
+
+---
+
 ## 🚀 v2.0.0
 
 A major release focused on a rebuilt MSense BLE stack, a built-in LSL→XDF

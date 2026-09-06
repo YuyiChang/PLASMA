@@ -13,6 +13,10 @@ This guide covers two cases:
    extra Gradio tabs (see `plasma/devices/msense/` for the reference
    implementation).
 
+For a worked example of a **simulated** device that subclasses another driver
+and swaps its BLE layer for a fake — plus a runtime "demo mode" registration
+gate and per-device fault injection — see `plasma/devices/msense_demo/`.
+
 ---
 
 ## 1. The `PlasmaDevice` contract

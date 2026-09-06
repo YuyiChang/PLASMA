@@ -41,7 +41,8 @@ version = { attr = "plasma.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["plasma*"]
-exclude = ["plasma.tests*", "plasma.devices.msense.tests*", "tests*"]
+exclude = ["plasma.tests*", "plasma.devices.msense.tests*",
+           "plasma.devices.msense_demo.tests*", "tests*"]
 
 [tool.setuptools.package-data]
 plasma = ["resources/icons/*.ico", "resources/icons/*.icns", "resources/icons/*.png", "resources/icons/*.svg"]

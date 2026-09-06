@@ -61,6 +61,9 @@ _STATIC = [
 # module named in this file.
 _DISCOVERY = [
     "plasma.devices.msense",
+    # registers a simulated MSense device only when device_config.demo_mode is
+    # set (checked inside its register()); otherwise a no-op.
+    "plasma.devices.msense_demo",
 ]
 
 _REGISTRY: "dict[str, PlasmaPlugin]" = {}

@@ -13,6 +13,10 @@ _DEFAULTS = {
     "ip_qb2_lidar": "",
     "ip_pupil_labs": "",
     "plugins": {},
+    # when True, plugins.load_plugins() also registers the simulated MSense
+    # device (plasma.devices.msense_demo) into the catalog. Restart-gated —
+    # the plugin registry is built once at startup. PLASMA_DEMO=1 forces it on.
+    "demo_mode": False,
 }
 
 
@@ -22,6 +26,9 @@ class DeviceConfig:
         self._active = list(cfg["enabled_devices"])
         self.ip_lidar = cfg["ip_qb2_lidar"]
         self.ip_pupil_labs = cfg["ip_pupil_labs"]
+        # env var wins so a wrapper / CI can force demo mode without touching
+        # the saved file
+        self.demo_mode = bool(cfg["demo_mode"]) or bool(os.environ.get("PLASMA_DEMO"))
         # per-plugin config blobs, namespaced by plugin id
         self.plugins = dict(cfg["plugins"])
         # True when the config file existed and named enabled_devices — then
@@ -42,6 +49,7 @@ class DeviceConfig:
                     "ip_qb2_lidar": raw.get("ip_qb2_lidar", ""),
                     "ip_pupil_labs": raw.get("ip_pupil_labs", ""),
                     "plugins": dict(raw.get("plugins", {})),
+                    "demo_mode": bool(raw.get("demo_mode", False)),
                     "_enabled_specified": "enabled_devices" in raw,
                 }
             except Exception:
@@ -52,6 +60,7 @@ class DeviceConfig:
             "ip_qb2_lidar": "",
             "ip_pupil_labs": "",
             "plugins": {},
+            "demo_mode": False,
             "_enabled_specified": False,
         }
 
@@ -64,6 +73,7 @@ class DeviceConfig:
                 "ip_qb2_lidar": self.ip_lidar,
                 "ip_pupil_labs": self.ip_pupil_labs,
                 "plugins": self.plugins,
+                "demo_mode": self.demo_mode,
             }, f, indent=2)
 
     def refresh_defaults(self):
@@ -95,12 +105,14 @@ class DeviceConfig:
 
     # ── UI callbacks ──────────────────────────────────────────────────────────
 
-    def _apply(self, selected, ip_lidar, ip_pupil_labs):
+    def _apply(self, selected, ip_lidar, ip_pupil_labs, demo_mode):
         self._active = list(selected)
         self.ip_lidar = ip_lidar
         self.ip_pupil_labs = ip_pupil_labs
+        self.demo_mode = bool(demo_mode) or bool(os.environ.get("PLASMA_DEMO"))
         self._save()
-        return f"Saved — {len(self._active)} device type(s) enabled"
+        note = " — restart PLASMA to load the simulated device" if self.demo_mode else ""
+        return f"Saved — {len(self._active)} device type(s) enabled{note}"
 
     def _export_config(self, selected, ip_lidar, ip_pupil_labs):
         config = {
@@ -108,6 +120,7 @@ class DeviceConfig:
             "ip_qb2_lidar": ip_lidar,
             "ip_pupil_labs": ip_pupil_labs,
             "plugins": self.plugins,
+            "demo_mode": self.demo_mode,
         }
         path = os.path.join(tempfile.mkdtemp(), app_context().config_filename)
         with open(path, 'w') as f:
@@ -132,6 +145,8 @@ class DeviceConfig:
                 self._active = enabled
                 self.ip_lidar = ip_lidar
                 self.ip_pupil_labs = ip_pupil
+                self.demo_mode = (bool(raw.get("demo_mode", self.demo_mode))
+                                  or bool(os.environ.get("PLASMA_DEMO")))
                 self._save()
             msg = f"Loaded — {len(enabled)} device type(s)"
             if unknown:
@@ -156,6 +171,12 @@ class DeviceConfig:
                     value=list(self._active),
                     label="Available sensors",
                 )
+                demo_mode_chk = gr.Checkbox(
+                    value=self.demo_mode,
+                    label="Demo mode — add the simulated MSense device to the catalog",
+                    info="Restart PLASMA after changing this. Also settable with "
+                         "PLASMA_DEMO=1.",
+                )
 
             with gr.Accordion("Network settings", open=True):
                 ip_lidar_txt = gr.Text(value=self.ip_lidar, label="QB2 LiDAR IP address")
@@ -171,7 +192,7 @@ class DeviceConfig:
 
             btn_apply.click(
                 self._apply,
-                inputs=[checkbox_group, ip_lidar_txt, ip_pupil_txt],
+                inputs=[checkbox_group, ip_lidar_txt, ip_pupil_txt, demo_mode_chk],
                 outputs=status,
             )
             btn_export.click(

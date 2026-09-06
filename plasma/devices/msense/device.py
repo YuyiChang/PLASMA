@@ -97,15 +97,14 @@ SQC_EARLY_CANCEL_GRACE_S = 3.0
 
 
 class MotionSenseHRV(PlasmaDevice):
+    # which plugin-config blob to read wristband records from — MSenseDemo
+    # overrides this to point at its own "msense_demo" section.
+    CONFIG_KEY = "msense"
+
     def __init__(self, session_info, logger, tag):
         super().__init__(session_info, logger, tag)
 
-        from . import config as mcfg
-        blob = device_config.get_plugin_config("msense")
-        self.device_list = mcfg.active_devices(blob)
-        self.imu_stream_devices = mcfg.imu_stream_devices(blob)
-        # Name -> "Name (Nickname)" for UI panels; identifier stays the Name.
-        self.display_labels = mcfg.display_labels(blob)
+        self._load_device_config()
 
         bias_by_addr = load_gyro_bias()
 
@@ -171,6 +170,25 @@ class MotionSenseHRV(PlasmaDevice):
         # host power loss (those fall back to the peripheral's BLE supervision
         # timeout).
         atexit.register(self._shutdown_cleanup)
+
+    def _load_device_config(self):
+        """Read the plugin config blob into device_list / imu_stream_devices /
+        display_labels. Split out of __init__ so MSenseDemo can read its own
+        ``msense_demo`` blob instead of ``msense``."""
+        from . import config as mcfg
+        blob = device_config.get_plugin_config(self.CONFIG_KEY)
+        self.device_list = mcfg.active_devices(blob)
+        self.imu_stream_devices = mcfg.imu_stream_devices(blob)
+        # Name -> "Name (Nickname)" for UI panels; identifier stays the Name.
+        self.display_labels = mcfg.display_labels(blob)
+
+    def _make_client(self, addr, name):
+        """The BLE client object for ``addr``. A seam so MSenseDemo can hand
+        back a fake peripheral that generates synthetic notifications."""
+        return BleakClient(
+            addr,
+            disconnected_callback=lambda c, nm=name: self._on_unexpected_disconnect(nm),
+        )
 
     def _shutdown_cleanup(self):
         for name, p in list(getattr(self, "active_devices", {}).items()):
@@ -286,7 +304,7 @@ class MotionSenseHRV(PlasmaDevice):
                     # bind nm by default arg — otherwise the callback closes
                     # over the loop variable and fires with whichever device
                     # happened to be last when the loop finished
-                    p = BleakClient(addr, disconnected_callback=lambda c, nm=name: self._on_unexpected_disconnect(nm))
+                    p = self._make_client(addr, name)
                     # bounded: bleak's connect() actually respects this
                     # timeout (unlike simplepyble's, confirmed via a macOS
                     # thread dump to hold the GIL hostage indefinitely) —
@@ -1310,7 +1328,7 @@ class MotionSenseHRV(PlasmaDevice):
 
         time.sleep(1.5)
 
-        peripheral = BleakClient(addr, disconnected_callback=lambda c, nm=name: self._on_unexpected_disconnect(nm))
+        peripheral = self._make_client(addr, name)
         try:
             self._run_async(peripheral.connect())
         except Exception as e:
