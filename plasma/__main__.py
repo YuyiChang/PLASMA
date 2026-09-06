@@ -1,6 +1,7 @@
 import atexit
 import os
 import signal
+import sys
 import gradio as gr
 from plasma import plugins
 from plasma.app_context import app_context
@@ -14,6 +15,45 @@ def _handle_sigterm(signum, frame):
     # (e.g. a BLE connection slot) until its own supervision timeout
     atexit._run_exitfuncs()
     os._exit(143)
+
+
+def _relaunch_argv():
+    """argv for re-launching this same PLASMA. Under PyInstaller (onefile)
+    `sys.executable` IS the bundle exe; from source it's the interpreter plus
+    `-m plasma`. Any extra CLI args are preserved."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *sys.argv[1:]]
+    return [sys.executable, "-m", "plasma", *sys.argv[1:]]
+
+
+# set by main() so shutdown() can stop the server (frees the port before a
+# restart re-binds it)
+app = None
+
+
+def shutdown(restart=False):
+    """Run every registered cleanup hook (each MSense driver's
+    `_shutdown_cleanup`, the recording flush + device disconnect from
+    `IntegratedPanel._atexit_cleanup`), stop the Gradio server, then re-exec
+    PLASMA (`restart=True`) or exit the process. Safe to call from a Gradio
+    event-handler thread — mirrors `_handle_sigterm`'s
+    `atexit._run_exitfuncs()` + hard-exit pattern."""
+    atexit._run_exitfuncs()
+    if app is not None:
+        try:
+            app.close()
+        except Exception:
+            pass
+    if restart:
+        argv = _relaunch_argv()
+        if os.name == "nt":
+            # execv on Windows is spawn-then-exit, which flickers the console;
+            # an explicit Popen + exit is more predictable there.
+            import subprocess
+            subprocess.Popen(argv, close_fds=False)
+            os._exit(0)
+        os.execv(argv[0], argv)
+    os._exit(0)
 
 js_func = """
 function refresh() {
@@ -59,6 +99,8 @@ function refresh() {
 """
 
 def main():
+    global app
+
     try:
         signal.signal(signal.SIGTERM, _handle_sigterm)
     except ValueError:

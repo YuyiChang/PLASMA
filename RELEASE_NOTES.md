@@ -6,6 +6,16 @@
 
 ## 🚀 vNext (unreleased)
 
+### 🔌 Restart / Shut down
+
+- The Configuration tab now has **Restart PLASMA** and **Shut down PLASMA**
+  buttons at the bottom (two-click to confirm). Restart relaunches with the
+  saved config — the intended way to pick up a **Demo mode** or catalog change.
+- Both run a clean teardown first. `IntegratedPanel` now flushes a running
+  LSL→XDF recording (stream footers + clock offsets) and closes device
+  connections on **any** exit — Ctrl-C and window-close included, which
+  previously left the `.xdf` unfinalized.
+
 ### 🧪 Simulated MSense device
 
 - New **"Demo mode"** switch in the Configuration tab (or `PLASMA_DEMO=1`) adds a

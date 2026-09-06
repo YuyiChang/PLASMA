@@ -1,3 +1,4 @@
+import atexit
 import gradio as gr
 import struct
 import os
@@ -201,6 +202,26 @@ class IntegratedPanel():
             self._lsl_resolver = pylsl.ContinuousResolver()
         except Exception:
             pass
+
+        # flush a running recording + drop device connections on any process
+        # exit (Ctrl-C, window close, the Configuration Restart/Shut down
+        # buttons, SIGTERM via plasma.__main__._handle_sigterm). MSense devices
+        # register their own hook too; stop()/disconnect() are idempotent.
+        atexit.register(self._atexit_cleanup)
+
+    def _atexit_cleanup(self):
+        rec = getattr(self, "lsl_recorder", None)
+        if rec is not None:
+            try:
+                rec.stop()
+            except Exception:
+                pass
+        for dev in list(getattr(self, "available_devices", []) or []):
+            for m in ("stop", "disconnect"):
+                try:
+                    getattr(dev, m)()
+                except Exception:
+                    pass
 
     def journal(self, msg):
         """Push a task/flag marker onto the journaler LSL stream + the session log."""

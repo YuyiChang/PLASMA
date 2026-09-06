@@ -213,6 +213,64 @@ class DeviceConfig:
                 if plugin.config_section:
                     plugin.config_section(self)
 
+            self._power_section()
+
+    # ── restart / shutdown ────────────────────────────────────────────────────
+
+    _RESTART_LABEL = "↻ Restart PLASMA"
+    _SHUTDOWN_LABEL = "⏻ Shut down PLASMA"
+
+    def _power_section(self):
+        """Two-click Restart / Shut down at the bottom of the Configuration tab.
+        The first click arms a button (label → "Click again to confirm",
+        auto-cancels after ~4 s); the second fires it."""
+        gr.Markdown("### Power")
+        with gr.Row():
+            btn_restart = gr.Button(self._RESTART_LABEL)
+            btn_shutdown = gr.Button(self._SHUTDOWN_LABEL, variant="stop")
+        power_msg = gr.Markdown(
+            "Restart reloads config from disk — click **Apply** first to keep "
+            "unsaved catalog changes. Both actions stop any running recording "
+            "(the XDF file is flushed) and close device connections."
+        )
+        armed = gr.State("")                    # "" | "restart" | "shutdown"
+        disarm = gr.Timer(4.0, active=False)    # auto-cancels an armed button
+
+        outs = [armed, btn_restart, btn_shutdown, power_msg, disarm]
+
+        btn_restart.click(lambda a: self._power_click("restart", a), inputs=armed, outputs=outs)
+        btn_shutdown.click(lambda a: self._power_click("shutdown", a), inputs=armed, outputs=outs)
+        disarm.tick(self._power_disarm, outputs=outs)
+
+    def _power_click(self, which, armed):
+        if armed == which:                     # confirmed → fire
+            import threading
+            from plasma import __main__ as _m
+            threading.Timer(
+                0.6, lambda: _m.shutdown(restart=(which == "restart"))
+            ).start()
+            busy = ("Restarting PLASMA — this tab will reload shortly…"
+                    if which == "restart"
+                    else "PLASMA is shutting down. You can close this tab.")
+            return ("",
+                    gr.update(value=self._RESTART_LABEL, interactive=False),
+                    gr.update(value=self._SHUTDOWN_LABEL, interactive=False),
+                    busy, gr.Timer(active=False))
+        # first click → arm this button, reset the other, start the disarm timer
+        return (which,
+                gr.update(value="↻ Click again to confirm"
+                          if which == "restart" else self._RESTART_LABEL),
+                gr.update(value="⏻ Click again to confirm"
+                          if which == "shutdown" else self._SHUTDOWN_LABEL),
+                "Click the same button again to confirm (auto-cancels in ~4 s).",
+                gr.Timer(active=True))
+
+    def _power_disarm(self):
+        return ("",
+                gr.update(value=self._RESTART_LABEL),
+                gr.update(value=self._SHUTDOWN_LABEL),
+                "", gr.Timer(active=False))
+
 
 device_config = DeviceConfig()
 
