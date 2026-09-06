@@ -432,6 +432,7 @@ class IntegratedPanel():
             print(dev, plugin)
             Device = plugins.load_device_class(plugin)
             device_instance = Device(self.session_info, self.logger, tag=dev)
+            device_instance.journal_hook = self.journal   # SQC start/end markers, etc.
             self.available_devices.append(device_instance)
 
         self.sts = "Ready to start"

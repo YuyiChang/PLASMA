@@ -61,6 +61,11 @@ class PlasmaDevice:
     # device then falls back to its own path logic.
     session_dir = None
 
+    # Callable[[str], None] pushing a marker onto the session journaler
+    # (IntegratedPanel.journal). Set per-instance by IntegratedPanel right after
+    # construction; stays None in tests / standalone use.
+    journal_hook = None
+
     def __init__(self, session_info, logger=None, tag=None):
         self.session_info = session_info
         self.logger = logger
@@ -102,6 +107,17 @@ class PlasmaDevice:
             pass
         else:
             self.logger.info(f"[{self.tag}] {msg}")
+
+    def journal(self, text):
+        """Push a marker onto the session journaler if the panel wired one up
+        (no-op otherwise), and mirror it to the device log."""
+        self.info(f"journal: {text}")
+        hook = self.journal_hook
+        if callable(hook):
+            try:
+                hook(text)
+            except Exception as e:
+                self.info(f"journal push failed: {e}")
 
     def start(self):
         if self._thread is None or not self._thread.is_alive():

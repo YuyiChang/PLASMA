@@ -301,6 +301,81 @@ def test_nus_data_handler_finalizes_cancel_with_data_loss_as_warned_partial(monk
     assert d.sqc_state[name]["status"] == "ready"  # still plotted, not "error"
 
 
+# ── SQC ↔ session journaler auto-markers ───────────────────────────────────
+
+def _driver_with_journal():
+    d = _bare_driver()
+    d.sqc_state = {}
+    d._sqc_journal_open = set()
+    d.journal_marks = []
+    d.journal_hook = d.journal_marks.append  # what IntegratedPanel wires in
+    return d
+
+
+def test_plasmadevice_journal_is_a_noop_without_a_hook():
+    d = _bare_driver()
+    d.journal_hook = None
+    d.journal("nothing wired")  # must not raise
+
+
+def test_sqc_request_pushes_start_marker(monkeypatch):
+    d = _driver_with_journal()
+    monkeypatch.setattr(d, "_ensure_sqc_threads", lambda: None)
+    p = _FakePeripheral()
+    p.mtu_size = 247
+    d.active_devices = {"w1": p}
+
+    msg = d.request_sqc_snapshot("w1")
+
+    assert "waiting for START_ACK" in msg
+    assert d.journal_marks == ["[SQC] w1 start (full)"]
+    assert "w1" in d._sqc_journal_open
+    assert p.writes and p.writes[0][0].startswith("6e400002")  # OP_START written
+
+
+def test_sqc_request_marker_reflects_capture_mode(monkeypatch):
+    d = _driver_with_journal()
+    monkeypatch.setattr(d, "_ensure_sqc_threads", lambda: None)
+    p = _FakePeripheral()
+    p.mtu_size = 247
+    d.active_devices = {"w1": p}
+
+    d.request_sqc_snapshot("w1", history_only=True)
+    assert d.journal_marks == ["[SQC] w1 start (history-only)"]
+
+
+def test_journal_finished_sqc_closes_marker_on_terminal_status():
+    d = _driver_with_journal()
+    d._sqc_journal_open = {"w1"}
+    d.sqc_state = {"w1": {"status": "ready"}}
+
+    d._journal_finished_sqc()
+    assert d.journal_marks == ["[SQC] w1 end (ready)"]
+    assert "w1" not in d._sqc_journal_open
+
+    d._journal_finished_sqc()  # idempotent — no duplicate "end"
+    assert d.journal_marks == ["[SQC] w1 end (ready)"]
+
+
+def test_journal_finished_sqc_leaves_marker_open_until_terminal():
+    d = _driver_with_journal()
+    d._sqc_journal_open = {"w1"}
+    d.sqc_state = {"w1": {"status": "receiving"}}
+
+    d._journal_finished_sqc()
+    assert d.journal_marks == []
+    assert "w1" in d._sqc_journal_open
+
+
+def test_disconnect_flushes_open_sqc_markers():
+    d = _driver_with_journal()
+    d._sqc_journal_open = {"w1"}
+    d.sqc_state = {"w1": {"status": "receiving"}}
+
+    d.disconnect()
+    assert d.journal_marks == ["[SQC] w1 end (disconnected)"]
+
+
 # ── bounded BLE calls (auto-reconnect freeze fix) ───────────────────────────
 #
 # We used to run on simplepyble, whose connect()/disconnect() are blocking C

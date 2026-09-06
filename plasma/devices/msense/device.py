@@ -114,6 +114,9 @@ class MotionSenseHRV(PlasmaDevice):
         self.gyro_bias = {}
         self.gyro_calib = {}
         self.sqc_state = {}
+        # names with an open "[SQC] … start" journaler marker, awaiting an "end"
+        # once the stream reaches a terminal status (see _sqc_watchdog_loop).
+        self._sqc_journal_open = set()
         self.battery = {}          # name -> last battery %
         # rssi at connect time — bleak has no live RSSI query on a connected
         # client (that's not a standard GATT op; RSSI only comes from
@@ -398,6 +401,7 @@ class MotionSenseHRV(PlasmaDevice):
             self.memo[name].sts = "🔌 disconnected"
 
     def disconnect(self):
+        self._journal_finished_sqc(reason="disconnected")  # close any open SQC markers
         self._sqc_threads_stopped = True  # let the SQC watchdog loop exit
         for name, p in list(self.active_devices.items()):
             try:
@@ -454,6 +458,7 @@ class MotionSenseHRV(PlasmaDevice):
                 failed.append(f"{name}: {e}")
 
         self.info(f"Flash erase issued to {done} wristband(s); failed: {failed}")
+        self._journal_finished_sqc(reason="disconnected")
         self._sqc_threads_stopped = True        # let the watchdog loop exit
         self.active_devices = {}
         self.active_outlets = {}
@@ -852,6 +857,10 @@ class MotionSenseHRV(PlasmaDevice):
                 else f"quick {max_seconds:g}s" if max_seconds else "full")
         self.info(f"SQC START sent to {name} (session {sid:#010x}, mtu={mtu}, rssi={rssi} @connect, {mode})")
         self._sqc_debug(name, f"START session={sid:#010x} mtu={mtu} rssi={rssi}@connect mode={mode}")
+        if name in self._sqc_journal_open:   # prior run's marker never closed
+            self.journal(f"[SQC] {name} end (superseded)")
+        self._sqc_journal_open.add(name)
+        self.journal(f"[SQC] {name} start ({mode})")
         return f"📡 {name}: waiting for START_ACK…"
 
     # terminal statuses shared by every SQC runner's completion polling and by
@@ -1124,6 +1133,8 @@ class MotionSenseHRV(PlasmaDevice):
     def _ensure_sqc_threads(self):
         """Start the async debug printer and the no-progress watchdog once."""
         self._sqc_threads_stopped = False
+        if not hasattr(self, "_sqc_journal_open"):
+            self._sqc_journal_open = set()
         with MotionSenseHRV._sqc_threads_lock:
             if MotionSenseHRV._dbg_thread is None:
                 MotionSenseHRV._dbg_thread = threading.Thread(
@@ -1176,6 +1187,19 @@ class MotionSenseHRV(PlasmaDevice):
     # how often the watchdog checks connected wristbands for a dropped link
     RECONNECT_SWEEP_S = 10.0
 
+    def _journal_finished_sqc(self, reason=None):
+        """Emit a "[SQC] <name> end (…)" journaler marker for every wristband
+        whose SQC stream has reached a terminal status since the last check —
+        pairing the "[SQC] <name> start" pushed in request_sqc_snapshot. Called
+        from the watchdog tick and on disconnect. `reason` overrides the
+        parenthetical (e.g. "disconnected") when the caller forces a flush."""
+        for name in list(getattr(self, "_sqc_journal_open", ())):
+            status = self.sqc_state.get(name, {}).get("status")
+            if reason is None and status not in self._SQC_TERMINAL_STATUSES:
+                continue
+            self._sqc_journal_open.discard(name)
+            self.journal(f"[SQC] {name} end ({reason or status})")
+
     def _sqc_watchdog_loop(self):
         """1 Hz supervisor (runs off the BLE callback thread). Per active SQC
         stream, in priority order: quick-mode early terminate → quick-mode grace
@@ -1192,6 +1216,7 @@ class MotionSenseHRV(PlasmaDevice):
         while not getattr(self, "_sqc_threads_stopped", False):
             time.sleep(1.0)
             now = time.time()
+            self._journal_finished_sqc()
             for name, state in list(self.sqc_state.items()):
                 if state.get("status") != "receiving":
                     continue
@@ -1417,6 +1442,8 @@ class MotionSenseHRV(PlasmaDevice):
             state["provenance"] = provenance
             state.update(status="error", error=f"decode failed (raw saved): {e}")
             self.info(f"SQC decode failed for {name}: {e}")
+
+        self._journal_finished_sqc()  # close this device's "[SQC] … start" marker
 
     @staticmethod
     def _iso(epoch):
