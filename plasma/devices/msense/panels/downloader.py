@@ -318,7 +318,8 @@ def build_downloader(ip=None):
                     "browse the sessions on it, tick the ones you want, and download.")
         with gr.Row():
             drive_grp = gr.CheckboxGroup(label="📁 MSense drive(s)")
-            drive_custom = gr.Dropdown(label="📁 Custom path", allow_custom_value=True)
+            drive_custom = gr.Dropdown(label="📁 Custom path(s)", allow_custom_value=True,
+                                       info="one or more paths, separated by ;")
             btn_refresh = gr.Button("🔄 Refresh / Start over")
 
         btn_browse = gr.Button("Browse sessions")
@@ -350,8 +351,10 @@ def build_downloader(ip=None):
 
         def _browse(custom, drives, files_state):
             paths = list(drives or [])
-            if custom and custom not in paths:
-                paths.append(custom)
+            for p in (custom or "").split(";"):
+                p = p.strip()
+                if p and p not in paths:
+                    paths.append(p)
             files_state = {}
             options = []
             seen = set()
