@@ -125,6 +125,35 @@ def test_get_sqc_devices_filters_on_nus_capability():
     assert "NUS unavailable on: w2" in d.caps_summary()
 
 
+def test_ensure_mtu_noop_without_bluez_backend():
+    # macOS/Windows real backends + the test fake have no _backend._acquire_mtu.
+    d = _bare_driver()
+    d._ensure_mtu(_FakePeripheral(), "w1")  # must not raise
+
+
+def test_ensure_mtu_forces_bluez_exchange():
+    d = _bare_driver()
+
+    class _BlueZBackend:
+        _mtu_size = None  # bleak's default — no negotiation happened yet
+
+        async def _acquire_mtu(self):
+            self._mtu_size = 247  # AcquireWrite → BlueZ reports the real MTU
+
+    class _BlueZPeripheral(_FakePeripheral):
+        def __init__(self):
+            super().__init__()
+            self._backend = _BlueZBackend()
+
+    p = _BlueZPeripheral()
+    d._ensure_mtu(p, "w1")
+    assert p._backend._mtu_size == 247
+
+    # idempotent: a second call doesn't re-acquire
+    p._backend._acquire_mtu = None
+    d._ensure_mtu(p, "w1")  # must not raise
+
+
 def test_battery_handler_parses_and_stores():
     d = _bare_driver()
     d.memo = {"w1": PlasmaMemo("w1", channels=["battery"])}

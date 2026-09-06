@@ -294,6 +294,10 @@ class MotionSenseHRV(PlasmaDevice):
                     self.active_outlets[name] = MsenseOutlet(n, addr)
                     self._connect_rssi[name] = dev.get("rssi")
                     try:
+                        self._ensure_mtu(p, name)
+                    except Exception as e:
+                        self.info(f"{n}: MTU negotiation error: {e}")
+                    try:
                         self.register_nus_notify(p, name)
                         self.caps[name]["nus"] = True
                     except Exception as e:
@@ -573,6 +577,43 @@ class MotionSenseHRV(PlasmaDevice):
         self._run_async(peripheral.start_notify(char_uuid, handler))
         self._notify_state[key] = peripheral
 
+    def _ensure_mtu(self, peripheral, name):
+        """Force an ATT MTU exchange on the Linux/BlueZ backend.
+
+        macOS (CoreBluetooth) and Windows (WinRT) report the OS-negotiated MTU
+        automatically. bleak's BlueZ backend never negotiates on its own —
+        ``mtu_size`` stays at the 23-byte ATT default (with a warning) until
+        ``_acquire_mtu()`` is called once, which does a throwaway
+        ``AcquireWrite`` / ``AcquireNotify`` on a characteristic purely to read
+        the negotiated MTU. Without it every SQC request fails the
+        ``>= SQC_MIN_MTU`` check as "ATT MTU 23 < 128 — reconnect".
+
+        Best-effort: a no-op on non-BlueZ backends, and harmless when the
+        adapter genuinely can't go above 23 (old dongle without LL data-length
+        extension) or the char needs bonding first. Runs on the caller's
+        thread (connect loop / watchdog), never the BLE event-loop thread.
+        """
+        backend = getattr(peripheral, "_backend", None)
+        acquire = getattr(backend, "_acquire_mtu", None)
+        if acquire is None:
+            return  # CoreBluetooth / WinRT — the OS already negotiated
+
+        if getattr(backend, "_mtu_size", None):
+            return  # already acquired on this client
+        try:
+            self._run_async(acquire(), timeout_s=5.0)
+        except Exception as e:
+            self._sqc_debug(name, f"  _acquire_mtu failed: {e}")
+
+        mtu = getattr(backend, "_mtu_size", None)
+        self._sqc_debug(name, f"  ATT MTU after negotiation = {mtu}")
+        if not mtu or mtu < SQC_MIN_MTU:
+            self.info(f"{name}: ATT MTU {mtu} (< {SQC_MIN_MTU}) after negotiation "
+                      f"— the Bluetooth adapter/BlueZ may not support a larger "
+                      f"MTU; SQC streaming will be refused")
+        else:
+            self.info(f"{name}: ATT MTU negotiated to {mtu}")
+
     def register_enmo(self, peripheral, name):
         self._ensure_notify(peripheral, name, "da39c951-1d81-48e2-9c68-d0ae4bbd351f",
                             lambda ch, data: self.enmo_handler(data, name))
@@ -771,6 +812,13 @@ class MotionSenseHRV(PlasmaDevice):
             mtu = peripheral.mtu_size
         except Exception:
             mtu = None
+        if mtu is not None and mtu < SQC_MIN_MTU:
+            # last-chance exchange (BlueZ) — normally already done at connect
+            try:
+                self._ensure_mtu(peripheral, name)
+                mtu = peripheral.mtu_size
+            except Exception:
+                pass
         if mtu is not None and mtu < SQC_MIN_MTU:
             state.update(status="error", error=f"ATT MTU {mtu} < {SQC_MIN_MTU} — reconnect")
             return f"⛔ {name}: MTU {mtu} < {SQC_MIN_MTU}"
@@ -1248,6 +1296,10 @@ class MotionSenseHRV(PlasmaDevice):
             return
         self.active_devices[name] = peripheral
 
+        try:
+            self._ensure_mtu(peripheral, name)
+        except Exception as e:
+            self._sqc_debug(name, f"  MTU negotiation error: {e}")
         try:
             self.register_nus_notify(peripheral, name)
             self.caps[name]["nus"] = True
