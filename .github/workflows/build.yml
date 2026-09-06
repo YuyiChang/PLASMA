@@ -48,18 +48,11 @@ jobs:
         shell: bash -el {0}
         run: pyinstaller app_macos.spec --noconfirm
 
-      - name: Smoke test
+      - name: Smoke test (clean dir)
         shell: bash -el {0}
-        run: |
-          ./dist/PLASMA_MacOS_arm64 &
-          PID=$!
-          sleep 10
-          if kill -0 $PID 2>/dev/null; then
-            echo "Smoke test passed"
-            kill $PID
-          else
-            echo "Binary exited early" && exit 1
-          fi
+        env:
+          PLASMA_BIN: dist/PLASMA_MacOS_arm64
+        run: bash .github/smoke_test.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -93,18 +86,11 @@ jobs:
         shell: bash -el {0}
         run: pyinstaller app_linux.spec --noconfirm
 
-      - name: Smoke test
+      - name: Smoke test (clean dir)
         shell: bash -el {0}
-        run: |
-          ./dist/PLASMA_Linux_x64 &
-          PID=$!
-          sleep 10
-          if kill -0 $PID 2>/dev/null; then
-            echo "Smoke test passed"
-            kill $PID
-          else
-            echo "Binary exited early" && exit 1
-          fi
+        env:
+          PLASMA_BIN: dist/PLASMA_Linux_x64
+        run: bash .github/smoke_test.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -132,6 +118,12 @@ jobs:
 
       - name: Build
         run: pyinstaller app_windows.spec --noconfirm
+
+      - name: Smoke test (clean dir)
+        shell: bash
+        env:
+          PLASMA_BIN: dist/PLASMA_Windows_x64.exe
+        run: bash .github/smoke_test.sh
 
       - uses: actions/upload-artifact@v4
         with:

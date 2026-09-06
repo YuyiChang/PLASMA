@@ -1,6 +1,8 @@
 """Packaging metadata sanity — version is single-sourced and PEP 440."""
+import importlib.util
 import pathlib
 import re
+import sys
 
 import pytest
 
@@ -47,3 +49,36 @@ def test_pyinstaller_hook_entrypoint_uses_the_pyinstaller40_group():
     eps = pyproject["project"]["entry-points"]
     assert "pyinstaller40" in eps, eps
     assert eps["pyinstaller40"]["hook-dirs"] == "plasma.__pyinstaller:get_hook_dirs"
+
+
+# ── the frozen build must bundle the dynamically-imported device plugins ──────
+
+def _plugin_module_paths():
+    from plasma import plugins
+    return list(plugins._DISCOVERY) + [p.module for p in plugins._STATIC]
+
+
+def test_devices_init_is_non_empty():
+    # A 0-byte plasma/devices/__init__.py has been observed to leave
+    # `plasma.devices` out of the PyInstaller bundle (No module named
+    # 'plasma.devices' at launch). Keep it non-empty.
+    assert (_ROOT / "plasma" / "devices" / "__init__.py").read_text().strip()
+
+
+def test_every_plugin_module_resolves_to_a_real_file():
+    for name in _plugin_module_paths():
+        spec = importlib.util.find_spec(name)
+        assert spec and spec.origin and pathlib.Path(spec.origin).is_file(), name
+
+
+def test_spec_common_walk_covers_every_dynamic_plugin_module():
+    sys.path.insert(0, str(_ROOT))
+    import spec_common
+
+    hi = set(spec_common.plasma_hiddenimports())
+    for name in _plugin_module_paths():
+        assert name in hi, f"{name} missing from spec_common.plasma_hiddenimports()"
+    # the intermediate package that regressed, + a leaf under panels/
+    assert "plasma.devices" in hi
+    assert "plasma.devices.msense" in hi
+    assert any(m.startswith("plasma.devices.msense.panels.") for m in hi)

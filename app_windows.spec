@@ -1,25 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# Device plugins are imported dynamically by plasma.plugins, so they are pulled
-# in by plasma/__pyinstaller/hook-plasma.py (auto-discovered via the `pyinstaller40`
-# entry point once `pip install -e .` has run) — no hand hiddenimports list here.
-import os, pylsl
-from PyInstaller.utils.hooks import collect_data_files
+# Device plugins are imported dynamically by plasma.plugins (dotted strings), so
+# PyInstaller's static analysis can't see them. spec_common.plasma_hiddenimports()
+# enumerates the whole `plasma` package from disk — see spec_common.py for why a
+# filesystem walk rather than collect_submodules / the pyinstaller40 hook.
+import os, sys, pylsl
 
-datas = []
-datas += collect_data_files('gradio_client')
-datas += collect_data_files('gradio')
-datas += collect_data_files('safehttpx')
-datas += collect_data_files('groovy')
+_SPEC_DIR = globals().get('SPECPATH') or os.path.dirname(os.path.abspath(SPEC))
+if _SPEC_DIR not in sys.path:
+    sys.path.insert(0, _SPEC_DIR)
+from spec_common import common_datas, plasma_datas, plasma_hiddenimports
+
+datas = common_datas() + plasma_datas()
 
 
 a = Analysis(
     ['app.py'],
-    pathex=[],
+    pathex=[_SPEC_DIR],
     binaries=[(os.path.join(os.path.dirname(pylsl.__file__), 'lib'), 'pylsl/lib')],
     datas=datas,
-    hiddenimports=["pylsl", "pupil_labs", "plasma.lsl_recorder",
-                   "plasma.xdf_writer", "plasma.lsl_util"],
+    hiddenimports=["pylsl", "pupil_labs"] + plasma_hiddenimports(),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
