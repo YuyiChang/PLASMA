@@ -52,6 +52,7 @@ exe = EXE(
     a.datas,
     [],
     name='PLASMA_MacOS_arm64',
+    icon='plasma/resources/icons/plasma.icns',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

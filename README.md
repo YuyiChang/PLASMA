@@ -21,7 +21,7 @@ working directory when running from source. Resolved once at import — set
 ### use PLASMA from another project
 
 ```
-pip install "plasma-app[msense] @ git+https://github.com/YuyiChang/PLASMA@v1.0.0"
+pip install "plasma-app[msense] @ git+https://github.com/YuyiChang/PLASMA@v2.0.0"
 ```
 
 The distribution is `plasma-app`; the import package is `plasma`. Extras map to

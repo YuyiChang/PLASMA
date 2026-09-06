@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" xmlns:bx="https://boxy-svg.com">
+  <defs>
+    <linearGradient id="color-0" bx:pinned="true" gradientUnits="userSpaceOnUse" gradientTransform="matrix(0.362621, 0, 0, 0.362621, 153.862123, 1624.981035)">
+      <title>b4cded</title>
+      <stop style="stop-color: rgb(113, 153, 196);"/>
+    </linearGradient>
+    <radialGradient gradientUnits="userSpaceOnUse" cx="255.999" cy="353.524" r="154.498" id="gradient-1">
+      <stop offset="0" style="stop-color: rgb(93, 130, 159)"/>
+      <stop offset="1" style="stop-color: rgb(15.551% 30.773% 41.197%)"/>
+    </radialGradient>
+  </defs>
+  <path d="M 256 247.45 L 410.498 459.598 L 101.501 459.598 L 256 247.45 Z" bx:shape="triangle 101.501 247.45 308.997 212.148 0.5 0 1@12186e95" style="stroke: rgb(0, 0, 0); stroke-width: 0px; fill: url(&quot;#gradient-1&quot;);"/>
+  <ellipse style="fill: rgb(68, 65, 233); stroke: url(&quot;#color-0&quot;); stroke-width: 8px;" cx="256" cy="242" rx="180" ry="180"/>
+  <path d="M 259.944 226.56 C 316.023 208.558 320.155 188.254 335.966 137.282" fill="none" stroke="#70D8FF" stroke-linecap="round" style="stroke-width: 10px;"/>
+  <path d="M 247.111 235.889 C 206.481 215.847 169.463 204.915 119.804 204.308" fill="none" stroke="#70D8FF" stroke-linecap="round" style="stroke-width: 10px;"/>
+  <path d="M 256.901 243.723 C 223.161 195.765 219.202 163.038 231.11 119.214" fill="none" stroke="#FF70DA" stroke-linecap="round" style="stroke-width: 10px;"/>
+  <ellipse style="stroke-width: 0px; stroke: url(&quot;#color-0&quot;); fill: rgb(199, 93, 233);" cx="227.747" cy="118.29" rx="18.131" ry="18.131"/>
+  <path d="M 233.141 244.376 C 138.837 285.316 153.816 314.474 152.022 335.17" fill="none" stroke="#70D8FF" stroke-linecap="round" style="stroke-width: 10px;"/>
+  <path d="M 250.729 249.069 C 252.729 306.069 256.729 348.069 258.729 388.069" fill="none" stroke="#FF70DA" stroke-linecap="round" style="stroke-width: 10px;"/>
+  <ellipse style="stroke-width: 0px; stroke: url(&quot;#color-0&quot;); fill: rgb(199, 93, 233);" cx="258.699" cy="386.386" rx="18.131" ry="18.131"/>
+  <path d="M 262.24 245.538 C 290.24 300.538 342.24 319.538 387.24 330.538" fill="none" stroke="#70D8FF" stroke-linecap="round" style="stroke-width: 10px;"/>
+  <path d="M 263.031 243.131 C 310.472 250.47 359.664 242.257 390.318 221.158" fill="none" stroke="#FF70DA" stroke-linecap="round" style="stroke-width: 10px;"/>
+  <ellipse style="stroke-width: 0px; stroke: url(&quot;#color-0&quot;); fill: rgb(255, 155, 228);" cx="256" cy="242" rx="36" ry="36"/>
+  <ellipse style="stroke-width: 0px; stroke: url(&quot;#color-0&quot;); fill: rgb(199, 93, 233);" cx="337.055" cy="136.789" rx="18.131" ry="18.131"/>
+  <ellipse style="stroke-width: 0px; stroke: url(&quot;#color-0&quot;); fill: rgb(199, 93, 233);" cx="391.289" cy="221.841" rx="18.131" ry="18.131"/>
+  <ellipse style="stroke-width: 0px; stroke: url(&quot;#color-0&quot;); fill: rgb(199, 93, 233);" cx="152.507" cy="334.687" rx="18.131" ry="18.131"/>
+  <ellipse style="stroke-width: 0px; stroke: url(&quot;#color-0&quot;); fill: rgb(199, 93, 233);" cx="119.055" cy="205.22" rx="18.131" ry="18.131"/>
+  <ellipse style="stroke-width: 0px; stroke: url(&quot;#color-0&quot;); fill: rgb(199, 93, 233);" cx="378.041" cy="326.746" rx="18.131" ry="18.131"/>
+  <path d="M 230.618 234.316 C 238.704 221.665 249.295 214.074 262.385 211.544 C 255.839 222.087 247.947 234.949 238.704 250.129 L 230.618 234.316 Z" opacity="0.75" style="stroke-width: 1; fill: rgb(255, 202, 234);"/>
+</svg>

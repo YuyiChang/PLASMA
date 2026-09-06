@@ -77,6 +77,7 @@ exe = EXE(
     a.datas,
     [],
     name='PLASMA_Linux_x64',
+    icon='plasma/resources/icons/plasma.png',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

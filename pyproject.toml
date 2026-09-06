@@ -44,7 +44,7 @@ include = ["plasma*"]
 exclude = ["plasma.tests*", "plasma.devices.msense.tests*", "tests*"]
 
 [tool.setuptools.package-data]
-plasma = ["resources/icons/*.ico"]
+plasma = ["resources/icons/*.ico", "resources/icons/*.icns", "resources/icons/*.png", "resources/icons/*.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["plasma"]
