@@ -6,6 +6,36 @@
 
 ## 🚀 vNext (unreleased)
 
+### 📡 MSense sensor stream v0 + ECB2 ECG blocks
+
+- **New shared sensor-stream protocol (v0)** replaces the protocol-v1 NUS path.
+  Version byte `0`; commands `START` (FINITE) / `STOP` / `START_INFINITY`;
+  16-byte `START_ACK` (no device/git metadata); **byte-offset-addressed `DATA`**
+  (no sequence/phase/record-index); 2-byte `END` / `RESULT`. FINITE is now
+  **128 KiB** (32 KiB rolling history + 96 KiB future). This is a **hard
+  cut-over** — the wristband firmware must be updated to match; there is no
+  fallback. Old `.ecg` / `.ppg` v1 capture blobs still decode offline.
+- **New ECG record format — `ECB2`**: the streamed ECG payload is a sequence of
+  4096-byte CRC-32/ISO-HDLC blocks (1358 samples each, `ETAG`/`PTAG`), not
+  12-byte MAX30001 frames. Leading all-zero history slots are skipped as
+  "unavailable history". PPG's packed 16-byte record is unchanged.
+- **Offline extraction** of downloaded ECG NAND data now supports the `ECF2`
+  block-container file (`ecg:block_v2` format spec, auto-detected by magic):
+  4 MiB chunks of `ECB2` blocks → `ECG` / `ETAG` / `PTAG` / `Counter` / `CDCT`
+  CSV, with multi-chunk recordings stitched into one continuous timeline
+  (ordered by `chunk_index`, split by `recording_id`; missing chunks / sample
+  gaps reported). Old 12-byte `framed` `.ecg` / `.bin` files still decode.
+- **Continuous live stream (`START_INFINITY`)** — a new "▶️ Start live stream"
+  control in the YAMS → ECG/PPG Signal Quality tab opens a continuous ECG/PPG
+  stream decoded into a rolling in-memory plot. **Not** recorded to disk or
+  LSL/XDF in this build (opt-in, per wristband).
+- Product (ECG vs PPG) is now taken from the advertised `MSense4ECG` /
+  `MSense4PPG` name — v0 `START_ACK` carries no product identity.
+- No-progress watchdog default raised 5 s → **15 s** (spec §7); STOP replaces
+  the v1 CANCEL, and a STOPped stream discards its partial tail.
+- Acquisition enable/disable (`da39c931…`) is now a **one-byte** write, per the
+  v0 firmware howto.
+
 ### 🔌 Restart / Shut down
 
 - The Configuration tab now has **Restart PLASMA** and **Shut down PLASMA**

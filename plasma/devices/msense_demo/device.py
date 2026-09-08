@@ -15,7 +15,9 @@ from plasma.devices.msense.device import (
     MotionSenseHRV, NUS_RX_CHAR_UUID, NUS_TX_CHAR_UUID, BATTERY_CHAR_UUID,
     CTL_ENC_CHAR_UUID,
 )
-from plasma.devices.msense.nus_stream import MAGIC, OP_START, OP_CANCEL
+from plasma.devices.msense.nus_stream import (
+    MAGIC, OP_START, OP_STOP, OP_START_INFINITY,
+)
 from plasma.devices.msense_demo import config as _config, faults as _faults
 from plasma.devices.msense_demo import fake_stream
 
@@ -64,6 +66,7 @@ class MSenseDemo(MotionSenseHRV):
                 "name": f"{name} [{addr}]",
                 "address": addr,
                 "rssi": -55,
+                "product": self._sensor_type.get(name, "PPG"),
             }
         self.info(f"demo scan: {list(self.devices)}")
 
@@ -144,8 +147,8 @@ class FakePeripheral:
         data = bytes(data)
         if char_uuid == CTL_ENC_CHAR_UUID and len(data) >= 4:
             self._last_enc = struct.unpack("<I", data[:4])[0]
-        elif char_uuid == CTL_STARTSTOP_CHAR_UUID and len(data) >= 4:
-            on = struct.unpack("<I", data[:4])[0]
+        elif char_uuid == CTL_STARTSTOP_CHAR_UUID and len(data) >= 1:
+            on = data[0]  # v0: one-byte acquisition enable/disable
             if on:
                 self._collect_started_at = time.time()
                 self._ensure_live_thread()
@@ -234,28 +237,52 @@ class FakePeripheral:
         if len(data) < 8 or data[0:2] != MAGIC:
             return
         opcode = data[3]
-        session_id = struct.unpack("<I", data[4:8])[0]
+        stream_id = struct.unpack("<I", data[4:8])[0]
         if opcode == OP_START:
             self._sqc_cancel.clear()
             self._sqc_thread = threading.Thread(
-                target=self._sqc_loop, args=(session_id,),
+                target=self._sqc_loop, args=(stream_id,),
                 name=f"demo-sqc-{self._name}", daemon=True)
             self._sqc_thread.start()
-        elif opcode == OP_CANCEL:
+        elif opcode == OP_START_INFINITY:
+            self._sqc_cancel.clear()
+            self._sqc_thread = threading.Thread(
+                target=self._infinity_loop, args=(stream_id,),
+                name=f"demo-live-{self._name}", daemon=True)
+            self._sqc_thread.start()
+        elif opcode == OP_STOP:
             self._sqc_cancel.set()
 
-    def _sqc_loop(self, session_id):
+    def _sqc_loop(self, stream_id):
         sensor = self._driver._sensor_type.get(self._name, "PPG")
         fault = self.fault()
         frames, terminal = fake_stream.sqc_frames(
-            sensor, session_id, fault=(fault if fault == "sqc_error" else None))
+            sensor, stream_id,
+            fault=(fault if fault in ("sqc_error", "stream_stall") else None))
 
         time.sleep(0.05)   # handshake latency
         for i, frame in enumerate(frames):
             if self._sqc_cancel.is_set() or not self._alive:
+                # user STOP mid-stream: answer with a STOPPED END
+                self._emit(NUS_TX_CHAR_UUID,
+                           fake_stream.nus_sim.end_message(
+                               fake_stream.END_STOPPED, stream_id))
                 return
             self._emit(NUS_TX_CHAR_UUID, frame)
-            # START_ACK first, then DATA paced, END immediately after
             time.sleep(0.03 if i == 0 else 0.01)
-        # terminal is False for the sqc_error fault: we just stop here and let
-        # the driver's no-progress watchdog CANCEL + reconnect.
+        # terminal is False for the sqc_error/stream_stall faults: we just stop
+        # here and let the driver's no-progress watchdog STOP + reconnect.
+
+    def _infinity_loop(self, stream_id):
+        sensor = self._driver._sensor_type.get(self._name, "PPG")
+        fault = self.fault()
+        gen = fake_stream.infinity_frame_iter(sensor, stream_id,
+                                              stop_event=self._sqc_cancel)
+        time.sleep(0.05)
+        for i, frame in enumerate(gen):
+            if not self._alive:
+                return
+            if fault == "stream_stall" and i > 6:
+                return  # go silent -> watchdog fires
+            self._emit(NUS_TX_CHAR_UUID, frame)
+            time.sleep(0.03 if i == 0 else 0.008)

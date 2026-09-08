@@ -102,10 +102,19 @@ def test_ppg_payload_decodes_cleanly():
 
 def test_ecg_payload_decodes_with_good_crc():
     from plasma.devices.msense_demo import fake_stream
-    out = records.decode_ecg(fake_stream.ecg_payload(2048))
-    assert len(out["ecg"]) == 2048
-    assert out["crc_ok_frac"] == 1.0
+    out = records.decode_ecg(fake_stream.ecg_payload(3))   # 3 ECB2 blocks
+    assert out["error"] is None
+    assert out["blocks"] == 3
+    assert len(out["ecg"]) == 3 * 1358
     assert out["ecg"].max() > out["ecg"].mean() + 1000    # QRS spikes present
+
+
+def test_ecg_payload_leading_zero_slots():
+    from plasma.devices.msense_demo import fake_stream
+    out = records.decode_ecg(fake_stream.ecg_payload(2, leading_zero_slots=3))
+    assert out["error"] is None
+    assert out["skipped_history_slots"] == 3
+    assert out["blocks"] == 2
 
 
 # ── connect / live streaming ────────────────────────────────────────────────
@@ -146,6 +155,47 @@ def test_sqc_snapshot_ready(demo_blob, sensor, fs):
         assert res["fs"] == fs
         first = next(iter(res["channels"].values()))
         assert len(first) > 1000
+    finally:
+        _teardown(d)
+
+
+# ── live INFINITY stream ───────────────────────────────────────────────────
+
+@pytest.mark.parametrize("sensor", ["PPG", "ECG"])
+def test_live_stream_starts_and_stops(demo_blob, sensor):
+    demo_blob(_row(f"DEMO-{sensor}", sensor=sensor, imu=False))
+    d = _make_device()
+    try:
+        name = f"DEMO-{sensor}"
+        msg = d.start_live_stream(name)
+        assert "live" in msg
+        assert _wait(lambda: d.get_live_stream_status(name)["status"] == "streaming",
+                     timeout=10)
+
+        def _enough():
+            p = d.get_live_stream_preview(name)
+            return p is not None and len(next(iter(p["channels"].values()))) > 200
+        assert _wait(_enough, timeout=15)
+        prev = d.get_live_stream_preview(name)
+        assert prev["device_type"] == sensor
+
+        d.stop_live_stream(name)
+        assert _wait(lambda: d.get_live_stream_status(name)["status"] == "stopped",
+                     timeout=10)
+    finally:
+        _teardown(d)
+
+
+def test_live_stream_stall_recovers(demo_blob, monkeypatch):
+    monkeypatch.setattr(demo_device, "DEMO_DISCONNECT_AFTER_S", 9e9)
+    monkeypatch.setattr("plasma.devices.msense.device.SQC_NOPROGRESS_TIMEOUT_S", 0.8)
+    demo_blob(_row("DEMO-ECG", sensor="ECG", imu=False, fault="stream_stall"))
+    d = _make_device()
+    try:
+        name = "DEMO-ECG"
+        d.start_live_stream(name)
+        assert _wait(lambda: d.get_live_stream_status(name)["status"] == "error",
+                     timeout=15)
     finally:
         _teardown(d)
 

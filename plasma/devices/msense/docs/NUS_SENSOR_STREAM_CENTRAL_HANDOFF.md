@@ -1,5 +1,11 @@
 # NUS bounded sensor stream: BLE central handoff
 
+> **SUPERSEDED (historical).** This describes protocol **v1**, which PLASMA no
+> longer speaks. The live driver now implements sensor-stream **v0** — see
+> [`SENSOR_STREAM_CENTRAL_HOWTO.md`](SENSOR_STREAM_CENTRAL_HOWTO.md) and
+> [`ECG_BLOCK_FORMAT.md`](ECG_BLOCK_FORMAT.md). Kept only as a reference for
+> decoding old `.ecg` / `.ppg` v1 capture blobs.
+
 Status: firmware protocol implemented; Central integration and hardware validation pending  
 Protocol version: 1
 

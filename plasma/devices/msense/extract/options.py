@@ -31,13 +31,13 @@ needed, and where the two disagree the contents win.
 |---|---|
 | `auto` | Detect from content, per file. Falls back to the device version if inconclusive. **Default.** |
 | `version` | Follow `uuid.txt` only (v4.7.0+ → `v2`, otherwise `legacy`). The pre-1.6 behaviour. |
-| `legacy` / `v2` / `packed16` / `framed` / `v3` | Force that layout. |
+| `legacy` / `v2` / `packed16` / `framed` / `v3` / `block_v2` | Force that layout. |
 
 | Sensor | Layouts |
 |---|---|
 | PPG | `legacy` 24 B · `v2` 20 B · `packed16` 16 B (no version tie) |
 | IMU | `legacy` 30 B record · `v2` 26 B record · `v3` self-describing 4 MiB chunk (no version tie), 2 g / 16384 counts-per-g |
-| ECG | `framed` 12 B |
+| ECG | `framed` 12 B (pre-v0) · `block_v2` self-describing `ECF2` 4 MiB chunk of 4096 B `ECB2` blocks (no version tie) |
 
 **Cross-check against uuid.txt** reports when detection and the version file
 disagree. It is off by default and does not override detection: use

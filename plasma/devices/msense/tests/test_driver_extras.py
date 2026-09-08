@@ -13,8 +13,10 @@ from plasma.devices.template import PlasmaMemo
 from plasma import journal
 from plasma.app_context import app_context
 from plasma.devices.msense.device import MotionSenseHRV, ERASE_CODE
+from plasma.devices.msense import nus_sim
 from plasma.devices.msense.nus_stream import (
-    StreamSession, PROFILE, DEVICE_ECG, MSG_START_ACK, MSG_END,
+    StreamSession, PROFILE, ECG, MODE_FINITE, MODE_INFINITY,
+    MSG_START_ACK, MSG_END, END_STOPPED, FINITE_TOTAL_BYTES,
 )
 from . import test_nus_stream as _tns
 
@@ -79,6 +81,8 @@ def _bare_driver():
     d.t_start = 0.0
     d._sqc_threads_stopped = False
     d._connect_rssi = {}
+    d.sqc_state = {}
+    d.live_state = {}
     d._start_ble_loop()
     return d
 
@@ -239,14 +243,15 @@ def test_request_all_sqc_snapshots_rejects_overlapping_run():
 def _driver_with_sqc_session(name="w1"):
     d = _bare_driver()
     d.sqc_state = {name: MotionSenseHRV._new_sqc_state()}
-    d.sqc_state[name].update(session=StreamSession(_tns.SID), status="requesting")
+    d.sqc_state[name].update(
+        session=StreamSession(_tns.SID, product=ECG, expect_mode=MODE_FINITE),
+        status="requesting", product=ECG)
     return d
 
 
-def test_nus_data_handler_finalizes_unsolicited_clean_cancel_as_partial(monkeypatch):
-    """A CANCELLED end this driver did NOT itself request (early_cancel_sent
-    unset — e.g. a manual "Cancel all" click, or a device-initiated cancel)
-    must still be decoded/plotted, not discarded as a hard error."""
+def test_nus_data_handler_finalizes_early_stop_as_partial(monkeypatch):
+    """A STOPPED end (quick mode, a manual "Cancel all", or a device-initiated
+    stop) must still be decoded/plotted, not discarded as a hard error."""
     name = "w1"
     d = _driver_with_sqc_session(name)
     finish_calls = []
@@ -256,24 +261,18 @@ def test_nus_data_handler_finalizes_unsolicited_clean_cancel_as_partial(monkeypa
         d.sqc_state[name_]["status"] = "ready"
     monkeypatch.setattr(d, "_finish_sqc_snapshot", _fake_finish)
 
-    d._nus_data_handler(_tns._msg(MSG_START_ACK, _tns._start_ack_payload(DEVICE_ECG)), name)
-    data, _ = _tns._data_msgs(DEVICE_ECG, 100)
-    for m in data[:5]:
+    d._nus_data_handler(_tns._msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)), name)
+    for m in nus_sim.data_stream(bytes(20_000), stream_id=_tns.SID):
         d._nus_data_handler(m, name)
-
-    rs = PROFILE[DEVICE_ECG]["record_size"]
-    local_bytes = 5 * 100 * rs
-    end = _tns._end_payload(DEVICE_ECG, 5, status=0x0008,
-                            override={"history": 500, "forward": 0, "total": local_bytes})
-    d._nus_data_handler(_tns._msg(MSG_END, end), name)
+    d._nus_data_handler(nus_sim.end_message(END_STOPPED, _tns.SID), name)
 
     assert finish_calls == [(name, True, None)]   # partial=True, no warning
     assert d.sqc_state[name]["status"] == "ready"  # not "error"
 
 
-def test_nus_data_handler_finalizes_cancel_with_data_loss_as_warned_partial(monkeypatch):
-    """A CANCELLED end whose counts don't match what was locally received
-    still gets decoded/plotted (not discarded), but carries a warning."""
+def test_nus_data_handler_finalizes_protocol_violation_as_warned_partial(monkeypatch):
+    """A mid-stream framing violation with bytes already accumulated still gets
+    decoded/plotted (not discarded), but carries a warning."""
     name = "w1"
     d = _driver_with_sqc_session(name)
     finish_calls = []
@@ -283,22 +282,15 @@ def test_nus_data_handler_finalizes_cancel_with_data_loss_as_warned_partial(monk
         d.sqc_state[name_]["status"] = "ready"
     monkeypatch.setattr(d, "_finish_sqc_snapshot", _fake_finish)
 
-    d._nus_data_handler(_tns._msg(MSG_START_ACK, _tns._start_ack_payload(DEVICE_ECG)), name)
-    data, _ = _tns._data_msgs(DEVICE_ECG, 100)
-    for m in data[:5]:
-        d._nus_data_handler(m, name)
-
-    rs = PROFILE[DEVICE_ECG]["record_size"]
-    local_bytes = 5 * 100 * rs
-    end = _tns._end_payload(DEVICE_ECG, 5, status=0x0008,
-                            override={"history": 500, "forward": 0, "total": local_bytes - rs})
-    d._nus_data_handler(_tns._msg(MSG_END, end), name)
+    d._nus_data_handler(_tns._msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)), name)
+    d._nus_data_handler(nus_sim.data_message(0, b"\x11" * 200, _tns.SID), name)
+    d._nus_data_handler(nus_sim.data_message(9999, b"\x22" * 200, _tns.SID), name)  # gap
 
     assert len(finish_calls) == 1
     _, partial, warning = finish_calls[0]
     assert partial is True
-    assert warning is not None and "data loss during cancel" in warning
-    assert d.sqc_state[name]["status"] == "ready"  # still plotted, not "error"
+    assert warning is not None and "protocol violation" in warning
+    assert d.sqc_state[name]["status"] == "ready"
 
 
 # ── SQC ↔ session journaler auto-markers ───────────────────────────────────
@@ -324,6 +316,7 @@ def test_sqc_request_pushes_start_marker(monkeypatch):
     p = _FakePeripheral()
     p.mtu_size = 247
     d.active_devices = {"w1": p}
+    d.caps = {"w1": {"nus": True, "product": ECG}}
 
     msg = d.request_sqc_snapshot("w1")
 
@@ -339,6 +332,7 @@ def test_sqc_request_marker_reflects_capture_mode(monkeypatch):
     p = _FakePeripheral()
     p.mtu_size = 247
     d.active_devices = {"w1": p}
+    d.caps = {"w1": {"nus": True, "product": ECG}}
 
     d.request_sqc_snapshot("w1", history_only=True)
     assert d.journal_marks == ["[SQC] w1 start (history-only)"]

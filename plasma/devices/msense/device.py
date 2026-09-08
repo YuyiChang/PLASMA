@@ -23,11 +23,13 @@ from .quaternion import IDENTITY_QUAT, quat_multiply, quat_normalize
 from .gyro_bias import load_gyro_bias, save_gyro_bias
 from . import nus_stream
 from .nus_stream import (
-    StreamSession, ProtocolError, build_command, new_session_id,
-    OP_START, OP_CANCEL, PROFILE, DEVICE_PPG,
-    HANDSHAKE_TIMEOUT_S,
+    StreamSession, ProtocolError, build_command, new_stream_id,
+    OP_START, OP_STOP, OP_START_INFINITY, PROFILE, ECG, PPG,
+    MODE_FINITE, MODE_INFINITY, HANDSHAKE_TIMEOUT_S, HISTORY_BYTES,
 )
-from .records import decode_ppg, decode_ecg
+from .records import (
+    decode_ppg, decode_ecg, EcgBlockReassembler, Packed16Reassembler,
+)
 
 # NOTE: the *_SERVICE_UUID constants below are documentary only — bleak's
 # read/write/notify calls are addressed by characteristic UUID alone (it
@@ -35,13 +37,14 @@ from .records import decode_ppg, decode_ecg
 # arguments. Kept for readability/grouping and because external docs
 # (BLE_PROTOCOL_OVERVIEW.md) reference them by name.
 
-# --- ECG/PPG signal-quality-check (SQC) snapshot, via Nordic UART Service ---
-# Protocol v1 bounded sensor stream — see
-# local_docs/NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md (framing/handshake),
-# local_docs/PPG_PACKED_16_BYTE_FORMAT.md and
-# local_docs/ECG_TEMP_DATA_FORMAT.md (record layouts). One connected device is
-# either a PPG or an ECG peripheral; each START pulls the fixed 96 KiB payload
-# (history recorded just before START, then a forward window captured after).
+# --- ECG/PPG sensor stream (v0), via Nordic UART Service ---
+# Shared sensor-stream protocol v0 — see
+# docs/SENSOR_STREAM_CENTRAL_HOWTO.md (framing/handshake/decoders),
+# docs/ECG_BLOCK_FORMAT.md (ECB2 blocks) and docs/PPG_PACKED_16_BYTE_FORMAT.md
+# (PPG records). One connected device is either an ECG or a PPG peripheral
+# (known from its advertised MSense4ECG / MSense4PPG name). A FINITE START
+# pulls exactly 131,072 sensor bytes (32 KiB rolling history + 96 KiB future);
+# START_INFINITY streams the history then future data continuously until STOP.
 NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # host -> device (write)
 NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # device -> host (notify)
@@ -65,12 +68,13 @@ SQC_DEBUG = True  # emit per-notification telemetry (printed off the BLE thread)
 #
 # What IS enforced is a NO-PROGRESS watchdog: if an active stream receives
 # nothing at all for this long, the peripheral/link has wedged. Observed
-# firmware failure: the ECG peripheral's three BLE TX buffers stayed occupied
+# firmware failure: the ECG peripheral's BLE TX buffers stayed occupied
 # >72 s, outbound notifications failing -ENOMEM, while NAND recording and
-# inbound writes (incl. reset) still worked. The watchdog CANCELs the stream,
+# inbound writes (incl. reset) still worked. The watchdog STOPs the stream,
 # disconnects, and reconnects. Distinct from the duration cap: this fires only
-# on true silence, never while bytes are still trickling in.
-SQC_NOPROGRESS_TIMEOUT_S = 5.0
+# on true silence, never while bytes are still trickling in. 15 s is the
+# SENSOR_STREAM_CENTRAL_HOWTO.md §7 default.
+SQC_NOPROGRESS_TIMEOUT_S = nus_stream.NOPROGRESS_TIMEOUT_S
 SQC_AUTO_RECONNECT = True
 
 # We used to run on simplepyble, whose connect()/disconnect() are blocking
@@ -87,13 +91,30 @@ SQC_AUTO_RECONNECT = True
 # bounds how long any caller waits for one.
 BLE_OP_TIMEOUT_S = 15.0
 
-# Quick-mode capture: the protocol always sends the full 96 KiB (history +
-# a live-acquired forward window). When the operator only wants the first N s
-# for a contact check, we let START run, then write CANCEL once enough records
-# have arrived and keep the partial payload. If the device doesn't answer the
-# CANCEL with END within this grace period, finalize the partial locally and
+# Quick-mode capture: a FINITE START sends 131,072 sensor bytes (32 KiB history
+# + 96 KiB live-acquired future). When the operator only wants the first N s
+# for a contact check, we let START run, then write STOP once enough bytes
+# have arrived and keep the validated prefix. If the device doesn't answer the
+# STOP with END within this grace period, finalize the partial locally and
 # reconnect (the firmware stream may be wedged).
 SQC_EARLY_CANCEL_GRACE_S = 3.0
+
+# Live INFINITY view: how many seconds of decoded signal to retain in the
+# in-memory rolling buffer behind the "Live stream" plot. Nothing is written
+# to disk or LSL in this pass.
+LIVE_WINDOW_S = 30.0
+
+
+def _product_from_name(advertised_name):
+    """ECG / PPG from an advertised local name (MSense4ECG-… / MSense4PPG-…).
+    START_ACK carries no product identity in v0, so the central relies on
+    this. Returns None when it can't tell."""
+    n = (advertised_name or "").upper()
+    if "MSENSE4ECG" in n or "4ECG" in n:
+        return ECG
+    if "MSENSE4PPG" in n or "4PPG" in n:
+        return PPG
+    return None
 
 
 class MotionSenseHRV(PlasmaDevice):
@@ -113,6 +134,9 @@ class MotionSenseHRV(PlasmaDevice):
         self.gyro_bias = {}
         self.gyro_calib = {}
         self.sqc_state = {}
+        # name -> live INFINITY-stream state (see _new_live_state); only ever
+        # one NUS stream (SQC snapshot OR live) active per wristband at a time.
+        self.live_state = {}
         # names with an open "[SQC] … start" journaler marker, awaiting an "end"
         # once the stream reaches a terminal status (see _sqc_watchdog_loop).
         self._sqc_journal_open = set()
@@ -133,7 +157,8 @@ class MotionSenseHRV(PlasmaDevice):
         self._state_lock = threading.Lock()
         for k, addr in self.device_list.items():
             channels = ["ENMO", "counter", "battery"]
-            self.caps[k] = {"nus": False, "imu": False, "battery": False}
+            self.caps[k] = {"nus": False, "imu": False, "battery": False,
+                            "product": None}
             groups = {}
             if k in self.imu_stream_devices:
                 channels += ["AccX", "AccY", "AccZ", "Q0", "Q1", "Q2", "Q3", "OrientX", "OrientY", "OrientZ", "OrientW"]
@@ -193,16 +218,17 @@ class MotionSenseHRV(PlasmaDevice):
     def _shutdown_cleanup(self):
         for name, p in list(getattr(self, "active_devices", {}).items()):
             try:
-                st = self.sqc_state.get(name)
-                sess = st.get("session") if st else None
-                if sess is not None and not sess.is_terminal:
-                    # short timeout here — this is the atexit/SIGTERM path,
-                    # which should exit promptly rather than wait the full
-                    # interactive BLE_OP_TIMEOUT_S
-                    self._run_async(p.write_gatt_char(NUS_RX_CHAR_UUID,
-                                                       build_command(OP_CANCEL, sess.session_id),
-                                                       response=True),
-                                    timeout_s=3.0)
+                for store in (self.sqc_state, self.live_state):
+                    st = store.get(name)
+                    sess = st.get("session") if st else None
+                    if sess is not None and not sess.is_terminal:
+                        # short timeout here — this is the atexit/SIGTERM path,
+                        # which should exit promptly rather than wait the full
+                        # interactive BLE_OP_TIMEOUT_S
+                        self._run_async(p.write_gatt_char(
+                            NUS_RX_CHAR_UUID,
+                            build_command(OP_STOP, sess.stream_id),
+                            response=True), timeout_s=3.0)
             except Exception:
                 pass
         try:
@@ -274,6 +300,7 @@ class MotionSenseHRV(PlasmaDevice):
                     "name": f"{identifier} [{addr_u}]",
                     "address": addr_u,
                     "rssi": adv.rssi,
+                    "product": _product_from_name(identifier),
                 }
 
         print(self.devices)
@@ -314,6 +341,7 @@ class MotionSenseHRV(PlasmaDevice):
                     self.active_devices[name] = p
                     self.active_outlets[name] = MsenseOutlet(n, addr)
                     self._connect_rssi[name] = dev.get("rssi")
+                    self.caps[name]["product"] = dev.get("product")
                     try:
                         self._ensure_mtu(p, name)
                     except Exception as e:
@@ -349,6 +377,10 @@ class MotionSenseHRV(PlasmaDevice):
         self._ensure_sqc_threads()
 
     def lsl_streams(self):
+        # TODO(next): dedicated per-wristband ECG (512 Hz) / PPG (256 Hz) LSL
+        # outlets for the continuous INFINITY stream, so it lands in the XDF
+        # recording. This pass keeps INFINITY in-memory only (see
+        # start_live_stream / get_live_stream_preview).
         return {o.stream_name: cfg for cfg, o in
                 dict(getattr(self, "active_outlets", {})).items()
                 if getattr(o, "use_lsl", False)}
@@ -394,6 +426,10 @@ class MotionSenseHRV(PlasmaDevice):
     def stop(self):
         gr.Info("🛑 Stop data collection...")
         self.info("Data collection stopped")
+        try:
+            self.stop_all_live_streams()
+        except Exception as e:
+            self.info(f"Error stopping live streams: {e}")
         for name, p in list(self.active_devices.items()):
             print(name, p.is_connected)
             try:
@@ -420,6 +456,10 @@ class MotionSenseHRV(PlasmaDevice):
 
     def disconnect(self):
         self._journal_finished_sqc(reason="disconnected")  # close any open SQC markers
+        try:
+            self.stop_all_live_streams()
+        except Exception:
+            pass
         self._sqc_threads_stopped = True  # let the SQC watchdog loop exit
         for name, p in list(self.active_devices.items()):
             try:
@@ -562,9 +602,13 @@ class MotionSenseHRV(PlasmaDevice):
                 "da39c933-1d81-48e2-9c68-d0ae4bbd351f",
                 self.participant_byte, response=True))
 
+        # acquisition enable/disable — one byte with response: 1 requests
+        # acquisition, 0 requests a normal stop (SENSOR_STREAM_CENTRAL_HOWTO.md
+        # §1, ECG_BLOCK_FORMAT.md §20). This is separate from the NUS stream
+        # START/STOP — stream STOP leaves acquisition + NAND recording running.
         characteristic_uuid = "da39c931-1d81-48e2-9c68-d0ae4bbd351f"
         self._run_async(peripheral.write_gatt_char(characteristic_uuid,
-                                                    struct.pack("<I", int(start)), response=True))
+                                                    struct.pack("<B", int(bool(start))), response=True))
 
         # only (re-)subscribe on start; stop should just tell the firmware to
         # stop streaming, not stack another notify callback on top
@@ -743,10 +787,10 @@ class MotionSenseHRV(PlasmaDevice):
         except Exception as e:
             self.info(f"Error handling IMU stream packet from {name}: {e}")
 
-    # ── ECG/PPG signal-quality-check (SQC) snapshot ─────────────────────────
-    # NUS bounded sensor stream, protocol v1. Framing/handshake/validation
-    # live in plasma/nus_stream.py; record decoding in
-    # plasma/ppg_ecg_records.py. See local_docs/NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md.
+    # ── ECG/PPG sensor stream (v0) ─────────────────────────────────────────
+    # Framing / handshake / byte-offset reassembly live in
+    # plasma/devices/msense/nus_stream.py; ECB2 + packed-16 decoding in
+    # plasma/devices/msense/records.py. See docs/SENSOR_STREAM_CENTRAL_HOWTO.md.
 
     @staticmethod
     def _new_sqc_diag():
@@ -757,33 +801,48 @@ class MotionSenseHRV(PlasmaDevice):
         return {
             "count": 0, "bytes": 0, "first_t": None, "last_t": None,
             "last_gap_s": 0.0, "max_gap_s": 0.0, "max_proc_ms": 0.0,
-            "last_seq": None, "seq_gaps": 0, "recoveries": 0,
+            "offset": 0, "skipped_history_slots": 0, "recoveries": 0,
             "mtu": None, "rssi": None,
-            "log": deque(maxlen=64),  # (count, gap_s, proc_ms, seq)
+            "log": deque(maxlen=64),  # (count, gap_s, proc_ms, offset)
         }
 
     @classmethod
     def _new_sqc_state(cls):
         return {
-            "status": "idle",  # idle|requesting|receiving|ready|rejected|error
-            "session": None,   # nus_stream.StreamSession
+            "status": "idle",  # idle|requesting|receiving|finishing|ready|rejected|error
+            "session": None,   # nus_stream.StreamSession (FINITE — accumulates payload)
             "requested_at": None,
             "last_rx_at": None,
-            "device_type": None,
+            "product": None,   # "ECG" | "PPG"
             "provenance": None,
-            "decoded": None,   # {"channels": {name: np.ndarray}, "fs": float, "tick": np.ndarray}
+            "decoded": None,   # {"channels": {name: np.ndarray}, "fs": float, ...}
             "preview": None,   # throttled partial decode while receiving
             "saved_path": None,
             "error": None,
             "diag": cls._new_sqc_diag(),
             # quick mode
             "max_seconds": None,      # stop after this many seconds of signal
-            "history_only": False,    # stop at the history->forward boundary
+            "history_only": False,    # stop once the 32 KiB history is through
             "early_cancel_sent": False,
             "early_cancel_at": None,
             "partial": False,         # this capture was cut short (on purpose or not)
             "quick_seconds": None,    # seconds of signal actually kept
             "warning": None,          # non-blocking note on why it's incomplete, if any
+        }
+
+    @classmethod
+    def _new_live_state(cls):
+        return {
+            "status": "idle",  # idle|requesting|streaming|stopping|stopped|error
+            "session": None,
+            "reassembler": None,
+            "product": None,
+            "requested_at": None,
+            "last_rx_at": None,
+            "ring": None,      # {channel: collections.deque}  (LIVE_WINDOW_S wide)
+            "fs": None,
+            "error": None,
+            "diag": cls._new_sqc_diag(),
         }
 
     def register_nus_notify(self, peripheral, name):
@@ -816,48 +875,68 @@ class MotionSenseHRV(PlasmaDevice):
         configured, else the bare Name. ``name`` stays the identifier."""
         return self.display_labels.get(name, name)
 
-    def request_sqc_snapshot(self, name, max_seconds=None, history_only=False):
-        """Pull a snapshot. max_seconds / history_only enable quick mode: the
-        stream is CANCELled early and the partial payload kept (see
-        _sqc_watchdog_loop)."""
-        peripheral = self.active_devices.get(name)
-        if peripheral is None or not peripheral.is_connected:
-            return f"⛔ {name} not connected"
+    def _new_reassembler(self, product):
+        return EcgBlockReassembler() if product == ECG else Packed16Reassembler()
 
-        state = self.sqc_state.setdefault(name, self._new_sqc_state())
-        if state["status"] in ("requesting", "receiving", "finishing"):
-            return f"⏳ {name} snapshot already in progress"
+    def _sqc_product(self, name):
+        """The wristband's product ("ECG"/"PPG"), from its advertised name."""
+        return self.caps.get(name, {}).get("product")
 
-        if max_seconds is not None and max_seconds <= 0:
-            max_seconds = None
-
+    def _check_stream_mtu(self, peripheral, name):
+        """Returns (mtu, error_string_or_None). A last-chance BlueZ exchange is
+        attempted if the first read is below the minimum."""
         try:
             mtu = peripheral.mtu_size
         except Exception:
             mtu = None
         if mtu is not None and mtu < SQC_MIN_MTU:
-            # last-chance exchange (BlueZ) — normally already done at connect
             try:
                 self._ensure_mtu(peripheral, name)
                 mtu = peripheral.mtu_size
             except Exception:
                 pass
         if mtu is not None and mtu < SQC_MIN_MTU:
-            state.update(status="error", error=f"ATT MTU {mtu} < {SQC_MIN_MTU} — reconnect")
-            return f"⛔ {name}: MTU {mtu} < {SQC_MIN_MTU}"
+            return mtu, f"ATT MTU {mtu} < {SQC_MIN_MTU} — reconnect"
+        return mtu, None
+
+    def request_sqc_snapshot(self, name, max_seconds=None, history_only=False):
+        """Pull a FINITE snapshot. max_seconds / history_only enable quick mode:
+        the stream is STOPped early and the validated prefix kept (see
+        _sqc_watchdog_loop)."""
+        peripheral = self.active_devices.get(name)
+        if peripheral is None or not peripheral.is_connected:
+            return f"⛔ {name} not connected"
+
+        product = self._sqc_product(name)
+        if product is None:
+            return f"⛔ {name}: unknown product (not an MSense4ECG / MSense4PPG?)"
+
+        state = self.sqc_state.setdefault(name, self._new_sqc_state())
+        if state["status"] in ("requesting", "receiving", "finishing"):
+            return f"⏳ {name} snapshot already in progress"
+        live = self.live_state.get(name)
+        if live and live["status"] in ("requesting", "streaming", "stopping"):
+            return f"⏳ {name} live stream running — stop it first"
+
+        if max_seconds is not None and max_seconds <= 0:
+            max_seconds = None
+
+        mtu, mtu_err = self._check_stream_mtu(peripheral, name)
+        if mtu_err:
+            state.update(status="error", error=mtu_err)
+            return f"⛔ {name}: {mtu_err}"
 
         self._ensure_sqc_threads()
-        # rssi at connect time, not live — bleak has no connected-client RSSI
-        # query (see self._connect_rssi's definition in __init__)
         rssi = self._connect_rssi.get(name)
 
-        sid = new_session_id()
+        sid = new_stream_id()
         diag = self._new_sqc_diag()
         diag.update(mtu=mtu, rssi=rssi)
         state.update(
-            status="requesting", session=StreamSession(sid),
+            status="requesting",
+            session=StreamSession(sid, product=product, expect_mode=MODE_FINITE),
             requested_at=time.time(), last_rx_at=time.time(),
-            device_type=None, provenance=None, decoded=None, preview=None,
+            product=product, provenance=None, decoded=None, preview=None,
             saved_path=None, error=None, diag=diag,
             max_seconds=max_seconds, history_only=bool(history_only),
             early_cancel_sent=False, early_cancel_at=None,
@@ -873,8 +952,9 @@ class MotionSenseHRV(PlasmaDevice):
 
         mode = ("history-only" if history_only
                 else f"quick {max_seconds:g}s" if max_seconds else "full")
-        self.info(f"SQC START sent to {name} (session {sid:#010x}, mtu={mtu}, rssi={rssi} @connect, {mode})")
-        self._sqc_debug(name, f"START session={sid:#010x} mtu={mtu} rssi={rssi}@connect mode={mode}")
+        self.info(f"SQC START sent to {name} ({product}, stream {sid:#010x}, mtu={mtu}, "
+                  f"rssi={rssi} @connect, {mode})")
+        self._sqc_debug(name, f"START stream={sid:#010x} {product} mtu={mtu} rssi={rssi}@connect mode={mode}")
         if name in self._sqc_journal_open:   # prior run's marker never closed
             self.journal(f"[SQC] {name} end (superseded)")
         self._sqc_journal_open.add(name)
@@ -1008,24 +1088,35 @@ class MotionSenseHRV(PlasmaDevice):
                 break
         self.info("SQC hybrid: run complete")
 
-    def cancel_sqc_snapshot(self, name):
-        state = self.sqc_state.get(name)
+    def _stop_stream(self, name, session, reason):
+        """Write a STOP command for ``session`` (best effort — inbound writes
+        still work when the TX path is wedged)."""
         peripheral = self.active_devices.get(name)
-        if not state or not state.get("session") or peripheral is None:
-            return f"⛔ {name}: nothing to cancel"
+        if peripheral is None or session is None:
+            return False
         try:
             self._run_async(peripheral.write_gatt_char(
-                NUS_RX_CHAR_UUID, build_command(OP_CANCEL, state["session"].session_id), response=True))
+                NUS_RX_CHAR_UUID, build_command(OP_STOP, session.stream_id), response=True))
+            self._sqc_debug(name, f"  STOP written ({reason})")
+            return True
         except Exception as e:
-            return f"⛔ {name} cancel failed: {e}"
-        return f"✖ {name}: cancel sent"
+            self._sqc_debug(name, f"  STOP write failed ({reason}): {e}")
+            return False
+
+    def cancel_sqc_snapshot(self, name):
+        state = self.sqc_state.get(name)
+        if not state or not state.get("session"):
+            return f"⛔ {name}: nothing to cancel"
+        return (f"✖ {name}: stop sent"
+                if self._stop_stream(name, state["session"], "user cancel")
+                else f"⛔ {name} cancel failed")
 
     def cancel_all_sqc_snapshots(self):
         active = [n for n, s in self.sqc_state.items()
                   if s.get("status") in ("requesting", "receiving")]
         for name in active:
             self.cancel_sqc_snapshot(name)
-        return f"✖ Cancel sent to {len(active)} wristband(s)" if active else "Nothing in progress"
+        return f"✖ Stop sent to {len(active)} wristband(s)" if active else "Nothing in progress"
 
     def _nus_data_handler(self, data, name):
         # runs on the BLE library's callback thread. Two hard rules:
@@ -1037,110 +1128,159 @@ class MotionSenseHRV(PlasmaDevice):
         t_entry = time.perf_counter()
         now = time.time()
         try:
-            state = self.sqc_state.get(name)
-            session = state["session"] if state else None
+            sqc = self.sqc_state.get(name)
+            live = self.live_state.get(name)
+            if sqc and sqc.get("session") and not sqc["session"].is_terminal:
+                self._handle_sqc_notification(sqc, name, bytes(data), now, t_entry)
+            elif live and live.get("session") and not live["session"].is_terminal:
+                self._handle_live_notification(live, name, bytes(data), now, t_entry)
+            else:
+                self._sqc_debug(name, f"rx {len(data)}B ignored (no active stream)")
+        except Exception as e:
+            self.info(f"Error handling NUS data from {name}: {e}")
 
-            diag = state["diag"] if state else None
-            if diag is not None:
-                gap = now - diag["last_t"] if diag["last_t"] else 0.0
-                diag["last_t"] = now
-                diag["count"] += 1
-                diag["bytes"] += len(data)
-                diag["last_gap_s"] = gap
-                diag["max_gap_s"] = max(diag["max_gap_s"], gap)
+    @staticmethod
+    def _diag_rx(diag, data, now):
+        if diag is None:
+            return
+        gap = now - diag["last_t"] if diag["last_t"] else 0.0
+        diag["last_t"] = now
+        diag["count"] += 1
+        diag["bytes"] += len(data)
+        diag["last_gap_s"] = gap
+        diag["max_gap_s"] = max(diag["max_gap_s"], gap)
 
-            if session is None or session.is_terminal:
-                self._sqc_debug(name, f"rx {len(data)}B ignored (session "
-                                      f"{getattr(session, 'state', None)})")
-                return  # unsolicited / late data — ignore
-            state["last_rx_at"] = now
+    @staticmethod
+    def _diag_proc(diag, t_entry, offset):
+        if diag is None:
+            return
+        proc_ms = (time.perf_counter() - t_entry) * 1000.0
+        diag["max_proc_ms"] = max(diag["max_proc_ms"], proc_ms)
+        diag["offset"] = offset
+        diag["log"].append((diag["count"], round(diag["last_gap_s"], 3),
+                            round(proc_ms, 1), offset))
 
-            try:
-                events = session.feed(data)
-            except ProtocolError as e:
-                # a mid-stream violation still leaves whatever was decoded so
-                # far in session.payload — don't throw it away if there's
-                # something to show, just flag why it's incomplete
-                if session is not None and len(session.payload) > 0:
+    def _handle_sqc_notification(self, state, name, data, now, t_entry):
+        session = state["session"]
+        diag = state["diag"]
+        self._diag_rx(diag, data, now)
+        state["last_rx_at"] = now
+
+        try:
+            events = session.feed(data)
+        except ProtocolError as e:
+            if len(session.payload) > 0:
+                state["status"] = "finishing"
+                threading.Thread(target=self._finish_sqc_snapshot, args=(name,),
+                                 kwargs={"partial": True, "warning": f"protocol violation: {e}"},
+                                 daemon=True).start()
+            else:
+                state.update(status="error", error=f"protocol violation: {e}")
+            self._sqc_debug(name, f"  PROTOCOL VIOLATION: {e}")
+            self.info(f"SQC protocol violation from {name}: {e}")
+            return
+
+        for kind, obj in events:
+            if kind == "start_ack":
+                state["status"] = "receiving"
+                self._sqc_debug(name, f"  START_ACK {obj.mode_name} total={obj.planned_total}B")
+                self.info(f"SQC START_ACK from {name}: {state['product']} {obj.mode_name} "
+                          f"total={obj.planned_total}B")
+            elif kind == "data":
+                if diag["first_t"] is None:      # throughput clock starts at first DATA
+                    diag["first_t"] = now
+                    diag["bytes"] = len(data)
+                    diag["count"] = 1
+                self._sqc_debug(
+                    name, f"  DATA off={obj.offset} n={len(obj.data)} "
+                          f"gap={diag['last_gap_s']:.2f}s -> {session.bytes_received}"
+                          f"/{session.bytes_total or '∞'}B {session.phase_name}")
+            elif kind == "result":
+                state.update(status="rejected", error=obj.status_name)
+                self._sqc_debug(name, f"  RESULT {obj.status_name}")
+                self.info(f"SQC rejected for {name}: {obj.status_name}")
+            elif kind == "end":
+                self._sqc_debug(name, f"  END {obj.status_name} -> session {session.state}")
+                if session.state == nus_stream.COMPLETE:
                     state["status"] = "finishing"
                     threading.Thread(target=self._finish_sqc_snapshot, args=(name,),
-                                     kwargs={"partial": True, "warning": f"protocol violation: {e}"},
+                                     daemon=True).start()
+                elif len(session.payload) > 0:
+                    state["status"] = "finishing"
+                    warning = (session.error if session.state == nus_stream.FAILED
+                               else None)
+                    threading.Thread(target=self._finish_sqc_snapshot, args=(name,),
+                                     kwargs={"partial": True, "warning": warning},
                                      daemon=True).start()
                 else:
-                    state.update(status="error", error=f"protocol violation: {e}")
-                self._sqc_debug(name, f"  PROTOCOL VIOLATION: {e}")
-                self.info(f"SQC protocol violation from {name}: {e}")
+                    state.update(status="error",
+                                 error=f"{obj.status_name}: {session.error}")
+                    self.info(f"SQC END non-success for {name}: {session.error}")
+
+        self._diag_proc(diag, t_entry, session.bytes_received)
+
+    def _handle_live_notification(self, state, name, data, now, t_entry):
+        session = state["session"]
+        diag = state["diag"]
+        self._diag_rx(diag, data, now)
+        state["last_rx_at"] = now
+
+        try:
+            events = session.feed(data)
+        except ProtocolError as e:
+            state.update(status="error", error=f"protocol violation: {e}")
+            self._sqc_debug(name, f"  LIVE PROTOCOL VIOLATION: {e}")
+            self._stop_stream(name, session, "protocol violation")
+            return
+
+        for kind, obj in events:
+            if kind == "start_ack":
+                state["status"] = "streaming"
+                self._sqc_debug(name, f"  LIVE START_ACK {obj.mode_name}")
+                self.info(f"live stream running: {name} ({state['product']})")
+            elif kind == "data":
+                if diag["first_t"] is None:
+                    diag["first_t"] = now
+                self._live_ingest(state, name)
+            elif kind == "result":
+                self._sqc_debug(name, f"  LIVE RESULT {obj.status_name}")
+            elif kind == "end":
+                self._sqc_debug(name, f"  LIVE END {obj.status_name}")
+                if session.state == nus_stream.STOPPED:
+                    state["status"] = "stopped"
+                else:
+                    state.update(status="error",
+                                 error=f"{obj.status_name}: {session.error or ''}".strip())
+                self.info(f"live stream ended for {name}: {obj.status_name}")
+
+        r = state["reassembler"]
+        diag["skipped_history_slots"] = getattr(r, "skipped_history_slots", 0)
+        self._diag_proc(diag, t_entry, session.bytes_received)
+
+    def _live_ingest(self, state, name):
+        """Pull whatever the reassembler has completed and append it to the
+        rolling ring buffer (bounded to LIVE_WINDOW_S)."""
+        r = state["reassembler"]
+        ring = state["ring"]
+        fs = state["fs"]
+        cap = int(LIVE_WINDOW_S * fs)
+        if state["product"] == ECG:
+            if r.error and state["status"] == "streaming":
+                state.update(status="error", error=r.error)
+                self._stop_stream(name, state["session"], f"decode: {r.error}")
                 return
-
-            seq = None
-            for kind, obj in events:
-                if kind == "start_ack":
-                    state["device_type"] = obj.device_type
-                    state["status"] = "receiving"
-                    self._sqc_debug(name, f"  START_ACK {obj.device_name_label} name={obj.device_name} "
-                                          f"id={obj.device_id_hex} rate={obj.rate_hz:g}Hz "
-                                          f"hist={obj.history_records} fwd={obj.forward_records} "
-                                          f"commit={obj.git_commit[:10]} tree={obj.git_tree_state_label}")
-                    self.info(
-                        f"SQC START_ACK from {name}: {obj.device_name_label} "
-                        f"{obj.device_name} id={obj.device_id_hex} commit={obj.git_commit[:10]}"
-                    )
-                elif kind == "data":
-                    seq = obj.sequence
-                    if diag is not None:
-                        if diag["first_t"] is None:  # throughput clock starts at first DATA
-                            diag["first_t"] = now
-                            diag["bytes"] = len(data)
-                            diag["count"] = 1
-                        if diag["last_seq"] is not None and seq != diag["last_seq"] + 1:
-                            diag["seq_gaps"] += 1
-                        diag["last_seq"] = seq
-                    self._sqc_debug(
-                        name,
-                        f"  DATA seq={obj.sequence} idx={obj.first_record_index} "
-                        f"n={obj.record_count} phase={'fwd' if obj.phase else 'hist'} "
-                        f"gap={diag['last_gap_s']:.2f}s -> "
-                        f"{session.records_received}/{session.records_total} records "
-                        f"({len(session.payload)}B)")
-                elif kind == "result":
-                    state.update(status="rejected", error=obj.status_name)
-                    self._sqc_debug(name, f"  RESULT {obj.status_name} state={obj.peripheral_state_name}")
-                    self.info(f"SQC rejected for {name}: {obj.status_name} "
-                              f"(state {obj.peripheral_state_name})")
-                elif kind == "end":
-                    self._sqc_debug(
-                        name,
-                        f"  END {obj.status_name} hist={obj.history_records_sent} "
-                        f"fwd={obj.forward_records_captured} bytes={obj.total_bytes_sent} "
-                        f"data_msgs={obj.data_message_count} detail={obj.detail} "
-                        f"-> session {session.state}")
-                    # decode + file I/O off the BLE thread; "finishing" keeps
-                    # the watchdog from treating the brief decode gap as a stall
-                    if session.state == nus_stream.COMPLETE:
-                        state["status"] = "finishing"
-                        threading.Thread(target=self._finish_sqc_snapshot, args=(name,),
-                                         daemon=True).start()
-                    elif len(session.payload) > 0:
-                        # cancelled (cleanly, or with a data-loss note) or
-                        # failed after some data already arrived — still
-                        # worth decoding/plotting, just flagged with why
-                        state["status"] = "finishing"
-                        threading.Thread(target=self._finish_sqc_snapshot, args=(name,),
-                                         kwargs={"partial": True, "warning": session.error},
-                                         daemon=True).start()
-                    else:
-                        # nothing was ever received — genuinely nothing to show
-                        state.update(status="error",
-                                     error=f"{obj.status_name}: {session.error}")
-                        self.info(f"SQC END non-success for {name}: {session.error}")
-
-            if diag is not None:
-                proc_ms = (time.perf_counter() - t_entry) * 1000.0
-                diag["max_proc_ms"] = max(diag["max_proc_ms"], proc_ms)
-                diag["log"].append((diag["count"], round(diag["last_gap_s"], 3),
-                                    round(proc_ms, 1), seq))
-        except Exception as e:
-            self.info(f"Error handling SQC data from {name}: {e}")
+            for blk in r.take():
+                ring["ecg"].extend(blk["ecg"].tolist())
+            while len(ring["ecg"]) > cap:
+                ring["ecg"].popleft()
+        else:
+            raw = r.take()
+            if raw:
+                dec = decode_ppg(raw)
+                for ch in ("ir1", "ir2", "g1", "g2"):
+                    ring[ch].extend(dec[ch].tolist())
+                    while len(ring[ch]) > cap:
+                        ring[ch].popleft()
 
     # ── async debug sink + no-progress watchdog ─────────────────────────────
     # class-level so a single printer / monitor thread serves every instance
@@ -1180,8 +1320,8 @@ class MotionSenseHRV(PlasmaDevice):
         except queue.Full:
             pass  # never block the BLE thread on a slow console
 
-    def _sqc_diag_summary(self, name):
-        d = self.sqc_state.get(name, {}).get("diag")
+    def _sqc_diag_summary(self, name, store=None):
+        d = (store or self.sqc_state).get(name, {}).get("diag")
         if not d:
             return {}
         dur = (d["last_t"] - d["first_t"]) if d["first_t"] and d["last_t"] else 0.0
@@ -1196,7 +1336,7 @@ class MotionSenseHRV(PlasmaDevice):
             "last_gap_s": round(d["last_gap_s"], 2),
             "max_gap_s": round(d["max_gap_s"], 2),
             "max_proc_ms": round(d["max_proc_ms"], 1),
-            "seq_gaps": d["seq_gaps"],
+            "skipped_history_slots": d.get("skipped_history_slots", 0),
             "recoveries": d["recoveries"],
             "mtu": d["mtu"],
             "rssi": d["rssi"],
@@ -1247,6 +1387,21 @@ class MotionSenseHRV(PlasmaDevice):
                 except Exception as e:
                     self.info(f"SQC watchdog error for {name}: {e}")
 
+            for name, state in list(self.live_state.items()):
+                if state.get("status") != "streaming":
+                    continue
+                try:
+                    last = state.get("last_rx_at") or state.get("requested_at") or now
+                    if now - last > SQC_NOPROGRESS_TIMEOUT_S:
+                        self._sqc_debug(name, f"live stream stalled ({now - last:.1f}s) — STOP")
+                        self.info(f"live stream {name} stalled — stopping")
+                        state.update(status="error",
+                                     error=f"stalled (no data for {now - last:.0f}s)")
+                        self._stop_stream(name, state.get("session"), "watchdog stall")
+                        self._reconnect_peripheral(name, "live stall")
+                except Exception as e:
+                    self.info(f"live watchdog error for {name}: {e}")
+
             if self.auto_reconnect and now - self._last_reconnect_sweep > self.RECONNECT_SWEEP_S:
                 self._last_reconnect_sweep = now
                 for name, p in list(self.active_devices.items()):
@@ -1263,47 +1418,35 @@ class MotionSenseHRV(PlasmaDevice):
         if session is None or session.start_ack is None:
             return False
 
-        # (2) grace finalize — CANCEL sent but the device never answered with END
+        # (2) grace finalize — STOP sent but the device never answered with END
         if state.get("early_cancel_sent"):
             if now - (state.get("early_cancel_at") or now) > SQC_EARLY_CANCEL_GRACE_S:
-                self._sqc_debug(name, "  quick: no END after CANCEL — finalizing partial locally")
-                session.state = nus_stream.CANCELLED
-                session.error = "quick mode: local finalize (no END from device)"
+                self._sqc_debug(name, "  quick: no END after STOP — finalizing partial locally")
+                session.state = nus_stream.STOPPED
                 state["status"] = "finishing"
                 threading.Thread(target=self._finish_sqc_snapshot, args=(name,),
-                                 kwargs={"partial": True}, daemon=True).start()
+                                 kwargs={"partial": True,
+                                         "warning": "quick mode: local finalize (no END from device)"},
+                                 daemon=True).start()
                 self._reconnect_peripheral(name, "quick-mode grace finalize")
             return True
 
-        # (1) early terminate — enough signal has arrived
+        # (1) early terminate — enough of the stream has arrived
         if state.get("history_only"):
-            target = session.start_ack.history_records
+            target = HISTORY_BYTES
         elif state.get("max_seconds"):
-            rate = session.start_ack.rate_hz or PROFILE[session.device_type]["rate_hz"]
-            target = state["max_seconds"] * rate
+            bps = PROFILE[state["product"]]["bytes_per_second"]
+            target = HISTORY_BYTES + state["max_seconds"] * bps
         else:
             return False
 
-        if session.records_received < target:
+        if session.bytes_received < target:
             return False
 
-        peripheral = self.active_devices.get(name)
-        if peripheral is None:
-            return False
-        try:
-            self._run_async(peripheral.write_gatt_char(
-                NUS_RX_CHAR_UUID, build_command(OP_CANCEL, session.session_id), response=True))
+        if self._stop_stream(name, session, "quick mode"):
             state["early_cancel_sent"] = True
             state["early_cancel_at"] = now
-            self._sqc_debug(
-                name,
-                f"  quick: {session.records_received} records ≥ target {target:.0f} "
-                f"({'history-only' if state.get('history_only') else str(state.get('max_seconds')) + 's'})"
-                f" — CANCEL sent")
-            self.info(f"SQC quick mode: {name} CANCEL sent after "
-                      f"{session.records_received} records")
-        except Exception as e:
-            self._sqc_debug(name, f"  quick: CANCEL write failed: {e}")
+            self.info(f"SQC quick mode: {name} STOP sent after {session.bytes_received}B")
         return True
 
     def _reconnect_peripheral(self, name, reason):
@@ -1368,7 +1511,7 @@ class MotionSenseHRV(PlasmaDevice):
             self.memo[name].sts = "🔄 reconnected"
 
     def _sqc_recover(self, name, reason):
-        """CANCEL a wedged stream, then disconnect + reconnect. Runs on the
+        """STOP a wedged stream, then disconnect + reconnect. Runs on the
         watchdog thread (never the BLE callback thread)."""
         state = self.sqc_state.get(name)
         if not state or state.get("status") != "receiving":
@@ -1377,7 +1520,7 @@ class MotionSenseHRV(PlasmaDevice):
         diag = state.get("diag") or {}
         diag["recoveries"] = diag.get("recoveries", 0) + 1
         summary = self._sqc_diag_summary(name)
-        self.info(f"SQC watchdog: {name} stalled ({reason}) — CANCEL + reconnect. diag={summary}")
+        self.info(f"SQC watchdog: {name} stalled ({reason}) — STOP + reconnect. diag={summary}")
         self._sqc_debug(name, f"WATCHDOG stall: {reason}; diag={summary}")
         state.update(status="error",
                      error=f"stalled ({reason}) — reconnected, press Request to retry")
@@ -1386,77 +1529,80 @@ class MotionSenseHRV(PlasmaDevice):
         if name in self.memo:
             self.memo[name].sts = "⚠️ stream stalled"
 
-        peripheral = self.active_devices.get(name)
-        if peripheral is None:
-            return
-        # inbound writes still work when TX is wedged, so try CANCEL first —
-        # it lets the firmware tear down its stream thread and free TX slots
-        if session is not None:
-            try:
-                self._run_async(peripheral.write_gatt_char(
-                    NUS_RX_CHAR_UUID, build_command(OP_CANCEL, session.session_id), response=True))
-                self._sqc_debug(name, "  CANCEL written")
-            except Exception as e:
-                self._sqc_debug(name, f"  CANCEL write failed: {e}")
+        # inbound writes still work when TX is wedged, so try STOP first — it
+        # lets the firmware tear down its stream and free TX slots
+        self._stop_stream(name, session, f"stall: {reason}")
         self._reconnect_peripheral(name, f"stall: {reason}")
 
-    _NON_CHANNEL_KEYS = ("fs", "tick", "rtc_tick", "crc_ok_frac", "oob_frac")
+    def _sqc_channels(self, product, decoded):
+        if product == PPG:
+            return {k: decoded[k] for k in ("ir1", "ir2", "g1", "g2")}
+        return {"ecg": decoded["ecg"]}
 
     def _finish_sqc_snapshot(self, name, partial=False, warning=None):
         state = self.sqc_state[name]
         session = state["session"]
+        product = state["product"]
         payload = bytes(session.payload)
-        fs = PROFILE[session.device_type]["rate_hz"]
-        secs = round(session.records_received / fs, 2) if fs else 0.0
+        fs = PROFILE[product]["sample_rate"]
 
         provenance = session.provenance(
             requested_at=self._iso(state["requested_at"]),
             completed_at=self._iso(time.time()),
             host_version=__version__,
         )
-        suffix = ""
-        if partial:
-            suffix = f"_p{secs:.0f}s"
-            provenance.update(
-                partial=True,
-                seconds_captured=secs,
-                records_captured=session.records_received,
-                phase_at_cancel=session.phase_name,
-                requested_max_seconds=state.get("max_seconds"),
-                history_only=state.get("history_only", False),
-            )
-            state["partial"] = True
-            state["quick_seconds"] = secs
-        if warning:
-            # non-blocking note on why this is incomplete/suspect — shown
-            # alongside the plotted result, never withholds it
-            provenance["warning"] = warning
-            state["warning"] = warning
 
         # save the raw payload + sidecar FIRST — a decode hiccup must never lose
         # a captured payload
+        suffix_secs = round(session.bytes_received / PROFILE[product]["bytes_per_second"], 1)
+        suffix = f"_p{suffix_secs:.0f}s" if partial else ""
         try:
-            state["saved_path"] = self._save_sqc_capture(name, session, payload, provenance,
+            state["saved_path"] = self._save_sqc_capture(name, product, payload, provenance,
                                                          suffix=suffix)
             provenance["raw_file"] = os.path.basename(state["saved_path"])
         except Exception as e:
             self.info(f"SQC save failed for {name}: {e}")
 
         try:
-            decoded = decode_ppg(payload) if session.device_type == DEVICE_PPG else decode_ecg(payload)
-            channels = {k: v for k, v in decoded.items() if k not in self._NON_CHANNEL_KEYS}
-            tick = decoded.get("tick", decoded.get("rtc_tick"))
-            state["decoded"] = {"channels": channels, "fs": decoded["fs"], "tick": tick}
-            for k in ("crc_ok_frac", "oob_frac"):
-                if k in decoded:
-                    provenance[k] = round(float(decoded[k]), 4)
+            decoded = decode_ppg(payload) if product == PPG else decode_ecg(payload)
+            channels = self._sqc_channels(product, decoded)
+            n = len(next(iter(channels.values())))
+            secs = round(n / fs, 2) if fs else 0.0
+
+            boundary = (decoded.get("history_boundary_sample")
+                        if product == ECG else HISTORY_BYTES // 16)
+            state["decoded"] = {"channels": channels, "fs": decoded["fs"],
+                                "history_boundary_sample": boundary}
+
+            if product == PPG:
+                provenance["oob_frac"] = round(float(decoded["oob_frac"]), 4)
+            else:
+                provenance.update(
+                    blocks_valid=decoded["blocks"],
+                    skipped_history_slots=decoded["skipped_history_slots"],
+                    decode_error=decoded["error"],
+                )
+                if decoded["error"] and not warning:
+                    warning = f"ECB2 decode: {decoded['error']}"
+
+            if partial:
+                provenance.update(partial=True, seconds_captured=secs,
+                                  bytes_captured=session.bytes_received,
+                                  phase_at_stop=session.phase_name,
+                                  requested_max_seconds=state.get("max_seconds"),
+                                  history_only=state.get("history_only", False))
+                state["partial"] = True
+                state["quick_seconds"] = secs
+            if warning:
+                provenance["warning"] = warning
+                state["warning"] = warning
+
             state["provenance"] = provenance
             state["status"] = "ready"
-
-            n = len(next(iter(channels.values())))
             self.info(f"SQC {'partial ' if partial else ''}snapshot ready for {name}: {n} "
-                      f"{PROFILE[session.device_type]['name']} records ({secs}s) → {state['saved_path']}")
+                      f"{product} samples ({secs}s) → {state['saved_path']}")
         except Exception as e:
+            provenance["warning"] = warning
             state["provenance"] = provenance
             state.update(status="error", error=f"decode failed (raw saved): {e}")
             self.info(f"SQC decode failed for {name}: {e}")
@@ -1467,7 +1613,7 @@ class MotionSenseHRV(PlasmaDevice):
     def _iso(epoch):
         return datetime.datetime.fromtimestamp(epoch).isoformat(timespec="seconds")
 
-    def _save_sqc_capture(self, name, session, payload, provenance, suffix=""):
+    def _save_sqc_capture(self, name, product, payload, provenance, suffix=""):
         """Persist the raw sensor payload + a provenance sidecar. Goes to the
         active session log dir when a recording is running, else data/sqc_snapshots/.
         `suffix` marks partial (quick-mode) captures on disk, e.g. "_p5s"."""
@@ -1476,7 +1622,7 @@ class MotionSenseHRV(PlasmaDevice):
         os.makedirs(base, exist_ok=True)
 
         safe = str(name).replace(":", "-").replace(" ", "_")
-        ext = ".ppg" if session.device_type == DEVICE_PPG else ".ecg"
+        ext = ".ppg" if product == PPG else ".ecg"
         stem = f"{safe}_{ts}{suffix}"
         raw_path = os.path.join(base, f"{stem}{ext}")
         with open(raw_path, "wb") as f:
@@ -1488,8 +1634,8 @@ class MotionSenseHRV(PlasmaDevice):
     def get_sqc_status(self, name):
         state = self.sqc_state.get(name)
         if state is None:
-            return {"status": "unavailable", "phase": None, "records_received": 0,
-                    "records_total": 0, "provenance": None, "saved_path": None,
+            return {"status": "unavailable", "phase": None, "bytes_received": 0,
+                    "bytes_total": None, "provenance": None, "saved_path": None,
                     "error": None, "diag": {}}
 
         session = state["session"]
@@ -1500,14 +1646,12 @@ class MotionSenseHRV(PlasmaDevice):
             state.update(status="error",
                          error=f"no START_ACK within {HANDSHAKE_TIMEOUT_S:.0f}s "
                                "(device recording? in BLE range?)")
-        # stalls during "receiving" are handled by _sqc_watchdog_loop
-        # (CANCEL + disconnect + reconnect), not here.
 
         return {
             "status": state["status"],
             "phase": session.phase_name if session else None,
-            "records_received": session.records_received if session else 0,
-            "records_total": session.records_total if session else 0,
+            "bytes_received": session.bytes_received if session else 0,
+            "bytes_total": session.bytes_total if session else None,
             "provenance": state["provenance"],
             "saved_path": state["saved_path"],
             "error": state["error"],
@@ -1519,18 +1663,15 @@ class MotionSenseHRV(PlasmaDevice):
         if state is None or state["status"] != "ready" or not state["decoded"]:
             return None
         d = state["decoded"]
-        session = state["session"]
         return {
-            "device_type": PROFILE[state["device_type"]]["name"],
+            "device_type": PROFILE[state["product"]]["name"],
             "channels": d["channels"],
             "fs": d["fs"],
-            "tick": d["tick"],
             "provenance": state["provenance"],
-            "partial": False,               # not a live preview
-            "quick_seconds": state.get("quick_seconds"),  # set if cut short
-            "warning": state.get("warning"),  # non-blocking note, if any
-            # history-record count, for drawing the history/forward boundary
-            "history_records": session.start_ack.history_records if session and session.start_ack else None,
+            "partial": bool(state.get("partial")),
+            "quick_seconds": state.get("quick_seconds"),
+            "warning": state.get("warning"),
+            "history_boundary_sample": d.get("history_boundary_sample"),
         }
 
     # min seconds between live-preview re-decodes (the transfer is slow, so a
@@ -1545,7 +1686,8 @@ class MotionSenseHRV(PlasmaDevice):
         if state is None or state["status"] != "receiving":
             return None
         session = state["session"]
-        if session is None or session.device_type is None or len(session.payload) == 0:
+        product = state["product"]
+        if session is None or product is None or len(session.payload) == 0:
             return None
 
         now = time.time()
@@ -1557,23 +1699,121 @@ class MotionSenseHRV(PlasmaDevice):
 
         try:
             payload = bytes(session.payload)
-            decoded = decode_ppg(payload) if session.device_type == DEVICE_PPG else decode_ecg(payload)
+            decoded = decode_ppg(payload) if product == PPG else decode_ecg(payload)
         except Exception as e:
             self._sqc_debug(name, f"  preview decode failed: {e}")
             return cached["result"] if cached else None
 
-        channels = {k: v for k, v in decoded.items() if k not in self._NON_CHANNEL_KEYS}
+        boundary = (decoded.get("history_boundary_sample")
+                    if product == ECG else HISTORY_BYTES // 16)
         result = {
-            "device_type": PROFILE[session.device_type]["name"],
-            "channels": channels,
+            "device_type": PROFILE[product]["name"],
+            "channels": self._sqc_channels(product, decoded),
             "fs": decoded["fs"],
-            "tick": decoded.get("tick", decoded.get("rtc_tick")),
             "provenance": None,
             "partial": True,
-            "history_records": session.start_ack.history_records if session.start_ack else None,
+            "streaming": True,     # still coming in — the plot titles it "receiving…"
+            "history_boundary_sample": boundary,
         }
         state["preview"] = {"result": result, "_len": len(session.payload), "_at": now}
         return result
+
+    # ── live INFINITY stream (protocol + decode + in-memory plot only) ──────
+
+    def start_live_stream(self, name):
+        """Begin a continuous INFINITY stream — decoded into an in-memory
+        rolling buffer for the live plot. Not written to disk or LSL (yet)."""
+        peripheral = self.active_devices.get(name)
+        if peripheral is None or not peripheral.is_connected:
+            return f"⛔ {name} not connected"
+        product = self._sqc_product(name)
+        if product is None:
+            return f"⛔ {name}: unknown product (not an MSense4ECG / MSense4PPG?)"
+
+        sqc = self.sqc_state.get(name)
+        if sqc and sqc["status"] in ("requesting", "receiving", "finishing"):
+            return f"⏳ {name} snapshot in progress — wait for it to finish"
+        live = self.live_state.setdefault(name, self._new_live_state())
+        if live["status"] in ("requesting", "streaming", "stopping"):
+            return f"⏳ {name} live stream already running"
+
+        mtu, mtu_err = self._check_stream_mtu(peripheral, name)
+        if mtu_err:
+            live.update(status="error", error=mtu_err)
+            return f"⛔ {name}: {mtu_err}"
+
+        self._ensure_sqc_threads()
+        fs = PROFILE[product]["sample_rate"]
+        reassembler = self._new_reassembler(product)
+        sid = new_stream_id()
+        diag = self._new_sqc_diag()
+        diag.update(mtu=mtu, rssi=self._connect_rssi.get(name))
+        chans = PROFILE[product]["channels"]
+        live.update(
+            status="requesting",
+            session=StreamSession(sid, product=product, expect_mode=MODE_INFINITY,
+                                  on_span=reassembler.feed),
+            reassembler=reassembler, product=product, fs=fs,
+            requested_at=time.time(), last_rx_at=time.time(),
+            ring={ch: deque(maxlen=int(LIVE_WINDOW_S * fs)) for ch in chans},
+            error=None, diag=diag,
+        )
+        try:
+            self._run_async(peripheral.write_gatt_char(
+                NUS_RX_CHAR_UUID, build_command(OP_START_INFINITY, sid), response=True))
+        except Exception as e:
+            live.update(status="error", error=f"request failed: {e}")
+            return f"⛔ {name} live start failed: {e}"
+        self.info(f"live stream START_INFINITY sent to {name} ({product}, stream {sid:#010x})")
+        self._sqc_debug(name, f"LIVE START_INFINITY stream={sid:#010x} {product}")
+        return f"📡 {name}: live {product} stream starting…"
+
+    def stop_live_stream(self, name):
+        live = self.live_state.get(name)
+        if not live or not live.get("session"):
+            return f"⛔ {name}: no live stream"
+        live["status"] = "stopping"
+        self._stop_stream(name, live["session"], "user stop")
+        return f"✖ {name}: live stream stop sent"
+
+    def stop_all_live_streams(self):
+        active = [n for n, s in self.live_state.items()
+                  if s.get("status") in ("requesting", "streaming")]
+        for name in active:
+            self.stop_live_stream(name)
+        return f"✖ Stop sent to {len(active)} live stream(s)" if active else "No live stream running"
+
+    def get_live_stream_status(self, name):
+        live = self.live_state.get(name)
+        if live is None:
+            return {"status": "idle", "error": None, "diag": {}}
+        return {
+            "status": live["status"],
+            "product": live.get("product"),
+            "error": live.get("error"),
+            "diag": self._sqc_diag_summary(name, store=self.live_state),
+        }
+
+    def get_live_stream_preview(self, name):
+        """Rolling-buffer snapshot for the live plot — same shape as
+        get_sqc_result (partial=True). None if nothing plottable yet."""
+        live = self.live_state.get(name)
+        if live is None or live["status"] not in ("streaming", "stopping", "stopped", "error"):
+            return None
+        ring = live.get("ring") or {}
+        channels = {ch: np.asarray(buf, dtype=float) for ch, buf in ring.items() if len(buf)}
+        if not channels:
+            return None
+        return {
+            "device_type": PROFILE[live["product"]]["name"],
+            "channels": channels,
+            "fs": live["fs"],
+            "provenance": None,
+            "partial": True,
+            "streaming": live["status"] in ("streaming", "stopping"),
+            "live": True,
+            "history_boundary_sample": None,   # a continuous stream has no boundary line
+        }
 
 
 class MsenseOutlet(StreamOutlet):

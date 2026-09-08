@@ -1,5 +1,5 @@
-"""Builders for NUS bounded-stream protocol messages — the inverse of the
-parsers in :mod:`plasma.devices.msense.nus_stream`.
+"""Builders for MSense sensor-stream **v0** protocol messages — the inverse of
+the parsers in :mod:`plasma.devices.msense.nus_stream`.
 
 Pure byte assembly, no BLE and no device state. Two consumers:
 
@@ -10,121 +10,94 @@ Pure byte assembly, no BLE and no device state. Two consumers:
 Keeping the wire format in one shipped module (rather than redefining it in the
 test) means the simulator and the tests can never drift from each other.
 """
-import struct
-
 from .nus_stream import (
-    MAGIC, PROTOCOL_VERSION, MSG_DATA, MSG_END, PROFILE,
-    PHASE_HISTORY, PHASE_FORWARD, TOTAL_SENSOR_BYTES,
+    MAGIC, PROTOCOL_VERSION, MSG_START_ACK, MSG_DATA, MSG_END, MSG_RESULT,
+    MODE_FINITE, MODE_INFINITY, HISTORY_UNITS, FINITE_TOTAL_BYTES,
+    END_SUCCESS, DATA_OFFSET_LEN, HEADER_LEN, ATT_MTU_MIN,
 )
 
 __all__ = [
-    "message", "start_ack_payload", "data_messages", "end_payload",
-    "full_sequence",
+    "message", "start_ack_payload", "data_message", "data_stream",
+    "end_message", "result_message", "finite_sequence", "infinity_chunks",
 ]
 
+# ATT overhead (3) + envelope (12) + DATA offset prefix (8) = 23 non-sensor
+# bytes per notification.
+_DATA_NONSENSOR = 3 + HEADER_LEN + DATA_OFFSET_LEN
 
-def message(msg_type, payload, session_id):
+
+def message(msg_type, payload, stream_id):
     """Frame one TX notification: 12-byte header + payload."""
     return (
         MAGIC
         + bytes([PROTOCOL_VERSION, msg_type])
-        + int(session_id).to_bytes(4, "little")
+        + int(stream_id).to_bytes(4, "little")
         + len(payload).to_bytes(2, "little")
         + b"\x00\x00"
         + bytes(payload)
     )
 
 
-def start_ack_payload(device_type, *, name=b"MSense4X-SIM", commit=b"a" * 40,
-                      tree_state=0, reserved=b"\x00" * 6, history=None,
-                      forward=None, total=None, override=None):
-    """96-byte START_ACK payload for ``device_type`` (DEVICE_PPG / DEVICE_ECG).
-
-    ``history`` / ``forward`` / ``total`` default to the PROFILE geometry;
-    ``override`` is a dict of raw field values for fuzzing (used by the tests).
-    """
-    p = PROFILE[device_type]
-    history = p["history_records"] if history is None else history
-    forward = p["forward_records"] if forward is None else forward
-    total = TOTAL_SENSOR_BYTES if total is None else total
-    fields = dict(
-        device_type=device_type, fmt_ver=1, record_size=p["record_size"],
-        rate_num=int(p["rate_hz"]), rate_den=1,
-        history=history, forward=forward, total=total,
-    )
-    if override:
-        fields.update(override)
-    body = struct.pack(
-        "<BBHIIIII", fields["device_type"], fields["fmt_ver"], fields["record_size"],
-        fields["rate_num"], fields["rate_den"], fields["history"], fields["forward"],
-        fields["total"],
-    )
-    body += b"\xde\xad\xbe\xef\x01\x02\x03\x04"          # 8-byte device id
-    body += bytes([len(name)]) + name + b"\x00" * (16 - len(name))
-    body += commit + bytes([tree_state]) + reserved
-    assert len(body) == 96, len(body)
+def start_ack_payload(mode=MODE_FINITE, *, planned_total=None,
+                      history_units=HISTORY_UNITS, reserved=b"\x00" * 6):
+    """16-byte START_ACK payload. ``planned_total`` defaults to
+    ``FINITE_TOTAL_BYTES`` for FINITE and ``0`` for INFINITY."""
+    if planned_total is None:
+        planned_total = FINITE_TOTAL_BYTES if mode == MODE_FINITE else 0
+    body = bytes([mode, history_units]) + bytes(reserved) + planned_total.to_bytes(8, "little")
+    assert len(body) == 16, len(body)
     return body
 
 
-def data_messages(device_type, chunk_records, *, session_id, records=None,
-                  history=None, forward=None):
-    """A full valid history+forward DATA sequence, ``chunk_records`` records per
-    message. Returns ``(framed_messages, message_count)``.
-
-    ``records`` — the concatenated (history+forward) * record_size payload
-    bytes; defaults to ``0x5a`` filler when the caller doesn't care about the
-    decoded signal.
-    """
-    p = PROFILE[device_type]
-    rs = p["record_size"]
-    history = p["history_records"] if history is None else history
-    forward = p["forward_records"] if forward is None else forward
-    total = history + forward
-    if records is None:
-        records = b"\x5a" * (total * rs)
-
-    msgs, seq, idx = [], 0, 0
-    while idx < total:
-        phase = PHASE_HISTORY if idx < history else PHASE_FORWARD
-        room = (history - idx) if phase == PHASE_HISTORY else (total - idx)
-        count = min(chunk_records, room)
-        prefix = struct.pack("<IIHBB", seq, idx, count, phase, 0)
-        chunk = records[idx * rs:(idx + count) * rs]
-        msgs.append(message(MSG_DATA, prefix + chunk, session_id))
-        seq += 1
-        idx += count
-    return msgs, seq
+def data_message(offset, sensor_bytes, stream_id):
+    """One DATA notification: uint64 offset + sensor bytes."""
+    payload = int(offset).to_bytes(DATA_OFFSET_LEN, "little") + bytes(sensor_bytes)
+    return message(MSG_DATA, payload, stream_id)
 
 
-def end_payload(device_type, data_count, *, status=0, detail=0, override=None,
-                history=None, forward=None):
-    """24-byte END payload. Defaults describe a clean SUCCESS of the full
-    PROFILE geometry; ``override`` fuzzes raw fields."""
-    p = PROFILE[device_type]
-    history = p["history_records"] if history is None else history
-    forward = p["forward_records"] if forward is None else forward
-    fields = dict(
-        status=status, state=2, history=history, forward=forward,
-        total=(history + forward) * p["record_size"],
-        data_count=data_count, detail=detail,
-    )
-    if override:
-        fields.update(override)
-    return struct.pack(
-        "<HBBIIIIi", fields["status"], fields["state"], 0, fields["history"],
-        fields["forward"], fields["total"], fields["data_count"], fields["detail"],
-    )
+def data_stream(sensor_bytes, *, stream_id, start_offset=0, mtu=247,
+                fragment=None):
+    """Split ``sensor_bytes`` into a list of DATA notifications, each carrying
+    at most ``fragment`` sensor bytes (default: the ATT-MTU limit
+    ``mtu - 23``)."""
+    if fragment is None:
+        fragment = max(1, min(mtu, ATT_MTU_MIN if mtu < ATT_MTU_MIN else mtu) - _DATA_NONSENSOR)
+    msgs = []
+    off = start_offset
+    view = memoryview(bytes(sensor_bytes))
+    for i in range(0, len(view), fragment):
+        chunk = view[i:i + fragment]
+        msgs.append(data_message(off, chunk, stream_id))
+        off += len(chunk)
+    return msgs
 
 
-def full_sequence(device_type, session_id, *, records=None, chunk_records=256):
-    """Every framed notification for a clean capture: START_ACK, the DATA burst,
-    then a SUCCESS END. ``records`` is the decoded-signal payload (see
-    ``data_messages``)."""
-    from .nus_stream import MSG_START_ACK
+def end_message(status, stream_id):
+    return message(MSG_END, int(status).to_bytes(2, "little"), stream_id)
 
-    frames = [message(MSG_START_ACK, start_ack_payload(device_type), session_id)]
-    data, n = data_messages(device_type, chunk_records,
-                            session_id=session_id, records=records)
-    frames.extend(data)
-    frames.append(message(MSG_END, end_payload(device_type, n), session_id))
+
+def result_message(status, stream_id):
+    return message(MSG_RESULT, int(status).to_bytes(2, "little"), stream_id)
+
+
+def finite_sequence(stream_id, sensor_bytes, *, mtu=247, status=END_SUCCESS):
+    """Every framed notification for a clean FINITE capture: START_ACK, the
+    DATA burst, then an END. ``sensor_bytes`` is the full history+future
+    payload (exactly ``FINITE_TOTAL_BYTES`` for a real SUCCESS)."""
+    frames = [message(MSG_START_ACK, start_ack_payload(MODE_FINITE), stream_id)]
+    frames.extend(data_stream(sensor_bytes, stream_id=stream_id, mtu=mtu))
+    frames.append(end_message(status, stream_id))
     return frames
+
+
+def infinity_chunks(stream_id, chunk_iter, *, mtu=247):
+    """Generator of framed notifications for an INFINITY capture: one
+    START_ACK, then DATA notifications for each bytes object yielded by
+    ``chunk_iter``. The caller decides when to stop (and may append an
+    ``end_message`` afterwards)."""
+    yield message(MSG_START_ACK, start_ack_payload(MODE_INFINITY), stream_id)
+    off = 0
+    for chunk in chunk_iter:
+        for m in data_stream(chunk, stream_id=stream_id, start_offset=off, mtu=mtu):
+            yield m
+        off += len(chunk)

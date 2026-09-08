@@ -49,11 +49,14 @@ def build_sqc_tab(ip):
             btn_refresh_sqc = gr.Button("🔄 Refresh")
             btn_cancel_sqc = gr.Button("✖ Cancel all")
         with gr.Row():
+            btn_live_start = gr.Button("▶️ Start live stream (all)")
+            btn_live_stop = gr.Button("⏹️ Stop live stream (all)")
+        with gr.Row():
             sqc_stream_mode = gr.Radio(
-                            choices=["Sequential", "Parallel", "Hybrid"], value="Sequential",
+                            choices=["Parallel", "Sequential", "Hybrid"], value="Parallel",
                             label="Streaming mode")
             sqc_mode = gr.Radio(
-                choices=["All", "History Only", "Custom"], value="All",
+                choices=["All", "History Only", "Custom"], value="Custom",
                 label="Capture mode")
             sqc_max_s = gr.Number(
                 value=5, precision=1, minimum=0,
@@ -102,6 +105,19 @@ def build_sqc_tab(ip):
                 return "⛔ MSense device not initialized"
             return dev.cancel_all_sqc_snapshots()
 
+        def _live_start():
+            dev = _msense_device(ip)
+            if dev is None:
+                return "⛔ MSense device not initialized"
+            msgs = [dev.start_live_stream(n) for n in dev.get_sqc_devices()]
+            return "\n".join(msgs) or "⛔ No NUS-capable wristbands connected"
+
+        def _live_stop():
+            dev = _msense_device(ip)
+            if dev is None:
+                return "⛔ MSense device not initialized"
+            return dev.stop_all_live_streams()
+
         def _on_mode_change(mode):
             return gr.update(interactive=(mode == "Custom"))
 
@@ -114,6 +130,8 @@ def build_sqc_tab(ip):
                               outputs=[sqc_status, sqc_plot])
         btn_request_sqc.click(_request, inputs=[sqc_mode, sqc_max_s, sqc_stream_mode], outputs=sqc_status)
         btn_cancel_sqc.click(_cancel, outputs=sqc_status)
+        btn_live_start.click(_live_start, outputs=sqc_status)
+        btn_live_stop.click(_live_stop, outputs=sqc_status)
         sqc_mode.change(_on_mode_change, inputs=sqc_mode, outputs=sqc_max_s)
         sqc_timer.tick(fn=_update_with_opts, inputs=plot_opt_inputs,
                        outputs=[sqc_status, sqc_plot])
@@ -128,12 +146,16 @@ def build_sqc_tab(ip):
                     "MSense device on the **Session dashboard** tab first, then Refresh here. Each "
                     "capture is saved to disk (session log dir if a recording is running, else "
                     "`data/sqc_snapshots/`).\n\n"
-                    "The device always streams a fixed 96 KiB (a pre-buffered *history* window then a "
-                    "*forward* window it acquires live — ~16 s total ECG / ~24 s PPG). Pick a capture "
-                    "mode: **All** takes the full stream; **History Only** sends CANCEL at the "
-                    "history→forward boundary (~5 s ECG / ~8 s PPG), skipping the live-acquisition wait; "
-                    "**Custom** sends CANCEL once the given *N* seconds have arrived and keeps the "
-                    "partial.\n\n"
+                    "A FINITE snapshot streams a fixed **128 KiB** — a 32 KiB pre-buffered "
+                    "*history* window (~21 s ECG / 8 s PPG) then a 96 KiB *forward* window it "
+                    "acquires live (~64 s ECG / 24 s PPG). Pick a capture mode: **All** takes the "
+                    "full stream; **History Only** sends STOP once the 32 KiB history is through, "
+                    "skipping the live-acquisition wait; **Custom** sends STOP once the given *N* "
+                    "seconds of forward data have arrived and keeps the validated prefix (the "
+                    "1–4095 B partial tail is discarded).\n\n"
+                    "**Start live stream** opens a continuous (INFINITY) ECG/PPG stream decoded "
+                    "into a rolling in-memory plot — handy for a longer contact check. It is "
+                    "**not** written to disk or LSL/XDF in this build.\n\n"
                     "Pick a **streaming mode** for how wristbands are scheduled: **Sequential** "
                     "(default) — one wristband fully finishes before the next starts; safest, since the "
                     "Mac's single BLE radio is time-sliced across all connections and a burst transfer "
@@ -180,8 +202,8 @@ def _update_sqc(ip, ppg_mode="Filtered", ppg_y_min=-1000, ppg_y_max=1000, show_h
              f"gap {d['last_gap_s']}s (max {d['max_gap_s']}s), proc≤{d['max_proc_ms']}ms")
         if d.get("mtu") is not None or d.get("rssi") is not None:
             s += f", mtu {d.get('mtu')}, rssi {d.get('rssi')}"
-        if d.get("seq_gaps"):
-            s += f", ⚠️{d['seq_gaps']} seq gaps"
+        if d.get("skipped_history_slots"):
+            s += f", {d['skipped_history_slots']} zero-history slot(s)"
         if d.get("recoveries"):
             s += f", 🔄{d['recoveries']}× reconnect"
         return s
@@ -195,13 +217,13 @@ def _update_sqc(ip, ppg_mode="Filtered", ppg_y_min=-1000, ppg_y_max=1000, show_h
             lines.append(f"- **{disp}** — idle")
             continue
         if st in ("requesting", "receiving"):
-            total = status["records_total"] or "?"
-            pct = ""
-            if isinstance(total, int) and total:
-                pct = f" ({100 * status['records_received'] // total}%)"
+            total = status.get("bytes_total")
+            got = status.get("bytes_received", 0)
+            pct = f" ({100 * got // total}%)" if total else ""
+            span = f"{_fmt_bytes(got)}/{_fmt_bytes(total)}" if total else f"{_fmt_bytes(got)}"
             lines.append(
                 f"- **{disp}** — 📡 {st} ({status['phase']}) "
-                f"{status['records_received']}/{total} records{pct}{_diag_str(status)}"
+                f"{span}{pct}{_diag_str(status)}"
             )
             preview = dev.get_sqc_preview(name)
             if preview is not None:
@@ -223,23 +245,48 @@ def _update_sqc(ip, ppg_mode="Filtered", ppg_y_min=-1000, ppg_y_max=1000, show_h
             continue
         results.append((disp, result))          # always plot a decoded result
         prov = result.get("provenance") or {}
-        dirty = " ⚠️dirty" if prov.get("git_tree_state") == "dirty" else ""
         quick = ""
         if result.get("quick_seconds"):
-            ph = prov.get("phase_at_cancel", "")
+            ph = prov.get("phase_at_stop", "")
             quick = f" · ✂ partial {result['quick_seconds']:g}s{' (' + ph + ')' if ph else ''}"
         icon = "⚠️" if result.get("warning") else "✅"
         warn = f" — _{result['warning']}_" if result.get("warning") else ""
+        extra = ""
+        if prov.get("blocks_valid") is not None:
+            extra += f" · {prov['blocks_valid']} ECB2 blocks"
+        if prov.get("skipped_history_slots"):
+            extra += f" ({prov['skipped_history_slots']} zero-history)"
         diag = status.get("diag") or {}
         xfer = ""
         if diag.get("kib_s"):
             xfer = (f" · {_fmt_bytes(diag['bytes'])}, {diag['duration_s']:.1f}s, "
                    f"{diag['kib_s']:g} KiB/s avg")
         lines.append(
-            f"- **{disp}** — {icon} {result['device_type']}{quick} · id `{prov.get('device_id', '?')}` · "
-            f"fw `{str(prov.get('git_commit', '?'))[:10]}`{dirty} · "
+            f"- **{disp}** — {icon} {result['device_type']}{quick}{extra} · "
             f"saved `{_rel_data_path(status['saved_path'])}`{xfer}{warn}"
         )
+
+    # live INFINITY streams (not recorded to XDF in this build)
+    live_lines = []
+    for name in names:
+        ls = dev.get_live_stream_status(name)
+        if ls["status"] in ("idle",):
+            continue
+        disp = dev.display_name(name)
+        if ls["status"] in ("requesting", "streaming", "stopping"):
+            icon = "🔴" if ls["status"] == "streaming" else "⏳"
+            live_lines.append(f"- **{disp}** — {icon} live {ls.get('product') or ''} "
+                              f"stream{_diag_str(ls)}")
+            prev = dev.get_live_stream_preview(name)
+            if prev is not None:
+                results.append((f"{disp} (live)", prev))
+        elif ls["status"] == "stopped":
+            live_lines.append(f"- **{disp}** — ⏹️ live stream stopped")
+        elif ls["status"] == "error":
+            live_lines.append(f"- **{disp}** — ❌ live stream: {ls['error']}")
+    if live_lines:
+        lines.append("\n**Live streams** _(not recorded to XDF yet)_")
+        lines.extend(live_lines)
 
     if caps_note and "NUS unavailable" in caps_note:
         lines.append(f"\n_{caps_note}_")
@@ -279,8 +326,10 @@ def _build_sqc_figure(results, ppg_mode="Filtered", ppg_y_range=(-1000, 1000),
     practically readable view), or "Both" (raw on the primary axis, filtered
     on a secondary axis, per channel). ECG keeps its existing raw+filtered
     overlay unconditionally — its raw trace is already legible on its own.
-    A still-streaming ("partial") capture always shows raw regardless of
-    `ppg_mode` — filtering a still-growing signal just adds edge artifacts.
+    Filtering is computed on the fly for every row with enough samples —
+    finished captures (full, History Only, Custom) and the still-streaming
+    live preview alike (`filtfilt` is zero-phase; a growing signal only costs
+    a little edge ringing that redraws away as more data arrives).
 
     `ppg_y_range` fixes the Y-axis range of whichever axis is showing the
     filtered PPG trace (the primary axis in "Filtered" mode, the secondary
@@ -290,20 +339,20 @@ def _build_sqc_figure(results, ppg_mode="Filtered", ppg_y_range=(-1000, 1000),
     fixed range around 0 would just clip PPG's large DC-heavy raw signal)
     or to ECG (unaffected by this whole option, like the rest of `ppg_mode`).
 
-    `show_hist_boundary` draws a dashed vertical line on every row (ECG and
-    PPG alike, live preview or finished) at the point the pre-buffered
-    *history* window gives way to the live-acquired *forward* window —
-    `history_records / fs` seconds in. Skipped for a row if that boundary
-    falls beyond what's actually been captured so far (e.g. a history-only
-    quick capture, or a live preview still mid-history).
+    `show_hist_boundary` draws a dashed vertical line on every FINITE-snapshot
+    row (ECG and PPG alike, live preview or finished) at the point the
+    pre-buffered *history* window gives way to the live-acquired *forward*
+    window — `history_boundary_sample / fs` seconds in. Skipped for a row if
+    that boundary falls beyond what's been captured so far, and for continuous
+    (INFINITY) live-stream rows (which have no boundary).
     """
     rows = []
     for name, result in results:
-        partial = result.get("partial")            # live preview, still streaming
+        streaming = result.get("streaming")        # preview, still coming in
         quick_s = result.get("quick_seconds")      # finished but cut short (on purpose or not)
         title = name
-        if partial:
-            title += " — receiving…"
+        if streaming:
+            title += " — live…" if result.get("live") else " — receiving…"
         elif quick_s:
             title += f" — {quick_s:g}s partial"
         rows.append((title, result))
@@ -321,14 +370,18 @@ def _build_sqc_figure(results, ppg_mode="Filtered", ppg_y_range=(-1000, 1000),
     for i, (title, result) in enumerate(rows, start=1):
         fs = result["fs"]
         is_ecg = result["device_type"] == "ECG"
-        partial = result.get("partial")
         filtered_axis_secondary = None  # which axis got a filtered trace this row, if any
         n_samples = 0
         for idx, (ch_name, y) in enumerate(result["channels"].items()):
             y = np.asarray(y, dtype=float)
             n_samples = max(n_samples, len(y))
             t = np.arange(len(y)) / fs
-            can_filter = not partial and len(y) > 64
+            # filter on the fly for any row with enough samples — full,
+            # History Only, Custom, and the still-streaming preview alike.
+            # filter_ppg / filter_ecg are 3rd-order Butterworth via filtfilt;
+            # its default padlen is 3*(order*2+1)=21, so ~64 samples is a
+            # safe floor.
+            can_filter = len(y) > 64
             filt = None
             if can_filter:
                 try:
@@ -350,8 +403,8 @@ def _build_sqc_figure(results, ppg_mode="Filtered", ppg_y_range=(-1000, 1000),
                 continue
 
             # PPG: ppg_mode gates what's drawn, per channel, in that channel's
-            # color. Can't filter yet (still streaming / too short) -> always
-            # fall back to raw so a live preview always shows something.
+            # color. Too few samples to filter -> fall back to raw so a very
+            # early preview still shows something.
             mode = ppg_mode if filt is not None else "Raw"
             show_raw = mode in ("Raw", "Both")
             show_filt = mode in ("Filtered", "Both") and filt is not None
@@ -377,9 +430,9 @@ def _build_sqc_figure(results, ppg_mode="Filtered", ppg_y_range=(-1000, 1000),
         if filtered_axis_secondary is not None:
             fig.update_yaxes(range=list(ppg_y_range), row=i, col=1,
                              secondary_y=filtered_axis_secondary)
-        history_records = result.get("history_records")
-        if show_hist_boundary and history_records and n_samples:
-            boundary_t = history_records / fs
+        boundary_sample = result.get("history_boundary_sample")
+        if show_hist_boundary and boundary_sample and n_samples:
+            boundary_t = boundary_sample / fs
             if boundary_t < n_samples / fs:
                 fig.add_vline(x=boundary_t, row=i, col=1,
                               line=dict(color="gray", dash="dash", width=1))

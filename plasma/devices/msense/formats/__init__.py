@@ -14,12 +14,13 @@ the codebase enumerates formats.
 This module is a leaf: numpy and pandas only, no Gradio, no options, no I/O
 policy beyond reading the file it is handed.
 
-Note: this is the **offline on-disk** decoder. The **live NUS-stream** payload
-decoders (`decode_ppg` / `decode_ecg`) live in `plasma/devices/msense/records.py`
-and are intentionally kept separate — same packed-16 PPG and framed 12-byte ECG
-(CRC-8 poly 0x07) concepts, different code paths and different call sites (a
-reassembled BLE stream vs a `.bin` file on a USB drive). Consolidation is a
-later local change.
+Note: this is the **offline on-disk** decoder. The **live sensor-stream** payload
+decoders (`decode_ppg` / `decode_ecg`, and the ECB2 block validation) live in
+`plasma/devices/msense/records.py`; this module reuses its `crc32_iso_hdlc` and
+`decode_ecb2_block` for the `ecg:block_v2` (`ECF2`) container, and otherwise
+keeps its own per-record paths (a reassembled BLE stream vs a `.bin` file on a
+USB drive — different call sites, different erased-tail / continuity policy).
+The legacy `.bin` layouts (`ppg:legacy/v2`, `ac:*`, `ecg:framed`) are unchanged.
 """
 from __future__ import annotations
 
@@ -33,6 +34,16 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
+
+from plasma.devices.msense.records import (
+    crc32_iso_hdlc, decode_ecb2_block, EcbValidationError,
+    ECB2_BLOCK_SIZE, ECB2_SAMPLES_PER_BLOCK,
+)
+
+# ECF2 ECG block-container file — see docs/ECG_BLOCK_FORMAT.md §5
+ECF2_MAGIC = b"ECF2"
+ECF2_FILE_SIZE = 4 * 1024 * 1024
+ECF2_DATA_PAGES = 1023
 
 # Packed 16-byte PPG channel packing — see docs/PPG_PACKED_16_BYTE_FORMAT.md
 PPG_PACKED_RECORD_SIZE = 16
@@ -273,6 +284,108 @@ def _read_ac_v3(filepath, strict=False):
     return df, dt
 
 
+# ---------------------------------------------------------------------------
+# ECF2 — the ECG block-container file (v0 firmware; see docs/ECG_BLOCK_FORMAT.md)
+# ---------------------------------------------------------------------------
+
+def _sniff_ecf2(data: bytes) -> float:
+    """Content score for the ECF2 container: it is entirely self-identifying."""
+    return 1.0 if data[:4] == ECF2_MAGIC else 0.0
+
+
+def _read_ecf2(filepath, strict=False):
+    """Decode one ECF2 chunk: 4 KiB header page, then up to 1023 ECB2 data
+    pages, then erased (all-``0xFF``) pages. Stops at the first erased page or
+    the first invalid block. Returns (DataFrame, datetime string)."""
+    basename = os.path.basename(filepath)
+    with open(filepath, "rb") as f:
+        data = f.read()
+
+    if len(data) != ECF2_FILE_SIZE:
+        raise ValueError(f"{basename}: {len(data)} bytes, expected {ECF2_FILE_SIZE} for an ECF2 chunk")
+
+    header = data[:ECB2_BLOCK_SIZE]
+    if header[0:4] != ECF2_MAGIC:
+        raise ValueError(f"{basename}: not an ECF2 file (magic {header[0:4]!r})")
+    chunk_index = int.from_bytes(header[4:8], "little")
+    recording_id = int.from_bytes(header[8:16], "little")
+    stored_hdr_crc = int.from_bytes(header[16:20], "little")
+    if any(header[20:]):
+        msg = f"{basename}: ECF2 header reserved bytes nonzero"
+        if strict:
+            raise ValueError(msg)
+        print(msg)
+    if crc32_iso_hdlc(header, 16, 20) != stored_hdr_crc:
+        msg = f"{basename}: ECF2 header CRC mismatch"
+        if strict:
+            raise ValueError(msg)
+        print(msg)
+
+    ecg_parts, etag_parts, ptag_parts, idx_parts = [], [], [], []
+    prev_index = prev_tick = None
+    n_blocks = 0
+    error = None
+    for page in range(1, ECF2_DATA_PAGES + 1):
+        block = data[page * ECB2_BLOCK_SIZE:(page + 1) * ECB2_BLOCK_SIZE]
+        if block[0:4] == b"\xff\xff\xff\xff":
+            break  # erased sentinel — end of recorded data
+        try:
+            dec = decode_ecb2_block(block)
+        except EcbValidationError as e:
+            error = f"page {page}: {e}"
+            break
+        if prev_index is not None and (
+                dec["first_sample_index"] != (prev_index + ECB2_SAMPLES_PER_BLOCK) % (1 << 32)
+                or dec["first_rtc_tick"] != (prev_tick + ECB2_SAMPLES_PER_BLOCK) % (1 << 32)):
+            error = f"page {page}: ECB2 continuity break"
+            break
+        prev_index, prev_tick = dec["first_sample_index"], dec["first_rtc_tick"]
+        ecg_parts.append(dec["ecg"])
+        etag_parts.append(dec["etag"])
+        ptag_parts.append(dec["ptag"])
+        idx_parts.append(dec["first_sample_index"]
+                         + np.arange(ECB2_SAMPLES_PER_BLOCK, dtype=np.int64))
+        n_blocks += 1
+
+    if not ecg_parts:
+        raise ValueError(f"{basename}: no valid ECB2 data blocks decoded"
+                         + (f" ({error})" if error else ""))
+    if error:
+        msg = f"ECG {basename}: decoding stopped early — {error}"
+        if strict:
+            raise ValueError(msg)
+        print(msg)
+
+    counter = np.concatenate(idx_parts).astype(np.int64)
+    df = pd.DataFrame({
+        "ECG": np.concatenate(ecg_parts),
+        "ETAG": np.concatenate(etag_parts),
+        "PTAG": np.concatenate(ptag_parts),
+        "Counter": counter,
+    })
+    t0, dt = get_CDCT_init(filepath)
+    # `Counter` is `first_sample_index + i` — the **recording-local** sample
+    # ordinal: zero at the first sample of the recording and monotonically
+    # advancing (+1358/block) through every chunk of the same recording_id
+    # (ECG_BLOCK_FORMAT.md §3/§5). So `t0 + Counter/512` is one continuous
+    # clock across all chunks — no per-chunk restart, and an isolated later
+    # chunk lands at its true offset into the recording.
+    df["CDCT"] = t0 + df["Counter"] / ECG_FS_ECB2
+    df["init_CDCT"] = t0
+    df.attrs["malformed_records"] = 0
+    df.attrs["trailing_bytes"] = 0
+    df.attrs["spec"] = "ecg:block_v2"
+    df.attrs["recording_id"] = recording_id
+    df.attrs["chunk_index"] = chunk_index
+    df.attrs["first_sample_index"] = int(counter[0])
+    df.attrs["last_sample_index"] = int(counter[-1])
+    df.attrs["decode_error"] = error
+    return df, dt
+
+
+ECG_FS_ECB2 = 512.0
+
+
 _PPG_LEGACY_DT = np.dtype([(n, "<i4") for n in
                            ("ir1", "ir2", "g1", "g2", "Timestamp", "Counter")])
 _PPG_V2_DT = np.dtype([(n, "<u4") for n in ("ir1", "ir2", "g1", "g2", "Counter")])
@@ -367,6 +480,13 @@ REGISTRY = (
     RecordSpec("framed", "ecg", 12, _decode_ecg,
                tick_offset=4, tick_rate=512, tick_step=1,
                validated=True, since=V2_VERSION, trim_erased_tail=True),
+
+    # ECF2 block-container (v0 firmware). read_file/sniff bypass every generic
+    # per-record path; the placeholder per-record fields are never consulted.
+    RecordSpec("block_v2", "ecg", ECB2_BLOCK_SIZE, lambda b: (_ for _ in ()).throw(
+                   NotImplementedError("ecg:block_v2 is a container format; see read_file")),
+               tick_offset=0, tick_rate=512, tick_step=1,
+               validated=True, read_file=_read_ecf2, sniff=_sniff_ecf2),
 )
 
 SENSORS = ("ppg", "ac", "ecg")

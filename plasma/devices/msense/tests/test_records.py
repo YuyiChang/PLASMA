@@ -1,11 +1,13 @@
-"""Offline coverage for the packed PPG / ECG record decoders."""
-import struct
+"""Offline coverage for the live sensor-stream record decoders.
 
+PPG packed-16 decode + the incremental record/block reassemblers. ECB2 ECG
+block decode has its own module, :mod:`test_ecb2`.
+"""
 import numpy as np
-import pytest
 
-from plasma.devices.msense.records import decode_ppg, decode_ecg, crc8_07, ECG_SYNC
-
+from plasma.devices.msense.records import (
+    decode_ppg, Packed16Reassembler, EcgBlockReassembler,
+)
 
 # ── PPG ─────────────────────────────────────────────────────────────────────
 
@@ -34,41 +36,27 @@ def test_ppg_out_of_range_channel_masked_and_reported():
     bad[2] = 0xFF  # push ir1 above bit 18
     out = decode_ppg(bytes(bad))
     assert out["oob_frac"] == 1.0
-    assert out["ir1"][0] == (0xFF0001 & 0x7FFFF)  # masked to 19 bits
+    assert out["ir1"][0] == (0xFF0001 & 0x7FFFF)
     assert decode_ppg(PPG_VECTOR)["oob_frac"] == 0.0
 
 
-# ── ECG ─────────────────────────────────────────────────────────────────────
+# ── incremental reassembly ─────────────────────────────────────────────────
 
-def _ecg_frame(raw24, rtc_tick, flags=0):
-    body = bytes([0x01, flags]) + struct.pack("<I", rtc_tick) + bytes(
-        [(raw24 >> 16) & 0xFF, (raw24 >> 8) & 0xFF, raw24 & 0xFF]
-    )
-    return ECG_SYNC + body + bytes([crc8_07(body)])
-
-
-def test_crc8_07_known_value():
-    # CRC-8/ITU-style poly 0x07, init 0x00: "123456789" -> 0xF4
-    assert crc8_07(b"123456789") == 0xF4
-
-
-def test_ecg_roundtrip_and_sign_extension():
-    frames = _ecg_frame(0x0000FF, 16) + _ecg_frame(0xFFFFFE, 17)
-    out = decode_ecg(frames)
-    assert out["fs"] == 512.0
-    assert out["crc_ok_frac"] == 1.0
-    assert out["ecg"][0] == 255
-    assert out["ecg"][1] == -2
-    assert list(out["rtc_tick"]) == [16, 17]
+def test_packed16_reassembler_splits_and_carries():
+    r = Packed16Reassembler()
+    body = PPG_VECTOR * 4
+    r.feed(0, body[:10])          # partial record
+    assert r.take() == b""
+    r.feed(10, body[10:37])       # completes 2 records, 5 carry bytes
+    got = r.take()
+    assert len(got) == 32 and r.records == 2
+    r.feed(37, body[37:])
+    assert len(r.take()) == 32    # remaining 2 records
+    assert r.records == 4
 
 
-def test_ecg_partial_trailing_frame_dropped():
-    out = decode_ecg(_ecg_frame(1, 1) * 2 + b"\xa5\xec\x01")
-    assert len(out["ecg"]) == 2
-
-
-def test_ecg_resync_on_misaligned_stream():
-    good = _ecg_frame(0x001234, 100) + _ecg_frame(0x005678, 101)
-    out = decode_ecg(b"\x00\x11\x22" + good)  # 3 junk bytes up front
-    assert 0x001234 in list(out["ecg"])
-    assert 0x005678 in list(out["ecg"])
+def test_ecg_reassembler_bad_first_block_sets_error():
+    r = EcgBlockReassembler()
+    r.feed(0, bytes(b"\xffnot a real block" + bytes(4096 - 17)))
+    assert r.error is not None
+    assert r.blocks == 0

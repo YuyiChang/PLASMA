@@ -1,4 +1,10 @@
-# MAX30001 ECG Data Format
+# MAX30001 ECG Data Format (framed 12-byte — historical)
+
+> **Historical.** v0 firmware stores ECG as 4096-byte `ECB2` blocks
+> ([`ECG_BLOCK_FORMAT.md`](ECG_BLOCK_FORMAT.md)) and streams them over
+> sensor-stream v0 ([`SENSOR_STREAM_CENTRAL_HOWTO.md`](SENSOR_STREAM_CENTRAL_HOWTO.md)).
+> This 12-byte framed layout is still used by the **offline** `.bin` decoder
+> (`plasma.devices.msense.formats`, spec `ecg:framed`) for pre-v0 downloads.
 
 The ECG recorder writes fixed-size 12-byte binary frames. Frames are designed to be easy to resynchronize after dropped or partial bytes by scanning for the two-byte sync word.
 
