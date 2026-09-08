@@ -115,6 +115,8 @@ class FakePeripheral:
         self._live_thread = None
         self._disconnect_fired = False
         self._collect_started_at = None
+        self._recording = False           # da39c931 state, read back by the driver
+        self.writes = []                  # (char_uuid, bytes) — for tests
 
     # ---- BleakClient surface -------------------------------------------------
 
@@ -141,17 +143,24 @@ class FakePeripheral:
             return bytes([self._battery_pct()])
         if char_uuid == CTL_ENC_CHAR_UUID:
             return struct.pack("<I", self._last_enc)
+        if char_uuid == CTL_STARTSTOP_CHAR_UUID:
+            return bytes([1 if self._recording else 0])
         return b"\x00"
 
     async def write_gatt_char(self, char_uuid, data, response=True):
         data = bytes(data)
+        self.writes.append((char_uuid, data))
         if char_uuid == CTL_ENC_CHAR_UUID and len(data) >= 4:
             self._last_enc = struct.unpack("<I", data[:4])[0]
         elif char_uuid == CTL_STARTSTOP_CHAR_UUID and len(data) >= 1:
             on = data[0]  # v0: one-byte acquisition enable/disable
             if on:
+                self._recording = True
                 self._collect_started_at = time.time()
                 self._ensure_live_thread()
+            elif self.fault() != "acq_stop_ignored":
+                self._recording = False
+            # acq_stop_ignored: ACK the write but keep _recording True
         elif char_uuid == NUS_RX_CHAR_UUID:
             self._handle_nus_command(data)
         # time-sync / erase / anything else: accepted, ignored

@@ -24,7 +24,7 @@ connection; nothing here multiplexes onto a shared characteristic.
 
 | Characteristic | UUID | Direction | Used for |
 |---|---|---|---|
-| Collection start/stop | `da39c931…` | write `uint32` (0/1) | toggles the firmware's recording state |
+| Collection start/stop | `da39c931…` | **write + read** `uint8` (0/1) | toggles the firmware's recording state; the driver **reads it back after a Stop** to confirm acquisition actually halted (the ATT write ack ≠ shutdown-complete — SENSOR_STREAM_CENTRAL_HOWTO.md §1). `1` after a stop ⇒ `⚠️ still recording — stop unconfirmed` + `[ACQ] … UNCONFIRMED` journal marker |
 | Unix time | `da39c932…` | write `uint64` | sets the wristband's RTC on session start |
 | Participant encoding | `da39c933…` | write/read `uint32` | tags recorded files with a participant code |
 | Flash erase | `da39c934…` | write `uint8` | write `68` (`ERASE_CODE`) to wipe onboard flash |

@@ -51,9 +51,20 @@ NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # device -> host (not
 
 # control service — start/stop, time sync, participant encoding, flash erase
 CTL_SERVICE_UUID = "da39c930-1d81-48e2-9c68-d0ae4bbd351f"
+CTL_STARTSTOP_CHAR_UUID = "da39c931-1d81-48e2-9c68-d0ae4bbd351f"  # acquisition enable (write 1/0, readable)
+CTL_TIME_CHAR_UUID = "da39c932-1d81-48e2-9c68-d0ae4bbd351f"   # unix time sync (write)
 CTL_ENC_CHAR_UUID = "da39c933-1d81-48e2-9c68-d0ae4bbd351f"   # participant encoding (write/read)
 CTL_ERASE_CHAR_UUID = "da39c934-1d81-48e2-9c68-d0ae4bbd351f"  # write 68 -> full flash erase
 ERASE_CODE = 68
+
+# Acquisition-stop confirmation: after a stop write to CTL_STARTSTOP_CHAR_UUID
+# the firmware's ATT ack only means "request accepted", not "recording halted"
+# (SENSOR_STREAM_CENTRAL_HOWTO.md §1). Read the characteristic back — 0 means
+# stopped, 1 means still recording — polling a few times so the firmware has a
+# moment past the ack to settle.
+ACQ_STOP_READBACK_POLLS = 3
+ACQ_STOP_READBACK_INTERVAL_S = 0.4
+ACQ_STOP_READ_TIMEOUT_S = 3.0
 
 # standard Bluetooth SIG Battery Service
 BATTERY_SERVICE_UUID = "0000180f-0000-1000-8000-00805f9b34fb"
@@ -117,6 +128,11 @@ def _product_from_name(advertised_name):
     return None
 
 
+class AcquisitionStopNotConfirmed(RuntimeError):
+    """A stop command was written to the acquisition-enable characteristic but
+    reading it back still shows the device recording (after one retry)."""
+
+
 class MotionSenseHRV(PlasmaDevice):
     # which plugin-config blob to read wristband records from — MSenseDemo
     # overrides this to point at its own "msense_demo" section.
@@ -137,6 +153,10 @@ class MotionSenseHRV(PlasmaDevice):
         # name -> live INFINITY-stream state (see _new_live_state); only ever
         # one NUS stream (SQC snapshot OR live) active per wristband at a time.
         self.live_state = {}
+        # name -> {"status": confirmed|unconfirmed|unverifiable|unknown,
+        #          "checked_at": ts} — set by collection_ctl(name, False), see
+        # _confirm_acq_stopped. Cleared on the next collection_ctl(name, True).
+        self._acq_stop_status = {}
         # names with an open "[SQC] … start" journaler marker, awaiting an "end"
         # once the stream reaches a terminal status (see _sqc_watchdog_loop).
         self._sqc_journal_open = set()
@@ -158,7 +178,7 @@ class MotionSenseHRV(PlasmaDevice):
         for k, addr in self.device_list.items():
             channels = ["ENMO", "counter", "battery"]
             self.caps[k] = {"nus": False, "imu": False, "battery": False,
-                            "product": None}
+                            "product": None, "acq_readback": False}
             groups = {}
             if k in self.imu_stream_devices:
                 channels += ["AccX", "AccY", "AccZ", "Q0", "Q1", "Q2", "Q3", "OrientX", "OrientY", "OrientZ", "OrientW"]
@@ -351,6 +371,10 @@ class MotionSenseHRV(PlasmaDevice):
                         self.caps[name]["nus"] = True
                     except Exception as e:
                         self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
+                    # can we read the acquisition-enable char back? (used to
+                    # confirm a collection stop — see _confirm_acq_stopped)
+                    self.caps[name]["acq_readback"] = (
+                        self._read_acq_enabled(name, p) is not None)
                     try:
                         raw = self._run_async(p.read_gatt_char(BATTERY_CHAR_UUID))
                         pct = raw[0]
@@ -434,7 +458,15 @@ class MotionSenseHRV(PlasmaDevice):
             print(name, p.is_connected)
             try:
                 self.collection_ctl(name, False)
-                self.memo[name].sts = "🛑"
+                confirmed = self._acq_stop_status.get(name, {}).get("status") == "confirmed"
+                self.memo[name].sts = "🛑 stopped" if confirmed else "🛑"
+                self.journal(f"[ACQ] {name} stop "
+                             + ("confirmed" if confirmed
+                                else "not verifiable (da39c931 unreadable)"))
+            except AcquisitionStopNotConfirmed as e:
+                self.info(str(e))
+                self.memo[name].sts = "⚠️ still recording — stop unconfirmed"
+                self.journal(f"[ACQ] {name} stop UNCONFIRMED (da39c931 still 1 after retry)")
             except Exception as e:
                 self.info(f"Error stopping {name}: {e}")
                 self.memo[name].sts = "⚠️ stop failed"
@@ -584,6 +616,38 @@ class MotionSenseHRV(PlasmaDevice):
         self.memo[name].sts = "✅ Bias saved"
         self.info(f"Gyro bias calibrated for {name}: {bias} (n={calib['n']})")
 
+    def _write_acq_enable(self, peripheral, on):
+        self._run_async(peripheral.write_gatt_char(
+            CTL_STARTSTOP_CHAR_UUID, struct.pack("<B", int(bool(on))), response=True))
+
+    def _read_acq_enabled(self, name, peripheral):
+        """Read the acquisition-enable characteristic. Returns 0 / 1, or None
+        when it can't be read (older firmware without a readable char, or a
+        transient BLE error)."""
+        try:
+            raw = self._run_async(peripheral.read_gatt_char(CTL_STARTSTOP_CHAR_UUID),
+                                  timeout_s=ACQ_STOP_READ_TIMEOUT_S)
+            return int(raw[0]) if raw else None
+        except Exception as e:
+            self._sqc_debug(name, f"da39c931 readback failed: {e}")
+            return None
+
+    def _confirm_acq_stopped(self, name, peripheral):
+        """Poll the readback after a stop write. Returns True (read back 0 —
+        stopped), False (read back 1 on every poll — still recording), or None
+        (never got a readable value — unverifiable)."""
+        saw_value = False
+        for i in range(ACQ_STOP_READBACK_POLLS):
+            if i:
+                time.sleep(ACQ_STOP_READBACK_INTERVAL_S)
+            val = self._read_acq_enabled(name, peripheral)
+            if val is None:
+                continue
+            saw_value = True
+            if val == 0:
+                return True
+        return False if saw_value else None
+
     def collection_ctl(self, name, start=True):
         peripheral = self.active_devices[name]
 
@@ -592,23 +656,22 @@ class MotionSenseHRV(PlasmaDevice):
 
         # if starting, do the initialization
         if start:
+            self._acq_stop_status.pop(name, None)
             # write unix time
             self._run_async(peripheral.write_gatt_char(
-                "da39c932-1d81-48e2-9c68-d0ae4bbd351f",
+                CTL_TIME_CHAR_UUID,
                 struct.pack("<Q", int(time.time())), response=True))
             # write participant hash
             self.participant_byte = struct.pack("<I", self.session_info['participant_enc'])
             self._run_async(peripheral.write_gatt_char(
-                "da39c933-1d81-48e2-9c68-d0ae4bbd351f",
+                CTL_ENC_CHAR_UUID,
                 self.participant_byte, response=True))
 
         # acquisition enable/disable — one byte with response: 1 requests
         # acquisition, 0 requests a normal stop (SENSOR_STREAM_CENTRAL_HOWTO.md
         # §1, ECG_BLOCK_FORMAT.md §20). This is separate from the NUS stream
         # START/STOP — stream STOP leaves acquisition + NAND recording running.
-        characteristic_uuid = "da39c931-1d81-48e2-9c68-d0ae4bbd351f"
-        self._run_async(peripheral.write_gatt_char(characteristic_uuid,
-                                                    struct.pack("<B", int(bool(start))), response=True))
+        self._write_acq_enable(peripheral, start)
 
         # only (re-)subscribe on start; stop should just tell the firmware to
         # stop streaming, not stack another notify callback on top
@@ -625,6 +688,31 @@ class MotionSenseHRV(PlasmaDevice):
                     self.caps[name]["imu"] = True
                 except Exception as e:
                     self.info(f"IMU stream unavailable on {name} (demo firmware not present?): {e}")
+            return
+
+        # stop: the ATT ack only means "request accepted" — read da39c931 back
+        # to confirm the firmware actually halted acquisition. One retry.
+        ok = self._confirm_acq_stopped(name, peripheral)
+        if ok is False:
+            self._sqc_debug(name, "acq stop not confirmed — retrying stop write")
+            try:
+                self._write_acq_enable(peripheral, False)
+            except Exception as e:
+                self._sqc_debug(name, f"acq stop retry write failed: {e}")
+            ok = self._confirm_acq_stopped(name, peripheral)
+        self._acq_stop_status[name] = {
+            "status": {True: "confirmed", False: "unconfirmed", None: "unverifiable"}[ok],
+            "checked_at": time.time(),
+        }
+        if ok is False:
+            raise AcquisitionStopNotConfirmed(
+                f"{name}: da39c931 still reads 1 after stop + retry — "
+                "device may still be recording")
+
+    def get_acq_stop_status(self, name):
+        """{"status": confirmed|unconfirmed|unverifiable|unknown, "checked_at": ts|None}
+        — the outcome of the last collection stop's da39c931 readback."""
+        return self._acq_stop_status.get(name, {"status": "unknown", "checked_at": None})
 
     def _ensure_notify(self, peripheral, name, char_uuid, handler):
         """Idempotent start_notify. A Start/Stop/Start cycle (stop doesn't

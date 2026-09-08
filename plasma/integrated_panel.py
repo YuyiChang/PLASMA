@@ -33,6 +33,8 @@ def _status_class(sts):
     low = s.lower()
     if s.startswith("🟢") or "reconnected" in low or "bias saved" in low or "in progress" in low:
         return "ok"
+    if "still recording" in low or "stop unconfirmed" in low:
+        return "warn"          # a stop that couldn't be confirmed — before "🛑" → err
     if (any(g in s for g in ("⛔", "❌", "🚫", "🟥", "🛑"))
             or "fault" in low or "stopped" in low or "reconnect failed" in low):
         return "err"

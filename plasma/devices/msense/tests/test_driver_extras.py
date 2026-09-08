@@ -12,7 +12,9 @@ import pytest
 from plasma.devices.template import PlasmaMemo
 from plasma import journal
 from plasma.app_context import app_context
-from plasma.devices.msense.device import MotionSenseHRV, ERASE_CODE
+from plasma.devices.msense.device import (
+    MotionSenseHRV, ERASE_CODE, AcquisitionStopNotConfirmed,
+)
 from plasma.devices.msense import nus_sim
 from plasma.devices.msense.nus_stream import (
     StreamSession, PROFILE, ECG, MODE_FINITE, MODE_INFINITY,
@@ -53,6 +55,8 @@ class _FakePeripheral:
         self.address = address
         self.is_connected = connected
         self.writes = []
+        # da39c931 readback: 0/1, or a callable raising to simulate a read error
+        self.acq_enabled = 0
 
     async def connect(self):
         self.is_connected = True
@@ -64,6 +68,10 @@ class _FakePeripheral:
         self.writes.append((char_uuid, bytes(data)))
 
     async def read_gatt_char(self, char_uuid):
+        if char_uuid.startswith("da39c931"):
+            if callable(self.acq_enabled):
+                return self.acq_enabled()          # e.g. lambda: (_ for _ in ()).throw(...)
+            return bytes([int(self.acq_enabled)])
         return b"\x00"
 
     async def start_notify(self, char_uuid, callback):
@@ -83,6 +91,7 @@ def _bare_driver():
     d._connect_rssi = {}
     d.sqc_state = {}
     d.live_state = {}
+    d._acq_stop_status = {}
     d._start_ble_loop()
     return d
 
@@ -168,6 +177,84 @@ def test_battery_handler_parses_and_stores():
     assert d.battery["w1"] == 90
     assert d.caps["w1"]["battery"] is True
     assert d.memo["w1"].get_latest("battery")[1] == 90
+
+
+# ── acquisition-stop confirmation (da39c931 readback) ──────────────────────
+
+def _acq_driver(monkeypatch, acq_enabled):
+    monkeypatch.setattr("plasma.devices.msense.device.ACQ_STOP_READBACK_INTERVAL_S", 0.0)
+    d = _bare_driver()
+    p = _FakePeripheral()
+    p.acq_enabled = acq_enabled
+    d.active_devices = {"w1": p}
+    d.caps = {"w1": {}}
+    d.memo = {"w1": PlasmaMemo("w1")}
+    d.journal_marks = []
+    d.journal_hook = d.journal_marks.append
+    d.session_info = {"participant_enc": 1}
+    d.imu_stream_devices = set()
+    return d, p
+
+
+def test_collection_stop_confirmed_when_readback_zero(monkeypatch):
+    d, p = _acq_driver(monkeypatch, acq_enabled=0)
+    d.collection_ctl("w1", start=False)               # no raise
+    assert d.get_acq_stop_status("w1")["status"] == "confirmed"
+    # exactly one enable write (the stop), no retry
+    assert [w for w in p.writes if w[0].startswith("da39c931")] == \
+        [("da39c931-1d81-48e2-9c68-d0ae4bbd351f", b"\x00")]
+
+
+def test_collection_stop_unconfirmed_retries_then_raises(monkeypatch):
+    d, p = _acq_driver(monkeypatch, acq_enabled=1)     # device never stops
+    with pytest.raises(AcquisitionStopNotConfirmed):
+        d.collection_ctl("w1", start=False)
+    assert d.get_acq_stop_status("w1")["status"] == "unconfirmed"
+    # the stop write was issued twice (initial + one retry)
+    stop_writes = [w for w in p.writes if w[0].startswith("da39c931") and w[1] == b"\x00"]
+    assert len(stop_writes) == 2
+
+
+def test_collection_stop_unverifiable_when_read_raises(monkeypatch):
+    def _boom():
+        raise RuntimeError("char not readable")
+    d, p = _acq_driver(monkeypatch, acq_enabled=_boom)
+    d.collection_ctl("w1", start=False)               # no raise — degrades safely
+    assert d.get_acq_stop_status("w1")["status"] == "unverifiable"
+
+
+def test_collection_start_clears_prior_stop_status(monkeypatch):
+    d, p = _acq_driver(monkeypatch, acq_enabled=1)
+    with pytest.raises(AcquisitionStopNotConfirmed):
+        d.collection_ctl("w1", start=False)
+    assert d.get_acq_stop_status("w1")["status"] == "unconfirmed"
+    p.acq_enabled = 0
+    d.register_enmo = lambda *a: None
+    d.register_battery = lambda *a: None
+    d.collection_ctl("w1", start=True)
+    assert d.get_acq_stop_status("w1")["status"] == "unknown"
+
+
+@pytest.mark.parametrize("acq,sts_contains,mark_contains", [
+    (0, "stopped", "stop confirmed"),
+    (1, "still recording", "UNCONFIRMED"),
+])
+def test_stop_maps_outcome_to_memo_and_journal(monkeypatch, acq, sts_contains, mark_contains):
+    d, p = _acq_driver(monkeypatch, acq_enabled=acq)
+    d.active_outlets = {}
+    d.live_state = {}
+    d.stop()
+    assert sts_contains in d.memo["w1"].sts
+    assert any(mark_contains in m for m in d.journal_marks)
+
+
+def test_stop_unverifiable_keeps_plain_glyph(monkeypatch):
+    d, p = _acq_driver(monkeypatch, acq_enabled=lambda: (_ for _ in ()).throw(RuntimeError()))
+    d.active_outlets = {}
+    d.live_state = {}
+    d.stop()
+    assert d.memo["w1"].sts == "🛑"
+    assert any("not verifiable" in m for m in d.journal_marks)
 
 
 # ── SQC streaming mode dispatch ─────────────────────────────────────────────

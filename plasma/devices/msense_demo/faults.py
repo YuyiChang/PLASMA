@@ -38,6 +38,12 @@ FAULTS = {
                 "handful of DATA frames, then goes silent — the no-progress "
                 "watchdog STOPs and disconnects, and the tab shows an error.",
     },
+    "acq_stop_ignored": {
+        "label": "Ignores the acquisition-stop command",
+        "help": "The wristband ACKs the stop write but da39c931 still reads 1 — "
+                "the driver retries the stop once, then flags "
+                "'⚠️ still recording — stop unconfirmed' and journals it.",
+    },
 }
 
 # what the Configuration-tab "Fault" column accepts

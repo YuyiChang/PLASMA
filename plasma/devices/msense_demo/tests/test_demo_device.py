@@ -138,6 +138,50 @@ def test_connects_and_streams_live(demo_blob):
         _teardown(d)
 
 
+# ── acquisition-stop confirmation (da39c931 readback) ──────────────────────
+
+def test_collection_stop_confirmed(demo_blob, monkeypatch):
+    monkeypatch.setattr("plasma.devices.msense.device.ACQ_STOP_READBACK_INTERVAL_S", 0.0)
+    demo_blob(_row("DEMO-PPG", sensor="PPG", imu=False))
+    d = _make_device()
+    try:
+        name = "DEMO-PPG"
+        assert d.caps[name]["acq_readback"] is True
+        d.journal_hook = (marks := []).append
+        d.session_dir = None
+        d.start()
+        assert d.active_devices[name]._recording is True
+        d.stop()
+        assert d.get_acq_stop_status(name)["status"] == "confirmed"
+        assert d.memo[name].sts == "🛑 stopped"
+        assert any("stop confirmed" in m for m in marks)
+        assert d.active_devices[name]._recording is False
+    finally:
+        _teardown(d)
+
+
+def test_collection_stop_ignored_by_firmware_is_flagged(demo_blob, monkeypatch):
+    monkeypatch.setattr("plasma.devices.msense.device.ACQ_STOP_READBACK_INTERVAL_S", 0.0)
+    demo_blob(_row("DEMO-PPG", sensor="PPG", imu=False, fault="acq_stop_ignored"))
+    d = _make_device()
+    try:
+        name = "DEMO-PPG"
+        d.journal_hook = (marks := []).append
+        d.session_dir = None
+        d.start()
+        d.stop()
+        assert d.get_acq_stop_status(name)["status"] == "unconfirmed"
+        assert "still recording" in d.memo[name].sts
+        assert any("UNCONFIRMED" in m for m in marks)
+        # initial stop write + one retry, both value 0
+        stop_writes = [w for w in d.active_devices[name].writes
+                       if w[0].startswith("da39c931") and w[1] == b"\x00"]
+        assert len(stop_writes) == 2
+        assert d.active_devices[name]._recording is True   # firmware ignored it
+    finally:
+        _teardown(d)
+
+
 # ── SQC snapshot, happy path ────────────────────────────────────────────────
 
 @pytest.mark.parametrize("sensor,fs", [("PPG", 256.0), ("ECG", 512.0)])

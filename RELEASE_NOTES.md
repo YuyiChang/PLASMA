@@ -35,6 +35,13 @@
   the v1 CANCEL, and a STOPped stream discards its partial tail.
 - Acquisition enable/disable (`da39c931…`) is now a **one-byte** write, per the
   v0 firmware howto.
+- **Collection Stop is now confirmed** — after the stop write the driver reads
+  `da39c931` back (`0` = stopped, `1` = still recording), retries once, and on
+  failure shows `⚠️ still recording — stop unconfirmed` on the wristband's memo
+  row and writes an `[ACQ] … UNCONFIRMED` journal marker (so a session whose
+  end boundary is uncertain is visible in the XDF). A per-device outcome list
+  is on the YAMS → Control sub-tab. Older firmware whose `da39c931` isn't
+  readable is reported as *not verifiable*, never as a failure.
 
 ### 🔌 Restart / Shut down
 

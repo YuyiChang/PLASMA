@@ -78,3 +78,30 @@ def build_control_tab(ip=None):
             btn_reconnect.click(_reconnect, outputs=adv_status)
             btn_services.click(_services, outputs=adv_status)
             btn_write_enc.click(_write_enc, inputs=enc_val, outputs=adv_status)
+
+        with gr.Accordion("⏹️ Acquisition-stop confirmation", open=False):
+            gr.Markdown(
+                "After a collection Stop the driver reads back `da39c931` to confirm the "
+                "wristband actually halted recording (the ATT ack alone doesn't). "
+                "Outcome of the last Stop per device:"
+            )
+            acq_stop_md = gr.Markdown()
+            acq_stop_timer = gr.Timer(value=2.0, active=True)
+
+            _ICON = {"confirmed": "✅", "unconfirmed": "⚠️", "unverifiable": "❓", "unknown": "—"}
+
+            def _acq_stop_status():
+                dev = _msense_device(ip)
+                if dev is None:
+                    return _NO_DEV
+                rows = []
+                for name in sorted(getattr(dev, "active_devices", {})):
+                    st = dev.get_acq_stop_status(name)
+                    disp = dev.display_name(name)
+                    line = f"- {_ICON.get(st['status'], '—')} **{disp}** — {st['status']}"
+                    if st["status"] == "unconfirmed":
+                        line += " · device may still be recording"
+                    rows.append(line)
+                return "\n".join(rows) or "No wristband connected."
+
+            acq_stop_timer.tick(_acq_stop_status, outputs=acq_stop_md)

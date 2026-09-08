@@ -13,6 +13,8 @@ from plasma.integrated_panel import (
     ("🟢", "ok"),
     ("🟥", "err"),
     ("🛑", "err"),
+    ("🛑 stopped", "err"),
+    ("⚠️ still recording — stop unconfirmed", "warn"),
     ("🚫 FAULT", "err"),
     ("⛔ connect failed", "err"),
     ("⛔ device not found", "err"),
