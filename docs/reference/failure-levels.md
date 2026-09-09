@@ -5,9 +5,7 @@ panel renders only a colour. The levels exist to make the *software logic*
 consistent: one classifier (`plasma/status.py`), one table, predictable
 sticky-vs-auto-clearing behaviour.
 
-Adapted from the Airbus **ECAM** failure-level scheme. Cockpit references:
-[A320 Theory — ECAM failure levels](https://www.facebook.com/A320Theory/photos/failure-levelsthe-ecam-has-three-levels-of-warnings-and-cautions-each-level-is-b/424231457716922/),
-[AviationHunt — A320 ATA 31](https://www.aviationhunt.com/airbus-a320-ata-31/).
+One important design feature of PLASMA is to provide a centralized status display when instrumenting a wide array of sensors. The design is heavily inspired by modern aviation glass cockpit, especially [Airbus ECAM](https://en.wikipedia.org/wiki/Electronic_centralised_aircraft_monitor).
 
 | ECAM | PLASMA |
 |---|---|
