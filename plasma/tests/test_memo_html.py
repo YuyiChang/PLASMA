@@ -4,42 +4,62 @@ import pytest
 from plasma.integrated_panel import (
     build_memo_html, _status_class, _sts_detail, _rec_stats, _fmt_elapsed,
 )
+from plasma.status import COLLECTING, STOPPED, SETUP
 
 
-# ── _status_class ─────────────────────────────────────────────────────────
+# ── failure-level classification (see docs/failure-levels.md) ─────────────
 
-@pytest.mark.parametrize("sts,expected", [
-    ("🟦", "idle"),
-    ("🟢", "ok"),
-    ("🟥", "err"),
-    ("🛑", "err"),
-    ("🛑 stopped", "err"),
-    ("⚠️ still recording — stop unconfirmed", "warn"),
-    ("🚫 FAULT", "err"),
-    ("⛔ connect failed", "err"),
-    ("⛔ device not found", "err"),
-    ("⚠️ start failed", "warn"),
-    ("⚠️ stop failed", "warn"),
-    ("⚠️ stream stalled", "warn"),
-    ("🔌 disconnected", "warn"),
-    ("🔌 reconnect failed", "err"),
-    ("🔄 reconnected", "ok"),
-    ("🧨 erased — re-Initialize", "warn"),
-    ("🎯 Calibrating...", "warn"),
-    ("✅ Bias saved", "ok"),
-    ("Ready", "idle"),
-    ("❌ Fault: no device", "err"),
-    ("FAULT: boom", "err"),
-    ("Welcome", "idle"),
-    ("Ready to start", "idle"),
-    ("Collection in progress", "ok"),
-    ("Collection stopped", "err"),
-    ("something nobody wrote", "idle"),
-    ("", "idle"),
-    (None, "idle"),
+@pytest.mark.parametrize("sts,phase,expected", [
+    # healthy / idle / cleared
+    ("🟢", COLLECTING, "healthy"),
+    ("Collection in progress", COLLECTING, "healthy"),
+    ("🔄 reconnected", COLLECTING, "healthy"),
+    ("✅ Bias saved", COLLECTING, "info"),
+    ("🟦", SETUP, "info"),
+    ("Ready", SETUP, "info"),
+    ("Welcome", SETUP, "info"),
+    ("Ready to start", SETUP, "info"),
+    ("something nobody wrote", SETUP, "info"),
+    ("", SETUP, "info"),
+    (None, SETUP, "info"),
+    # L3 — warning (red)
+    ("🚫 FAULT", SETUP, "warning"),
+    ("⛔ connect failed", SETUP, "warning"),
+    ("⛔ device not found", SETUP, "warning"),
+    ("🔌 reconnect failed", COLLECTING, "warning"),
+    ("❌ Fault: no device", SETUP, "warning"),
+    ("FAULT: boom", COLLECTING, "warning"),
+    ("⚠️ start failed", COLLECTING, "warning"),
+    # L2 — caution (amber)
+    ("⚠️ still recording — stop unconfirmed", STOPPED, "caution"),
+    ("⚠️ stop failed", STOPPED, "caution"),
+    ("⚠️ stream stalled", COLLECTING, "caution"),
+    ("🔌 disconnected", COLLECTING, "caution"),
+    # L1 — advisory (blue) / info
+    ("🧨 erased — re-Initialize", STOPPED, "advisory"),
+    ("🎯 Calibrating...", COLLECTING, "info"),
+    ("🛑", STOPPED, "advisory"),                 # acq-stop unverifiable
+    # phase-gated stop: red mid-collection, neutral once the operator has stopped
+    ("🛑 stopped", COLLECTING, "warning"),
+    ("🛑 stopped", STOPPED, "info"),
+    ("🟥", COLLECTING, "warning"),
+    ("🟥", STOPPED, "info"),
+    ("Collection stopped", STOPPED, "info"),
 ])
-def test_status_class(sts, expected):
-    assert _status_class(sts) == expected
+def test_status_class(sts, phase, expected):
+    assert _status_class(sts, phase) == expected
+
+
+def test_device_row_escalates_on_silent_recorded_stream():
+    """A device whose own recorded stream goes stale/lost escalates the row
+    even though the driver never touched memo.sts."""
+    dev = _Dev(_Memo("MSense", sts="🟢"), streams={"MSense [x]": "dev"})
+    stale = build_memo_html("Collection in progress", _SI, [dev],
+                            _snap([_stream("MSense [x]", health="🟡 stale")]))
+    assert f'color:{"#a16207"}">📼 MSense' in stale        # amber (L2)
+    lost = build_memo_html("Collection in progress", _SI, [dev],
+                           _snap([_stream("MSense [x]", health="🔴 lost")]))
+    assert f'color:{"#b91c1c"}">📼 MSense' in lost         # red (L3)
 
 
 def test_sts_detail_strips_leading_glyph():
@@ -165,9 +185,9 @@ def test_recorder_header_colour_by_state():
     rec = build_memo_html("x", _SI, [dev], _snap([], state="recording"))
     assert f'color:{"#15803d"}">📼 0 streams' in rec           # green while recording
     stop = build_memo_html("x", _SI, [dev], _snap([], state="stopped"))
-    assert f'color:{"#b91c1c"}">📼 0 streams' in stop           # red once stopped
+    assert f'color:{"#4b5563"}">📼 0 streams' in stop           # neutral once stopped — not a failure
     una = build_memo_html("x", _SI, [dev], _snap([], state="unavailable"))
-    assert f'color:{"#b91c1c"}">📼 0 streams' in una
+    assert f'color:{"#b91c1c"}">📼 0 streams' in una            # red — no XDF at all
 
 
 def test_html_is_escaped():

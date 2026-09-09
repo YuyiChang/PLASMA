@@ -22,6 +22,15 @@ import time
 
 from plasma.xdf_writer import XDFWriter
 from plasma.lsl_util import channel_format_name, is_plasma_origin
+from plasma.status import STALE_S, IRREGULAR_STALE_S
+
+
+def _stale_after(srate):
+    """How long a stream may be silent before it's '🟡 stale'. A periodic
+    stream (srate > 0) at a few seconds; an irregular/event stream (the
+    journaler, Pupil eye events) is silent by nature — only stale after
+    minutes, so it doesn't raise a false alarm."""
+    return STALE_S if (srate and srate > 0) else IRREGULAR_STALE_S
 
 
 class _StreamStat:
@@ -328,7 +337,7 @@ class SessionRecorder:
                     stat.last_ts = tstamps[-1]
                     stat.last_recv = now
                     stat.health = "🟢"
-            elif not final and now - stat.last_recv > 3.0:
+            elif not final and now - stat.last_recv > _stale_after(stat.srate):
                 with self._lock:
                     stat.health = "🟡 stale"
         return wrote_any

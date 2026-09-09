@@ -43,6 +43,26 @@
   is on the YAMS → Control sub-tab. Older firmware whose `da39c931` isn't
   readable is reported as *not verifiable*, never as a failure.
 
+### 🚦 Session-memo status classification
+
+- Device / stream status colours are now driven by one model
+  (`plasma/status.py`, documented in `docs/failure-levels.md`) instead of
+  scattered keyword matching. An internal ECAM-style 3-level severity
+  (advisory / caution / warning) maps to an Airbus-style colour vocabulary —
+  green (healthy), neutral (status), **blue** (advisory + action), amber
+  (caution), **red** (warning), grey (external). Levels are internal;
+  the operator sees only the colour.
+- **A sensor that stops mid-collection is now always red** (phase-gated). A
+  normal operator Stop is neutral, not red — a completed session and a crashed
+  sensor no longer look identical.
+- **A device row now reflects its own recorded stream going silent** — if the
+  LSL stream a device publishes stalls (`🟡`) or is lost (`🔴`) during a
+  recording, that device's memo row goes amber → red, instead of staying green
+  with a frozen sample count.
+- The irregular **journaler** stream no longer shows a false "🟡 stale" alarm
+  a few seconds after each marker — the recorder's staleness threshold is now
+  rate-aware (periodic streams: seconds; event streams: minutes).
+
 ### 🔌 Restart / Shut down
 
 - The Configuration tab now has **Restart PLASMA** and **Shut down PLASMA**
