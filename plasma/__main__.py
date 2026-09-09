@@ -7,6 +7,7 @@ from plasma import plugins
 from plasma.app_context import app_context
 from plasma.integrated_panel import IntegratedPanel
 from plasma.config import device_config
+from plasma import api as plasma_api
 
 
 def _handle_sigterm(signum, frame):
@@ -133,6 +134,11 @@ def main():
             device_config.interface()
         # with gr.Tab("PL"):
         #     pl.interface()
+
+        # headless control + situational-awareness endpoints (/status, /start,
+        # /stop, /mark, /events) + the 1 Hz durable event-log pump. Additive —
+        # no UI. See docs/headless.md.
+        plasma_api.register(ip)
 
     app.launch(inbrowser=True, share=False)
 

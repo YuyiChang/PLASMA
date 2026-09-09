@@ -23,6 +23,7 @@ MEMO_PANEL_ELEM_ID = "plasma-memo-panel"
 # docs/failure-levels.md — levels are internal, the operator only sees colours.
 from plasma import status as _status
 from plasma.status import CATEGORY_HEX as _STATUS_HEX
+from plasma.api import match_recorder_streams
 
 
 def _status_class(sts, phase=_status.COLLECTING, **kw):
@@ -107,24 +108,9 @@ def build_memo_html(session_sts, session_info, devices, snap, ext_streams=(),
             f'<span class="m-tag">{esc(os.path.basename(snap["file"]) or "")}</span></div>'
         )
 
-    name_to_memo = {}
-    for dev in devices:
-        try:
-            src = dev.get_sources()
-            for lsl_name, key in dev.lsl_streams().items():
-                if key in src:
-                    name_to_memo[lsl_name] = src[key]
-        except Exception:
-            pass
-
-    recorded, orphans = {}, []
-    if snap is not None:
-        for s in snap["streams"]:
-            m = name_to_memo.get(s["name"])
-            if m is not None and not s["external"]:
-                recorded[id(m)] = s
-            else:
-                orphans.append(s)
+    # match the recorder's per-stream stats to the device that publishes each
+    # stream (shared with plasma.api.session_status)
+    recorded, orphans = match_recorder_streams(devices, snap)
 
     for dev in devices:
         memos = dev.memo.values() if isinstance(dev.memo, dict) else [dev.memo]
@@ -447,11 +433,11 @@ class IntegratedPanel():
             try:
                 dev.stop()
             except Exception as e:
-                self.logger.info(f"Error stopping previous device before reinit: {e}")
+                self.logger.warning(f"Error stopping previous device before reinit: {e}")
             try:
                 dev.disconnect()
             except Exception as e:
-                self.logger.info(f"Error disconnecting previous device before reinit: {e}")
+                self.logger.warning(f"Error disconnecting previous device before reinit: {e}")
 
         self.available_devices = []
         active_table = device_config.get_active_table()
@@ -476,7 +462,7 @@ class IntegratedPanel():
             try:
                 self.lsl_recorder.stop()
             except Exception as e:
-                self.logger.info(f"Error stopping previous LSL recorder: {e}")
+                self.logger.warning(f"Error stopping previous LSL recorder: {e}")
             self.lsl_recorder = None
 
         session_dir = getattr(self, "session_dir", None) or os.path.join(
@@ -494,7 +480,7 @@ class IntegratedPanel():
                 gr.Warning("LSL recording unavailable (liblsl/pylsl missing?) "
                            "— session will not be captured to XDF.")
         except Exception as e:
-            self.logger.info(f"Could not start LSL recorder: {e}")
+            self.logger.error(f"Could not start LSL recorder: {e}")
             gr.Warning(f"LSL recording failed to start: {e}")
             self.lsl_recorder = None
 
@@ -517,7 +503,7 @@ class IntegratedPanel():
                 dev.session_dir = self.session_dir
                 dev.start()
             except Exception as e:
-                self.logger.info(f"Error starting device {dev.tag}: {e}")
+                self.logger.error(f"Error starting device {dev.tag}: {e}")
         if self.record_lsl:
             self._start_recorder()
         self.sts = "Collection in progress"
@@ -527,14 +513,14 @@ class IntegratedPanel():
             try:
                 dev.stop()
             except Exception as e:
-                self.logger.info(f"Error stopping device {dev.tag}: {e}")
+                self.logger.warning(f"Error stopping device {dev.tag}: {e}")
         if self.lsl_recorder is not None:
             try:
                 self.lsl_recorder.stop()
                 self.logger.info(
                     f"LSL recording stopped -> {self.lsl_recorder.status()['file']}")
             except Exception as e:
-                self.logger.info(f"Error stopping LSL recorder: {e}")
+                self.logger.warning(f"Error stopping LSL recorder: {e}")
         self._collection_stopped = time.monotonic()
         self.sts = "Collection stopped"
 

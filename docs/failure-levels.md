@@ -157,14 +157,22 @@ device-row fold in `build_memo_html` calls `classify(..., stream_health=…)`.
 | elevated malformed fraction / falling CRC-ok fraction / low SQC throughput | **L1 / caution** |
 | one of N wristbands stalled while the rest stream | **L1 / caution** (coverage loss; the device itself still shows its own L2/L3) |
 
-### MSense SQC / live-stream states (SQC tab, not the memo panel — mapped for consistency)
+### MSense SQC / live-stream states (SQC tab, not the memo panel)
+
+`plasma/status.py` `sqc_level(status, error)` — the `status` + `error` fields of
+`MotionSenseHRV.get_sqc_status()` / `get_live_stream_status()`. Not shown on the
+memo panel, but **folded into the per-source level in `plasma/api.py`
+`session_status()`** (and hence `worst_level`, `events.jsonl`, `[FAULT]`
+markers) so a headless supervisor sees a failed contact check. See
+`docs/headless.md`.
 
 | status | **level / colour** |
 |---|---|
-| `rejected: BUSY / NOT_SUBSCRIBED / MTU_TOO_SMALL / INVALID_COMMAND / WRONG_SESSION` | **L2 / caution** |
-| `rejected: NOT_RECORDING` | **L1 / advisory** |
-| `error: no START_ACK / decode failed / protocol violation` | **L2 / caution** |
-| live `error: stalled` | **L2 / caution** |
+| `rejected` + `BUSY` / `NOT_SUBSCRIBED` / `MTU_TOO_SMALL` / `INVALID_COMMAND` / `WRONG_SESSION` | **L2 / caution** |
+| `rejected` + `NOT_RECORDING` | **L1 / advisory** |
+| `error` — no START_ACK / decode failed / protocol violation | **L2 / caution** |
+| live `error` — `stalled` / request failed | **L2 / caution** |
+| `idle` / `requesting` / `receiving` / `finishing` / `ready` / `streaming` / `stopped` / `unavailable` | **NONE** |
 
 ### External network streams
 

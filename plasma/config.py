@@ -238,8 +238,12 @@ class DeviceConfig:
 
         outs = [armed, btn_restart, btn_shutdown, power_msg, disarm]
 
-        btn_restart.click(lambda a: self._power_click("restart", a), inputs=armed, outputs=outs)
-        btn_shutdown.click(lambda a: self._power_click("shutdown", a), inputs=armed, outputs=outs)
+        # api_name=False — these re-exec / kill the process; keep them off the
+        # headless API surface (see plasma/api.py)
+        btn_restart.click(lambda a: self._power_click("restart", a),
+                          inputs=armed, outputs=outs, api_name=False)
+        btn_shutdown.click(lambda a: self._power_click("shutdown", a),
+                           inputs=armed, outputs=outs, api_name=False)
         disarm.tick(self._power_disarm, outputs=outs)
 
     def _power_click(self, which, armed):

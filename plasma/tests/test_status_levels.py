@@ -7,7 +7,7 @@ import pytest
 
 from plasma import status
 from plasma.status import (
-    Level, classify, health_level, render_class,
+    Level, classify, health_level, render_class, sqc_level,
     SETUP, COLLECTING, STOPPED, STALE_LOST_AGE, IRREGULAR_STALE_S,
 )
 
@@ -95,6 +95,28 @@ def test_health_irregular_stream_is_quiet_by_nature():
 def test_health_gone_is_expected_only_after_stop():
     assert health_level("🔴 lost", srate=2.0, phase=STOPPED) == Level.L1
     assert health_level("🔴 lost", srate=2.0, phase=SETUP) == Level.L3
+
+
+# ── SQC snapshot / live-stream transfer state fold ─────────────────────
+
+@pytest.mark.parametrize("sqc_status,error,level,category", [
+    ("idle", None, Level.NONE, "info"),
+    ("requesting", None, Level.NONE, "info"),
+    ("receiving", None, Level.NONE, "info"),
+    ("ready", None, Level.NONE, "info"),
+    ("streaming", None, Level.NONE, "info"),
+    ("unavailable", None, Level.NONE, "info"),
+    ("rejected", "NOT_RECORDING", Level.L1, "advisory"),
+    ("rejected", "BUSY", Level.L2, "caution"),
+    ("rejected", "MTU_TOO_SMALL", Level.L2, "caution"),
+    ("rejected", "WRONG_SESSION", Level.L2, "caution"),
+    ("error", "no START_ACK within 8s", Level.L2, "caution"),
+    ("error", "decode failed (raw saved): boom", Level.L2, "caution"),
+    ("error", "protocol violation: x", Level.L2, "caution"),
+    ("error", "stalled", Level.L2, "caution"),
+])
+def test_sqc_level(sqc_status, error, level, category):
+    assert sqc_level(sqc_status, error) == (level, category)
 
 
 def test_device_row_takes_the_worse_of_sts_and_stream_health():

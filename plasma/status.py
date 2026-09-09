@@ -36,7 +36,7 @@ from enum import IntEnum
 
 __all__ = [
     "Level", "SETUP", "COLLECTING", "STOPPED", "CATEGORY_HEX",
-    "classify", "render_class", "health_level",
+    "classify", "render_class", "health_level", "sqc_level",
     "STALE_S", "IRREGULAR_STALE_S", "STALE_LOST_AGE",
 ]
 
@@ -147,6 +147,36 @@ def health_level(recorder_health, srate=0.0, stale_age=0.0, phase=COLLECTING):
         # irregular (event) stream — silent by nature
         return Level.L1 if (stale_age and stale_age > IRREGULAR_STALE_S) else Level.NONE
     return Level.NONE
+
+
+def sqc_level(sqc_status, error=None):
+    """``(Level, category)`` for an MSense **SQC snapshot** or **live-stream**
+    transfer state — the ``status`` + ``error`` fields of
+    ``MotionSenseHRV.get_sqc_status()`` / ``get_live_stream_status()``.
+
+    These are the FINITE / INFINITY signal-streaming states (SQC tab), not the
+    memo-panel device status; the mapping mirrors the table in
+    ``docs/failure-levels.md``:
+
+    * ``rejected`` with reason ``NOT_RECORDING`` — the wristband simply isn't
+      recording yet → **L1 / advisory** (one operator action).
+    * any other ``rejected`` reason (``BUSY`` / ``NOT_SUBSCRIBED`` /
+      ``MTU_TOO_SMALL`` / ``INVALID_COMMAND`` / ``WRONG_SESSION``) → **L2**.
+    * ``error`` (no START_ACK, decode failed, protocol violation, live
+      ``stalled``, request failed) → **L2**.
+    * everything else (idle / requesting / receiving / streaming / ready /
+      stopped / unavailable) → **NONE** — a transfer in flight or not started
+      is not a fault.
+    """
+    s = (sqc_status or "").strip().lower()
+    e = (error or "").strip().lower()
+    if s == "rejected":
+        if "not_recording" in e or "not recording" in e:
+            return Level.L1, "advisory"
+        return Level.L2, "caution"
+    if s == "error":
+        return Level.L2, "caution"
+    return Level.NONE, "info"
 
 
 def classify(sts, phase=COLLECTING, *, stream_health=None, srate=0.0, stale_age=0.0):

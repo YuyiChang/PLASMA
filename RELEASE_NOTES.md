@@ -63,6 +63,35 @@
   a few seconds after each marker — the recorder's staleness threshold is now
   rate-aware (periodic streams: seconds; event streams: minutes).
 
+### 🎛️ Headless control & durable fault history
+
+- A running PLASMA now exposes a small typed JSON API (`/status`, `/start`,
+  `/stop`, `/mark`, `/events`) and ships a **`plasma-ctl`** CLI, so a session
+  can be driven and monitored from a script or an unattended rig on the same
+  machine — it operates the same live session as an open browser tab.
+  **Localhost only, no auth.**
+- `plasma-ctl start` / `/start` **report outcomes**: a device that fails to
+  construct, or a sensor that silently isn't collecting, comes back as
+  `ok: false` with the error — previously these were only a browser toast or an
+  `INFO` log line while the UI still said "Collection in progress".
+- New **`events.jsonl`** — an append-only, machine-readable fault history
+  written to both `<data_dir>/events.jsonl` (all sessions, survives restarts)
+  and `<session_dir>/events.jsonl` (travels with the `.xdf`). It records
+  session start/stop, phase changes, `fault` / `recover` transitions (from the
+  internal failure-level model), recorder state, and a 30 s heartbeat.
+- `fault` / `recover` transitions also push **`[FAULT]` / `[RECOVER]` markers**
+  onto the journaler LSL stream, so a mid-collection sensor drop or an
+  uncertain session boundary is visible inside the recording.
+- **MSense SQC snapshot / live-stream transfer errors** (`rejected: BUSY`,
+  `error: no START_ACK`, live `stalled`, …) are now folded into the same
+  L1–L3 model — a failed headless contact check shows up in `/status`
+  `worst_level`, `events.jsonl`, and as a `[FAULT]` marker. `/status` carries
+  the raw `sqc` / `live_stream` state per wristband; trigger a snapshot with
+  the auto-named `/_request` endpoint (see `docs/headless.md`).
+- Genuine device / recorder failures are now logged at `WARNING` / `ERROR`
+  (were `INFO`), so the session log is level-filterable.
+- See `docs/headless.md`.
+
 ### 🔌 Restart / Shut down
 
 - The Configuration tab now has **Restart PLASMA** and **Shut down PLASMA**
