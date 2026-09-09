@@ -2,9 +2,13 @@
 that filtering is computed on the fly for partial (History Only / Custom) and
 still-streaming captures, not just full ones.
 """
+import types
+
+import gradio as gr
 import numpy as np
 
-from plasma.devices.msense.panels.sqc import _build_sqc_figure
+from plasma.devices.msense.panels import sqc as _sqc
+from plasma.devices.msense.panels.sqc import _build_sqc_figure, _update_sqc
 
 
 def _ppg_result(n=2048, **extra):
@@ -51,3 +55,55 @@ def test_too_short_capture_falls_back_to_raw():
     fig = _build_sqc_figure([("W", res)], ppg_mode="Filtered")
     assert not _filtered_trace_names(fig)
     assert any(tr.name and "raw" in tr.name for tr in fig.data)
+
+
+# ── on-screen decimation (browser-memory fix) ───────────────────────────────
+
+def _ecg_result(n, **extra):
+    fs = 512.0
+    y = np.sin(np.arange(n) / 20.0) * 300
+    return {"device_type": "ECG", "channels": {"ecg": y}, "fs": fs,
+            "history_boundary_sample": None, **extra}
+
+
+def test_decimation_caps_on_screen_points():
+    res = _ecg_result(40_000)
+    small = _build_sqc_figure([("W", res)], decimate=True)
+    full = _build_sqc_figure([("W", res)], decimate=False)
+    assert max(len(tr.x) for tr in small.data) <= 3200
+    assert max(len(tr.x) for tr in full.data) >= 39_000
+
+
+# ── _update_sqc gr.skip() cache ───────────────────────────────────────────
+
+class _FakeDev:
+    def __init__(self):
+        self._decoded = _ecg_result(4000)
+        self.status = "ready"
+
+    def get_sqc_devices(self): return ["W1"]
+    def caps_summary(self): return ""
+    def display_name(self, n): return n
+    def get_sqc_status(self, n): return {"status": self.status, "diag": {},
+                                         "saved_path": "/x/w.bin", "error": None,
+                                         "phase": "forward", "bytes_total": None}
+    def get_sqc_preview(self, n): return None
+    def get_sqc_result(self, n): return self._decoded
+    def get_live_stream_status(self, n): return {"status": "idle", "diag": {}}
+    def get_live_stream_preview(self, n): return None
+
+
+def test_update_sqc_skips_unchanged_plot(monkeypatch):
+    dev = _FakeDev()
+    ip = types.SimpleNamespace()
+    monkeypatch.setattr(_sqc, "_msense_device", lambda _ip: dev)
+
+    _txt, fig1 = _update_sqc(ip)
+    assert hasattr(fig1, "data")                              # first render is a real figure
+
+    _txt, fig2 = _update_sqc(ip)
+    assert isinstance(fig2, dict) and fig2 == gr.skip()       # nothing changed -> skip
+
+    dev._decoded = _ecg_result(9000)                          # new snapshot data
+    _txt, fig3 = _update_sqc(ip)
+    assert hasattr(fig3, "data")

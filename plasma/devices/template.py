@@ -18,7 +18,11 @@ class PlasmaMemo():
         self.window_s = window_s
         # named rolling buffers of (t, value), t = seconds since the caller's
         # own time reference (e.g. session start) — pruned to the last window_s
-        self.channels = {ch: deque() for ch in (channels or [])}
+        # by set_data(). The maxlen is a hard safety cap so a device whose `t`
+        # stalls (stops advancing) can't grow a buffer without bound; the
+        # time-based prune is the precise trim in normal operation.
+        self._maxlen = max(4096, int(window_s * 250))
+        self.channels = {ch: deque(maxlen=self._maxlen) for ch in (channels or [])}
         # optional {group label: [channel names]} the Signal visualizer uses to
         # put related channels on one shared subplot instead of one row each
         self.channel_groups = dict(channel_groups or {})
@@ -34,7 +38,9 @@ class PlasmaMemo():
         self.latest = f"{now} {msg}"
 
     def set_data(self, channel, value, t):
-        buf = self.channels.setdefault(channel, deque())
+        buf = self.channels.get(channel)
+        if buf is None:
+            buf = self.channels[channel] = deque(maxlen=getattr(self, "_maxlen", 30000))
         buf.append((t, value))
         cutoff = t - self.window_s
         while buf and buf[0][0] < cutoff:

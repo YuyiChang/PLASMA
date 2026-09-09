@@ -13,6 +13,7 @@ from plasma.config import device_config
 from plasma.app_context import app_context
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from plasma.plot_util import decimate_minmax
 
 VISUALIZER_PLOT_ELEM_ID = "plasma-visualizer-plot"
 MEMO_PANEL_ELEM_ID = "plasma-memo-panel"
@@ -239,7 +240,11 @@ class IntegratedPanel():
             with gr.Column(elem_id=VISUALIZER_PLOT_ELEM_ID):
                 plot = gr.Plot(show_label=False)
 
-            timer = gr.Timer(value=0.2, active=True)
+            # starts inactive — build_blocks() activates it only while the Data
+            # Dashboard tab is on screen (see plasma/__main__.py). 2 Hz is
+            # plenty for a live monitor and halves the figure churn vs 5 Hz.
+            timer = gr.Timer(value=0.5, active=False)
+            self._viz_timer = timer
 
             btn_refresh_sources.click(
                 self.refresh_visual_sources, outputs=source_select
@@ -319,6 +324,9 @@ class IntegratedPanel():
         groups = selected_groups or []
 
         if not groups or not selected_sources:
+            if getattr(self, "_viz_sig", None) == "idle":
+                return gr.skip()
+            self._viz_sig = "idle"
             fig = go.Figure()
             fig.update_layout(
                 title="Select a data source and channel(s) to visualize",
@@ -326,6 +334,26 @@ class IntegratedPanel():
                 uirevision="plasma-visualizer",
             )
             return fig
+
+        # Skip the rebuild + full re-serialisation when no plotted buffer has
+        # advanced since the last tick. gr.Plot tears down and recreates its
+        # Plotly <div> on every value it receives (gradio#10252), so an
+        # unchanged figure costs real browser memory — same reason _render_memo
+        # caches its HTML.
+        sig = [tuple(selected_sources), tuple(groups)]
+        for group in groups:
+            for ch in grouped.get(group, [group]):
+                for src_name in selected_sources:
+                    memo = sources.get(src_name)
+                    if memo is None or ch not in memo.channels:
+                        continue
+                    buf = memo.channels.get(ch)
+                    sig.append((src_name, ch, len(buf) if buf else 0,
+                                buf[-1][0] if buf else None))
+        sig = tuple(sig)
+        if getattr(self, "_viz_sig", None) == sig:
+            return gr.skip()
+        self._viz_sig = sig
 
         fig = make_subplots(rows=len(groups), cols=1, shared_xaxes=True, vertical_spacing=0.015)
 
@@ -336,6 +364,7 @@ class IntegratedPanel():
                     if memo is None or ch not in memo.channels:
                         continue
                     x, y = memo.get_series(ch)
+                    x, y = decimate_minmax(x, y, max_points=4000)
                     fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=f"{src_name} · {ch}"), row=row, col=1)
 
             fig.update_yaxes(title_text=group, title_standoff=4, row=row, col=1)

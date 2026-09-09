@@ -71,7 +71,10 @@ def build_imu_tab(ip):
             btn_calibrate = gr.Button("🎯 Calibrate gyro bias")
 
         orientation_plot = gr.Plot(show_label=False)
-        timer = gr.Timer(value=0.2, active=True)
+        # starts inactive — tools.py activates it only while the IMU sub-tab is
+        # on screen (gr.Plot leaks its Plotly div on every tick, gradio#10252).
+        timer = gr.Timer(value=0.2, active=False)
+        ip._imu_timer = timer
 
         def _refresh():
             names = list(_orientation_sources(ip).keys())
@@ -105,6 +108,13 @@ def _update_orientation(ip, selected_sources):
         latest = [memo.get_latest(ch) for ch in _ORIENT_CHANNELS]
         if all(v is not None for v in latest):
             quat_sources.append((src_name, tuple(v[1] for v in latest)))
+
+    # Skip the rebuild when the orientation hasn't moved since the last tick —
+    # gr.Plot recreates the whole (WebGL) Plotly scene on every value it gets.
+    sig = tuple((n, tuple(round(v, 4) for v in q)) for n, q in quat_sources) or "nodata"
+    if getattr(ip, "_imu_sig", None) == sig:
+        return gr.skip()
+    ip._imu_sig = sig
 
     if not quat_sources:
         return go.Figure(layout=dict(title="No orientation data — Start a session with IMU Stream enabled",

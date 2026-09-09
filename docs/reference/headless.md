@@ -122,6 +122,9 @@ c.predict(api_name="/_live_stop")
 These names are derived from the handler functions (`_request`, `_cancel`,
 `_live_start`, `_live_stop`); they are **not** part of the curated API and can
 shift if that panel is refactored — confirm with `Client(...).view_api()`.
+Each returns `[status_markdown, timer_update]` (the second element re-arms the
+tab's refresh timer for a browser; a headless caller ignores it). The result
+that matters is read from `/status` — see below.
 
 ### 3. Parse the result from `/status`
 
