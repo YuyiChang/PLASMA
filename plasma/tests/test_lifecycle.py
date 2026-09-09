@@ -9,6 +9,23 @@ from plasma import __main__ as m
 from plasma.integrated_panel import IntegratedPanel
 
 
+# ── build_blocks ───────────────────────────────────────────────────────────
+
+def test_build_blocks_assembles_the_ui(monkeypatch):
+    """build_blocks() (shared by main() and scripts/capture_screenshots.py)
+    returns a gr.Blocks with every core tab + the headless API registered."""
+    import gradio as gr
+    from plasma import plugins
+    from plasma.config import device_config
+
+    plugins.load_plugins()
+    device_config.refresh_defaults()
+    ip = IntegratedPanel()
+    app = m.build_blocks(ip)
+    assert isinstance(app, gr.Blocks)
+    assert hasattr(ip, "_event_log")          # plasma_api.register(ip) ran
+
+
 # ── _relaunch_argv ──────────────────────────────────────────────────────────
 
 def test_relaunch_argv_from_source(monkeypatch):

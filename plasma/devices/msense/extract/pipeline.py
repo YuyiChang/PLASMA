@@ -314,16 +314,22 @@ class DataExtractor():
     def collect_all_data_by_prefix(self, path, prefix: str):
         """Concatenate every binary matching `prefix`. Returns (df, spec) or (None, None).
 
-        Chunks of one session (v3 chunked naming) share a single filename-derived
-        t0, but for the flat per-record formats `read_bin` computes CDCT as a
-        cumsum starting at 0 per file — concatenating chunks as-is would restart
-        the clock at every chunk boundary. Group by t0 (== by session; a
-        non-chunked file is its own one-chunk "session") and, for any session
-        spanning more than one chunk, restitch CDCT as one continuous clock
-        anchored at that session's t0. Container formats (ac:v3) already anchor
-        every sample to a real, session-continuous RTC tick internally and are
-        left untouched — recomputing from Counter alone would only lose that
-        per-block recalibration, not fix anything.
+        Chunks of one session (chunked `<id><sensor><session_id>_<chunk>.bin`
+        naming) share a single filename-derived t0, but the flat per-record
+        formats' `read_bin` computes CDCT as a cumsum starting at 0 per file —
+        concatenating chunks as-is would restart the clock at every chunk
+        boundary. Group by t0 (== by session; a non-chunked file is its own
+        one-chunk "session") and, for any session spanning more than one chunk,
+        restitch CDCT as one continuous clock anchored at that session's t0.
+
+        Container formats need no CDCT recompute:
+        - `ac:v3` (ACF3) anchors every sample to a session-continuous RTC tick
+          per block internally.
+        - `ecg:block_v2` (ECF2) makes `CDCT = t0 + Counter/512` where `Counter`
+          is the recording-local sample ordinal that already advances across
+          chunks — so plain concatenation is continuous. ECF2 chunks are
+          re-ordered by `chunk_index` and split by `recording_id`, and a gap
+          in `chunk_index` or `Counter` is reported (not silently joined).
         """
         files = gather_files_by_prefix(prefix, path)
         if len(files) == 0:
@@ -343,9 +349,12 @@ class DataExtractor():
         if not sessions:
             return None, None
 
+        is_ecb2 = spec is not None and spec.key == "ecg:block_v2"
         session_dfs = []
         for t0, dfs in sessions.items():
-            if len(dfs) == 1:
+            if is_ecb2:
+                session_dfs.extend(_stitch_ecb2_chunks(dfs))
+            elif len(dfs) == 1:
                 session_dfs.append(dfs[0])
             else:
                 combined = pd.concat(dfs, ignore_index=True)
@@ -353,7 +362,7 @@ class DataExtractor():
                     combined = formats.recompute_cdct(combined, spec, t0)
                 session_dfs.append(combined)
 
-        return pd.concat(session_dfs), spec
+        return pd.concat(session_dfs, ignore_index=True), spec
 
     def obtain_predix_ids(self):
         all_files = [""]
@@ -384,6 +393,34 @@ def gather_files_by_prefix(prefix: str, path):
             all_files.append(file)
     all_files.sort(key=file_sort)
     return all_files
+
+
+def _stitch_ecb2_chunks(dfs):
+    """Order ECF2 chunk DataFrames by `recording_id` then `chunk_index`,
+    report any `chunk_index` or `Counter` discontinuity, and return one
+    concatenated DataFrame per recording (CDCT is already continuous — see
+    `formats._read_ecf2`)."""
+    by_recording = {}
+    for df in dfs:
+        by_recording.setdefault(df.attrs.get("recording_id"), []).append(df)
+
+    out = []
+    for rec_id, group in by_recording.items():
+        group.sort(key=lambda d: d.attrs.get("chunk_index", 0))
+        prev = None
+        for d in group:
+            ci = d.attrs.get("chunk_index", 0)
+            if prev is not None:
+                if ci != prev.attrs.get("chunk_index", 0) + 1:
+                    print(f"ECG recording {rec_id}: missing chunk between index "
+                          f"{prev.attrs.get('chunk_index')} and {ci} — joined anyway")
+                gap = d.attrs.get("first_sample_index", 0) - prev.attrs.get("last_sample_index", -1)
+                if gap != 1:
+                    print(f"ECG recording {rec_id}: {gap - 1} sample gap at the "
+                          f"chunk {ci} boundary")
+            prev = d
+        out.append(pd.concat(group, ignore_index=True))
+    return out
 
 
 def counter_validity_check(df: pd.DataFrame, spec=None):

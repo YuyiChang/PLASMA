@@ -18,12 +18,24 @@ import pytest
 pylsl = pytest.importorskip("pylsl")
 pyxdf = pytest.importorskip("pyxdf")
 
-from plasma.lsl_recorder import SessionRecorder
+from plasma.lsl_recorder import SessionRecorder, _stale_after
 from plasma.lsl_util import mark_plasma_origin
+from plasma.status import STALE_S, IRREGULAR_STALE_S
 
 
 def _name(prefix):
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def test_stale_after_is_rate_aware():
+    # a periodic stream goes stale in seconds; an irregular / event stream
+    # (journaler, Pupil eye events, srate == 0) only after minutes — no false
+    # 'stale' alarm on a stream that's silent by nature
+    assert _stale_after(50.0) == STALE_S
+    assert _stale_after(2.0) == STALE_S
+    assert _stale_after(0.0) == IRREGULAR_STALE_S
+    assert _stale_after(None) == IRREGULAR_STALE_S
+    assert IRREGULAR_STALE_S > STALE_S * 10
 
 
 def _outlet(name, stype, nchan, srate, fmt, plasma_origin=False):

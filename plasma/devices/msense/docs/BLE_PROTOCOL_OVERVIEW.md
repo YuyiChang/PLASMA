@@ -24,7 +24,7 @@ connection; nothing here multiplexes onto a shared characteristic.
 
 | Characteristic | UUID | Direction | Used for |
 |---|---|---|---|
-| Collection start/stop | `da39c931…` | write `uint32` (0/1) | toggles the firmware's recording state |
+| Collection start/stop | `da39c931…` | **write + read** `uint8` (0/1) | toggles the firmware's recording state; the driver **reads it back after a Stop** to confirm acquisition actually halted (the ATT write ack ≠ shutdown-complete — SENSOR_STREAM_CENTRAL_HOWTO.md §1). `1` after a stop ⇒ `⚠️ still recording — stop unconfirmed` + `[ACQ] … UNCONFIRMED` journal marker |
 | Unix time | `da39c932…` | write `uint64` | sets the wristband's RTC on session start |
 | Participant encoding | `da39c933…` | write/read `uint32` | tags recorded files with a participant code |
 | Flash erase | `da39c934…` | write `uint8` | write `68` (`ERASE_CODE`) to wipe onboard flash |
@@ -61,20 +61,22 @@ by `battery_handler` — a single raw percentage byte.
 ## Nordic UART Service — `6e400001…`
 
 The one service with a structured, stateful request/response protocol instead
-of a plain read/notify value: the Central sends a fixed `START` command and
-the firmware streams back a fixed 96 KiB raw ECG or PPG payload (a
-pre-buffered *history* window, then a live-acquired *forward* window),
-framed into `START_ACK` / `DATA` / `END` / `RESULT` notifications. Full
-byte-level spec, handshake state machine, timeouts, and status/error codes:
+of a plain read/notify value: the Central sends a `START` / `START_INFINITY` /
+`STOP` command and the firmware streams back a raw ECG or PPG payload —
+a 32 KiB pre-buffered *history* window, then either a bounded 96 KiB *forward*
+window (FINITE) or continuous future data (INFINITY) — framed into
+`START_ACK` / `DATA` / `END` / `RESULT` notifications. `DATA` is addressed by
+an absolute uint64 byte offset. Full byte-level spec, handshake state machine,
+timeouts, and status/error codes:
 
-- **`NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md`** — the authoritative protocol
-  spec (Central's job: discover, subscribe, `START`, validate `DATA`
-  sequencing/phase boundary, confirm `END`).
-- `ECG_PPG_SIGNAL_QUALITY_BLE_NUS.md` — points at the above (a stale, guessed
-  earlier version of this protocol has since been superseded) and maps each
-  piece to its host-side implementation file.
-- Record payload layouts once decoded: `PPG_PACKED_16_BYTE_FORMAT.md`,
-  `ECG_TEMP_DATA_FORMAT.md`.
+- **`SENSOR_STREAM_CENTRAL_HOWTO.md`** — the authoritative sensor-stream **v0**
+  spec (Central's job: discover, subscribe, `START`, reassemble `DATA` by
+  offset, decode records, confirm `END`).
+- **`ECG_BLOCK_FORMAT.md`** — the 4096-byte `ECB2` ECG block + `ECF2` file.
+- `NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md` — historical protocol v1 (superseded;
+  kept for old `.ecg`/`.ppg` blobs).
+- Record payload layouts once decoded: `PPG_PACKED_16_BYTE_FORMAT.md`
+  (unchanged), `ECG_BLOCK_FORMAT.md` (`ECG_TEMP_DATA_FORMAT.md` for old files).
 
 Driver side: `plasma/devices/msense/nus_stream.py` is the pure protocol codec
 (`StreamSession`, no BLE); `device.py`'s `register_nus_notify`,
@@ -131,11 +133,13 @@ either.
 
 | Topic | File |
 |---|---|
-| NUS/SQC wire protocol (authoritative) | `NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md` |
+| Sensor-stream v0 wire protocol (authoritative) | `SENSOR_STREAM_CENTRAL_HOWTO.md` |
+| ECG `ECB2` block + `ECF2` file format | `ECG_BLOCK_FORMAT.md` |
 | NUS/SQC host-side implementation map | `ECG_PPG_SIGNAL_QUALITY_BLE_NUS.md` |
 | Demo IMU-stream characteristic packet layout | `IMU_STREAM_BLE_CHARACTERISTIC.md` |
 | PPG record layout (post-decode) | `PPG_PACKED_16_BYTE_FORMAT.md` |
-| ECG record layout (post-decode) | `ECG_TEMP_DATA_FORMAT.md` |
+| ECG record layout — old framed `.bin` files | `ECG_TEMP_DATA_FORMAT.md` |
+| Sensor-stream v1 (historical) | `NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md` |
 | Accelerometer on-flash binary format | `ACCELEROMETER_BINARY_FORMAT.md` |
 | `GyroX/Y/Z` → `QuatX/Y/Z` CSV column rename | `migration_gyro_to_quat.md` |
 | Converting recorded binaries to CSV | `data_extraction.md` |

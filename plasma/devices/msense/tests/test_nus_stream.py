@@ -1,19 +1,19 @@
-"""Offline coverage for the NUS bounded-stream protocol codec / session FSM.
+"""Offline coverage for the MSense sensor-stream **v0** codec / session FSM.
 
 The message builders live in the shipped :mod:`plasma.devices.msense.nus_sim`
 module (the simulated wristband in ``plasma.devices.msense_demo`` streams the
-same frames), so the tests and the simulator can't drift from each other. The
-thin wrappers below just pin the test session id and the historical geometry.
+same frames), so the tests and the simulator can't drift from each other.
 """
-import struct
-
 import pytest
 
 from plasma.devices.msense import nus_stream as ns, nus_sim
 from plasma.devices.msense.nus_stream import (
     StreamSession, ProtocolError, parse_start_ack, build_command,
-    OP_START, MSG_START_ACK, MSG_DATA, MSG_END, MSG_RESULT,
-    PROFILE, DEVICE_PPG, DEVICE_ECG, TOTAL_SENSOR_BYTES,
+    OP_START, OP_STOP, OP_START_INFINITY,
+    MSG_START_ACK, MSG_DATA, MSG_END, MSG_RESULT,
+    MODE_FINITE, MODE_INFINITY, FINITE_TOTAL_BYTES, HISTORY_BYTES,
+    END_SUCCESS, END_STOPPED, END_STORAGE_ERROR, END_NOT_RECORDING,
+    ECG, PPG,
 )
 
 SID = 0x11223344
@@ -23,38 +23,17 @@ def _msg(msg_type, payload, sid=SID):
     return nus_sim.message(msg_type, payload, sid)
 
 
-def _start_ack_payload(device_type, *, name=b"MSense4X-TEST", **kw):
-    return nus_sim.start_ack_payload(device_type, name=name, **kw)
-
-
-def _data_msgs(device_type, chunk_records, *, history=None, forward=None):
-    return nus_sim.data_messages(device_type, chunk_records, session_id=SID,
-                                 history=history, forward=forward)
-
-
-def _end_payload(device_type, data_count, *, status=0, detail=0, override=None,
-                 history=None, forward=None):
-    return nus_sim.end_payload(device_type, data_count, status=status,
-                               detail=detail, override=override,
-                               history=history, forward=forward)
-
-
-def _run(device_type, chunk_records=64):
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(device_type)))
-    data, n = _data_msgs(device_type, chunk_records)
-    for m in data:
-        s.feed(m)
-    s.feed(_msg(MSG_END, _end_payload(device_type, n)))
-    return s
-
-
 # ── command / header ────────────────────────────────────────────────────────
 
 def test_build_command_shape():
     cmd = build_command(OP_START, SID)
-    assert cmd == b"MS" + bytes([1, 1]) + SID.to_bytes(4, "little")
+    assert cmd == b"MS" + bytes([0, OP_START]) + SID.to_bytes(4, "little")
     assert len(cmd) == 8
+
+
+def test_build_command_opcodes():
+    assert build_command(OP_STOP, SID)[3] == 0x02
+    assert build_command(OP_START_INFINITY, SID)[3] == 0x03
 
 
 def test_build_command_rejects_zero_session():
@@ -63,353 +42,277 @@ def test_build_command_rejects_zero_session():
 
 
 def test_header_length_mismatch():
-    s = StreamSession(SID)
-    good = _msg(MSG_START_ACK, _start_ack_payload(DEVICE_PPG))
+    s = StreamSession(SID, product=PPG)
+    good = _msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE))
     with pytest.raises(ProtocolError):
         s.feed(good + b"\x00")
 
 
-def test_header_wrong_session():
-    s = StreamSession(SID)
+def test_header_wrong_stream_id():
+    s = StreamSession(SID, product=PPG)
     with pytest.raises(ProtocolError):
-        s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_PPG), sid=0x99999999))
+        s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(), sid=0x99999999))
+
+
+def test_header_wrong_version():
+    s = StreamSession(SID, product=PPG)
+    frame = bytearray(_msg(MSG_START_ACK, nus_sim.start_ack_payload()))
+    frame[2] = 1  # v1
+    with pytest.raises(ProtocolError):
+        s.feed(bytes(frame))
+
+
+def test_header_nonzero_flags():
+    s = StreamSession(SID, product=PPG)
+    frame = bytearray(_msg(MSG_START_ACK, nus_sim.start_ack_payload()))
+    frame[10] = 1
+    with pytest.raises(ProtocolError):
+        s.feed(bytes(frame))
 
 
 # ── START_ACK validation ────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("device_type", [DEVICE_PPG, DEVICE_ECG])
-def test_start_ack_valid_profiles(device_type):
-    ack = parse_start_ack(_start_ack_payload(device_type))
-    p = PROFILE[device_type]
-    assert ack.record_size == p["record_size"]
-    assert ack.history_records == p["history_records"]
-    assert ack.device_id_hex == "DEADBEEF01020304"
+def test_start_ack_finite():
+    ack = parse_start_ack(nus_sim.start_ack_payload(MODE_FINITE))
+    assert ack.mode == MODE_FINITE
+    assert ack.planned_total == FINITE_TOTAL_BYTES
+    assert ack.history_units == 8
 
 
-def test_start_ack_bad_name_length():
-    bad = bytearray(_start_ack_payload(DEVICE_PPG))
-    bad[32] = 20  # name-length byte > 16
+def test_start_ack_infinity():
+    ack = parse_start_ack(nus_sim.start_ack_payload(MODE_INFINITY))
+    assert ack.mode == MODE_INFINITY
+    assert ack.planned_total == 0
+
+
+def test_start_ack_bad_length():
     with pytest.raises(ProtocolError):
-        parse_start_ack(bytes(bad))
+        parse_start_ack(b"\x00" * 15)
 
 
-def test_start_ack_nonzero_after_name():
-    bad = bytearray(_start_ack_payload(DEVICE_PPG, name=b"AB"))
-    bad[40] = 0x7F  # inside the 16-byte name field, past the 2-char name
+def test_start_ack_bad_mode():
+    p = bytearray(nus_sim.start_ack_payload())
+    p[0] = 5
     with pytest.raises(ProtocolError):
-        parse_start_ack(bytes(bad))
+        parse_start_ack(bytes(p))
 
 
-def test_start_ack_bad_commit():
+def test_start_ack_bad_history_units():
     with pytest.raises(ProtocolError):
-        parse_start_ack(_start_ack_payload(DEVICE_PPG, commit=b"Z" * 40))
+        parse_start_ack(nus_sim.start_ack_payload(history_units=4))
 
 
 def test_start_ack_nonzero_reserved():
     with pytest.raises(ProtocolError):
-        parse_start_ack(_start_ack_payload(DEVICE_PPG, reserved=b"\x00\x00\x01\x00\x00\x00"))
+        parse_start_ack(nus_sim.start_ack_payload(reserved=b"\x00\x01\x00\x00\x00\x00"))
 
 
-def test_start_ack_inconsistent_geometry_rejected():
-    """history/forward changed without recomputing total -> arithmetic
-    self-consistency check ((history+forward)*record_size == total) fires.
-    Exact history/forward counts are no longer pinned to PROFILE, but the
-    reported fields must still agree with each other."""
+def test_start_ack_finite_wrong_total():
     with pytest.raises(ProtocolError):
-        parse_start_ack(_start_ack_payload(DEVICE_PPG, override={"history": 999}))
+        parse_start_ack(nus_sim.start_ack_payload(MODE_FINITE, planned_total=999))
 
 
-def test_start_ack_inconsistent_total_rejected():
+def test_start_ack_infinity_nonzero_total():
     with pytest.raises(ProtocolError):
-        parse_start_ack(_start_ack_payload(DEVICE_ECG, override={"total": 1234}))
+        parse_start_ack(nus_sim.start_ack_payload(MODE_INFINITY, planned_total=131072))
 
 
-def test_start_ack_new_firmware_geometry_accepted():
-    """A self-consistent geometry that differs from the historical PROFILE
-    counts (e.g. an ECG firmware build with a larger forward window) is
-    accepted. Regression test for the 131,076-vs-98,304 outage: only
-    self-consistency and the sane-record-count bound are enforced now, not
-    an exact match against one memorized geometry."""
-    history, forward, rs = 2731, 8192, PROFILE[DEVICE_ECG]["record_size"]
-    total = (history + forward) * rs
-    assert total == 131076 and total != TOTAL_SENSOR_BYTES
-    ack = parse_start_ack(_start_ack_payload(DEVICE_ECG, override={
-        "history": history, "forward": forward, "total": total,
-    }))
-    assert ack.history_records == history
-    assert ack.forward_records == forward
-    assert ack.total_bytes == total
+# ── FINITE happy path + reassembly ─────────────────────────────────────────
 
-
-def test_start_ack_record_size_mismatch_rejected():
-    """record_size must still match the known per-device-type record format
-    — the decoders are written for exactly 16-byte PPG / 12-byte ECG
-    frames, so this is not relaxed."""
-    p = PROFILE[DEVICE_PPG]
-    bad_size = 99
-    with pytest.raises(ProtocolError):
-        parse_start_ack(_start_ack_payload(DEVICE_PPG, override={
-            "record_size": bad_size,
-            "total": (p["history_records"] + p["forward_records"]) * bad_size,
-        }))
-
-
-def test_start_ack_geometry_exceeds_sane_bound_rejected():
-    """A self-consistent but absurdly large record count is still rejected,
-    so a garbled ACK can't make the host buffer an unbounded payload."""
-    p = PROFILE[DEVICE_ECG]
-    known_total = p["history_records"] + p["forward_records"]
-    huge = known_total * (ns.MAX_RECORD_MULTIPLE + 1)
-    history, forward, rs = huge // 2, huge - huge // 2, p["record_size"]
-    with pytest.raises(ProtocolError):
-        parse_start_ack(_start_ack_payload(DEVICE_ECG, override={
-            "history": history, "forward": forward, "total": (history + forward) * rs,
-        }))
-
-
-def test_start_ack_nonpositive_geometry_rejected():
-    p = PROFILE[DEVICE_ECG]
-    with pytest.raises(ProtocolError):
-        parse_start_ack(_start_ack_payload(DEVICE_ECG, override={
-            "history": 0, "forward": p["forward_records"],
-            "total": p["forward_records"] * p["record_size"],
-        }))
-
-
-# ── happy path + reassembly ─────────────────────────────────────────────────
-
-@pytest.mark.parametrize("device_type", [DEVICE_PPG, DEVICE_ECG])
-@pytest.mark.parametrize("chunk", [1, 7, 64, 511])
-def test_full_stream_reassembles(device_type, chunk):
-    s = _run(device_type, chunk)
+@pytest.mark.parametrize("product", [PPG, ECG])
+@pytest.mark.parametrize("mtu", [128, 247, 498])
+def test_finite_stream_reassembles(product, mtu):
+    body = bytes((i * 37) % 256 for i in range(FINITE_TOTAL_BYTES))
+    s = StreamSession(SID, product=product, expect_mode=MODE_FINITE)
+    for frame in nus_sim.finite_sequence(SID, body, mtu=mtu):
+        s.feed(frame)
     assert s.state == ns.COMPLETE
-    assert len(s.payload) == TOTAL_SENSOR_BYTES
-    assert s.records_received == s.records_total
-    prov = s.provenance()
-    assert prov["final_status"] == "SUCCESS"
-    assert prov["device_type"] == PROFILE[device_type]["name"]
+    assert bytes(s.payload) == body
+    assert s.bytes_received == FINITE_TOTAL_BYTES
+    assert s.provenance()["final_status"] == "SUCCESS"
 
 
-# ── ordering / framing violations ───────────────────────────────────────────
+def test_finite_success_short_fails():
+    body = bytes(FINITE_TOTAL_BYTES - 100)
+    s = StreamSession(SID, product=ECG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)))
+    for m in nus_sim.data_stream(body, stream_id=SID):
+        s.feed(m)
+    s.feed(nus_sim.end_message(END_SUCCESS, SID))
+    assert s.state == ns.FAILED
+    assert "of 131072" in s.error
+
+
+def test_finite_data_past_total_fails():
+    s = StreamSession(SID, product=ECG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)))
+    for m in nus_sim.data_stream(bytes(FINITE_TOTAL_BYTES), stream_id=SID):
+        s.feed(m)
+    with pytest.raises(ProtocolError):
+        s.feed(nus_sim.data_message(FINITE_TOTAL_BYTES, b"\x00" * 8, SID))
+    assert s.state == ns.FAILED
+
+
+# ── offset reassembly / framing violations ─────────────────────────────────
 
 def test_data_before_start_ack():
-    s = StreamSession(SID)
-    prefix = struct.pack("<IIHBB", 0, 0, 1, 0, 0)
+    s = StreamSession(SID, product=PPG)
     with pytest.raises(ProtocolError):
-        s.feed(_msg(MSG_DATA, prefix + b"\x00" * 16))
+        s.feed(nus_sim.data_message(0, b"\x00" * 16, SID))
 
 
 def test_second_start_ack_is_error():
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_PPG)))
+    s = StreamSession(SID, product=PPG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload()))
     with pytest.raises(ProtocolError):
-        s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_PPG)))
+        s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload()))
     assert s.state == ns.FAILED
 
 
-def test_result_after_start_ack_is_error():
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_PPG)))
+def test_gap_in_offsets_fails():
+    s = StreamSession(SID, product=PPG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload()))
+    s.feed(nus_sim.data_message(0, b"\x11" * 32, SID))
     with pytest.raises(ProtocolError):
-        s.feed(_msg(MSG_RESULT, struct.pack("<HBB", 0, 2, 0)))
-
-
-def test_dropped_data_notification_fails_session():
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_PPG)))
-    data, n = _data_msgs(DEVICE_PPG, 64)
-    s.feed(data[0])
-    with pytest.raises(ProtocolError):
-        s.feed(data[2])  # skipped data[1]
+        s.feed(nus_sim.data_message(64, b"\x22" * 32, SID))   # skipped 32..64
     assert s.state == ns.FAILED
 
 
-def test_reordered_data_notification_fails_session():
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_PPG)))
-    data, n = _data_msgs(DEVICE_PPG, 64)
-    s.feed(data[0])
-    s.feed(data[1])
+def test_duplicate_offset_fails():
+    s = StreamSession(SID, product=PPG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload()))
+    s.feed(nus_sim.data_message(0, b"\x11" * 32, SID))
     with pytest.raises(ProtocolError):
-        s.feed(data[1])  # duplicate / stale
+        s.feed(nus_sim.data_message(0, b"\x11" * 32, SID))
     assert s.state == ns.FAILED
 
 
-def test_data_after_end_is_error():
-    s = _run(DEVICE_PPG, 128)
-    data, _ = _data_msgs(DEVICE_PPG, 128)
+def test_empty_data_payload_fails():
+    s = StreamSession(SID, product=PPG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload()))
     with pytest.raises(ProtocolError):
-        s.feed(data[0])
+        s.feed(_msg(MSG_DATA, (0).to_bytes(8, "little"), SID))
 
 
-# ── END validation ──────────────────────────────────────────────────────────
-
-def test_full_stream_new_geometry_reassembles():
-    """End-to-end run with new-firmware-style ECG geometry (a different
-    total than the historical 98,304): the session must complete, proving
-    the whole pipeline (not just parse_start_ack) is geometry-agnostic."""
-    history, forward = 2731, 8192
-    rs = PROFILE[DEVICE_ECG]["record_size"]
-    total = (history + forward) * rs
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG, override={
-        "history": history, "forward": forward, "total": total,
-    })))
-    data, n = _data_msgs(DEVICE_ECG, 200, history=history, forward=forward)
-    for m in data:
+def test_fragment_splitting_a_record_ok():
+    """A DATA fragment may end mid-record; the session just tracks bytes and
+    the decoder's reassembler handles record boundaries."""
+    body = bytes((i * 7) % 256 for i in range(FINITE_TOTAL_BYTES))
+    spans = []
+    s = StreamSession(SID, product=PPG, on_span=lambda o, d: spans.append((o, d)))
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)))
+    # odd fragment size => most fragments split a 16-byte record
+    for m in nus_sim.data_stream(body, stream_id=SID, fragment=17):
         s.feed(m)
-    s.feed(_msg(MSG_END, _end_payload(DEVICE_ECG, n, history=history, forward=forward)))
+    s.feed(nus_sim.end_message(END_SUCCESS, SID))
     assert s.state == ns.COMPLETE
-    assert len(s.payload) == total == 131076
+    assert b"".join(d for _, d in spans) == body
 
 
-def test_end_bytes_checked_against_session_total_not_global():
-    """Regression test: _accept_end must compare END's total_bytes_sent (and
-    the locally accumulated payload) against *this session's own*
-    start_ack.total_bytes, not the historical TOTAL_SENSOR_BYTES constant.
-    An END that reports the old global total instead of this session's real
-    (larger) total must fail, not silently pass."""
-    history, forward = 2731, 8192
-    rs = PROFILE[DEVICE_ECG]["record_size"]
-    total = (history + forward) * rs
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG, override={
-        "history": history, "forward": forward, "total": total,
-    })))
-    data, n = _data_msgs(DEVICE_ECG, 200, history=history, forward=forward)
-    for m in data:
+# ── STOP / END semantics ───────────────────────────────────────────────────
+
+def test_stop_keeps_partial_and_is_clean():
+    s = StreamSession(SID, product=ECG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)))
+    partial = bytes(5000)
+    for m in nus_sim.data_stream(partial, stream_id=SID):
         s.feed(m)
-    bad_end = _end_payload(DEVICE_ECG, n, history=history, forward=forward,
-                            override={"total": TOTAL_SENSOR_BYTES})
-    s.feed(_msg(MSG_END, bad_end))
-    assert s.state == ns.FAILED
-    assert "bytes" in s.error
-
-
-def test_end_wrong_data_count_fails():
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG)))
-    data, n = _data_msgs(DEVICE_ECG, 200)
-    for m in data:
-        s.feed(m)
-    s.feed(_msg(MSG_END, _end_payload(DEVICE_ECG, n + 5)))
-    assert s.state == ns.FAILED
-    assert "DATA count" in s.error
-
-
-def test_end_nonzero_detail_fails():
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG)))
-    data, n = _data_msgs(DEVICE_ECG, 200)
-    for m in data:
-        s.feed(m)
-    s.feed(_msg(MSG_END, _end_payload(DEVICE_ECG, n, detail=-3)))
-    assert s.state == ns.FAILED
-
-
-def test_rejected_start_via_result():
-    s = StreamSession(SID)
-    events = s.feed(_msg(MSG_RESULT, struct.pack("<HBB", 0x0002, 0x01, 0)))
-    assert s.state == ns.REJECTED
-    assert events[0][1].status_name == "HISTORY_NOT_READY"
-
-
-def test_partial_session_never_complete():
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_PPG)))
-    data, n = _data_msgs(DEVICE_PPG, 64)
-    for m in data[:-1]:
-        s.feed(m)
-    # END arrives early, before the last DATA chunk
-    s.feed(_msg(MSG_END, _end_payload(DEVICE_PPG, n)))
-    assert s.state == ns.FAILED
-    assert len(s.payload) != TOTAL_SENSOR_BYTES
-
-
-def test_quick_mode_cancel_retains_partial_payload():
-    """Quick mode: CANCEL during the stream -> device answers END/CANCELLED ->
-    session is CANCELLED (not FAILED) and the partial payload is kept."""
-    rs = PROFILE[DEVICE_ECG]["record_size"]
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG)))
-
-    data, _ = _data_msgs(DEVICE_ECG, 100)          # 100 records / message
-    kept = 0
-    for m in data[:10]:                            # ~1000 history records
-        s.feed(m)
-        kept += 100
-    assert s.records_received == kept
-    assert len(s.payload) == kept * rs
-
-    # END with CANCELLED status and the partial counts the device actually sent
-    end = _end_payload(DEVICE_ECG, 10, status=0x0008,
-                       override={"history": kept, "forward": 0, "total": kept * rs})
-    s.feed(_msg(MSG_END, end))
-
-    assert s.state == ns.CANCELLED               # not FAILED
+    s.feed(nus_sim.end_message(END_STOPPED, SID))
+    assert s.state == ns.STOPPED
     assert s.is_terminal
-    assert len(s.payload) == kept * rs           # payload retained, decodable
-    assert s.records_received == kept
-    assert s.error is None                       # clean cancel, nothing to warn about
-
-
-def test_cancel_without_data_loss_has_no_warning():
-    """A CANCELLED end whose byte/DATA-message counts match what was locally
-    received (regardless of how far short of the full history/forward target
-    it fell) is a clean, expected outcome — not a validation failure."""
-    rs = PROFILE[DEVICE_ECG]["record_size"]
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG)))
-
-    data, _ = _data_msgs(DEVICE_ECG, 100)
-    fed = 0
-    for m in data[:5]:
-        s.feed(m)
-        fed += 1
-    local_bytes = fed * 100 * rs
-
-    end = _end_payload(DEVICE_ECG, fed, status=0x0008,
-                       override={"history": fed * 100, "forward": 0, "total": local_bytes})
-    s.feed(_msg(MSG_END, end))
-
-    assert s.state == ns.CANCELLED
+    assert s.bytes_received == 5000
     assert s.error is None
 
 
-def test_cancel_with_data_loss_stays_cancelled_but_warns():
-    """A CANCELLED end whose self-reported counts DON'T match what was
-    locally received (a real dropped/miscounted notification) still lands in
-    CANCELLED (not escalated to FAILED — the device did answer the cancel
-    cleanly) but carries a non-None warning naming the mismatch."""
-    rs = PROFILE[DEVICE_ECG]["record_size"]
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG)))
-
-    data, _ = _data_msgs(DEVICE_ECG, 100)
-    for m in data[:5]:
+def test_not_recording_end_fails_but_keeps_prefix():
+    s = StreamSession(SID, product=ECG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)))
+    for m in nus_sim.data_stream(bytes(4096), stream_id=SID):
         s.feed(m)
-    local_bytes = 5 * 100 * rs
-
-    # device claims fewer bytes were sent than we actually received locally
-    end = _end_payload(DEVICE_ECG, 5, status=0x0008,
-                       override={"history": 500, "forward": 0, "total": local_bytes - rs})
-    s.feed(_msg(MSG_END, end))
-
-    assert s.state == ns.CANCELLED
-    assert s.error is not None
-    assert "data loss during cancel" in s.error
-    assert "bytes" in s.error
-    assert len(s.payload) == local_bytes           # payload still retained/decodable
-
-
-def test_end_non_success_non_cancelled_status_fails():
-    """A genuine device-reported fault (not a cancel, not a success) is a
-    real error and stays FAILED."""
-    s = StreamSession(SID)
-    s.feed(_msg(MSG_START_ACK, _start_ack_payload(DEVICE_ECG)))
-    data, n = _data_msgs(DEVICE_ECG, 200)
-    for m in data:
-        s.feed(m)
-    s.feed(_msg(MSG_END, _end_payload(DEVICE_ECG, n, status=0x0009)))  # STORAGE_ERROR
+    s.feed(nus_sim.end_message(END_NOT_RECORDING, SID))
     assert s.state == ns.FAILED
-    assert s.error.startswith("status STORAGE_ERROR")
+    assert s.error == "status NOT_RECORDING"
+    assert s.bytes_received == 4096
+
+
+def test_storage_error_end_fails():
+    s = StreamSession(SID, product=ECG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)))
+    s.feed(nus_sim.end_message(END_STORAGE_ERROR, SID))
+    assert s.state == ns.FAILED
+    assert s.error == "status STORAGE_ERROR"
+
+
+def test_data_after_end_is_error():
+    s = StreamSession(SID, product=ECG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)))
+    s.feed(nus_sim.end_message(END_STOPPED, SID))
+    with pytest.raises(ProtocolError):
+        s.feed(nus_sim.data_message(0, b"\x00" * 16, SID))
+
+
+# ── RESULT ─────────────────────────────────────────────────────────────────
+
+def test_rejected_start_via_result():
+    s = StreamSession(SID, product=PPG)
+    events = s.feed(nus_sim.result_message(ns.RESULT_BUSY, SID))
+    assert s.state == ns.REJECTED
+    assert events[0][1].status_name == "BUSY"
+
+
+def test_result_after_start_ack_is_rejected_stop_not_fatal():
+    """A RESULT while RECEIVING is a rejected STOP: surfaced as an event, the
+    stream stays active."""
+    s = StreamSession(SID, product=ECG)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)))
+    events = s.feed(nus_sim.result_message(ns.RESULT_WRONG_SESSION, SID))
+    assert events[0][0] == "result"
+    assert s.state == ns.RECEIVING
+
+
+# ── INFINITY ───────────────────────────────────────────────────────────────
+
+def test_infinity_incremental_consume_bounded_buffer():
+    spans = []
+    s = StreamSession(SID, product=PPG, expect_mode=MODE_INFINITY,
+                      on_span=lambda o, d: spans.append(len(d)))
+    chunks = (bytes(4096) for _ in range(2000))   # ~8 MiB total
+    for frame in nus_sim.infinity_chunks(SID, chunks, mtu=247):
+        s.feed(frame)
+    assert s.state == ns.RECEIVING
+    assert s.bytes_received == 2000 * 4096
+    assert sum(spans) == 2000 * 4096
+    # payload carry stays bounded despite ~8 MiB streamed
+    assert len(s.payload) <= ns.INFINITY_CARRY_CAP
+
+
+def test_infinity_stop_ends_stopped():
+    s = StreamSession(SID, product=PPG, expect_mode=MODE_INFINITY)
+    frames = list(nus_sim.infinity_chunks(SID, [bytes(4096)]))
+    for f in frames:
+        s.feed(f)
+    s.feed(nus_sim.end_message(END_STOPPED, SID))
+    assert s.state == ns.STOPPED
+
+
+def test_infinity_success_is_error():
+    s = StreamSession(SID, product=PPG, expect_mode=MODE_INFINITY)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_INFINITY)))
+    s.feed(nus_sim.end_message(END_SUCCESS, SID))
+    assert s.state == ns.FAILED
+
+
+def test_mode_mismatch_rejected():
+    s = StreamSession(SID, product=PPG, expect_mode=MODE_INFINITY)
+    with pytest.raises(ProtocolError):
+        s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)))
+
+
+def test_history_done_flag():
+    s = StreamSession(SID, product=ECG, expect_mode=MODE_INFINITY)
+    s.feed(_msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_INFINITY)))
+    assert not s.history_done
+    for m in nus_sim.data_stream(bytes(HISTORY_BYTES), stream_id=SID):
+        s.feed(m)
+    assert s.history_done
+    assert s.phase_name == "forward"

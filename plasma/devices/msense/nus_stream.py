@@ -1,22 +1,35 @@
-"""NUS bounded sensor-stream protocol (version 1) — pure codec + session FSM.
+"""MSense shared sensor-stream protocol **v0** — pure codec + session FSM.
 
-No BLE / device state lives here: this module turns raw notification byte
-strings into validated protocol events and reassembles the bounded sensor
-payload whose size START_ACK reports for that session (historically a fixed
-96 KiB in protocol version 1, but firmware has since shipped other
-geometries — see TOTAL_SENSOR_BYTES/MAX_RECORD_MULTIPLE below). See
-local_docs/NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md for the wire contract;
-plasma/devices/msense.py drives it over an actual BLE link and
-plasma/ppg_ecg_records.py decodes the reassembled payload.
+No BLE / device state lives here: this module turns raw NUS TX notification
+byte strings into validated protocol events and drives byte-offset reassembly
+of the sensor payload. ``plasma/devices/msense/device.py`` runs it over an
+actual BLE link; ``plasma/devices/msense/records.py`` decodes the reassembled
+bytes (ECB2 blocks for ECG, packed-16 records for PPG).
+
+Wire contract: ``plasma/devices/msense/docs/SENSOR_STREAM_CENTRAL_HOWTO.md``
+and ``ECG_BLOCK_FORMAT.md``. This is a hard cut-over from protocol v1 (the old
+``NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md`` path): the version byte is now ``0``,
+DATA is addressed by an absolute uint64 byte offset (no sequence number, record
+index or phase field), START_ACK is 16 bytes with no device/git metadata, and
+END/RESULT are a bare uint16 status. Sender and receiver must be upgraded
+together — there is no negotiation and no fallback.
+
+Two stream modes share one path:
+
+* **FINITE** (``OP_START``) — 32 KiB rolling history + 96 KiB future =
+  exactly 131 072 sensor bytes, then END.
+* **INFINITY** (``OP_START_INFINITY``) — the same 32 KiB history, then future
+  data continuously until STOP / disconnect / acquisition end / fault.
 """
 from dataclasses import dataclass, field
 
 MAGIC = b"\x4d\x53"  # 'MS'
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 0
 
 # command opcodes (host -> peripheral, written to NUS RX)
-OP_START = 0x01
-OP_CANCEL = 0x02
+OP_START = 0x01           # FINITE capture
+OP_STOP = 0x02            # end the matching stream immediately
+OP_START_INFINITY = 0x03  # continuous future capture
 
 # TX message types (peripheral -> host, NUS TX notifications)
 MSG_START_ACK = 0x81
@@ -25,89 +38,98 @@ MSG_END = 0x83
 MSG_RESULT = 0x84
 
 HEADER_LEN = 12
-START_ACK_PAYLOAD_LEN = 96
-RESULT_PAYLOAD_LEN = 4
-END_PAYLOAD_LEN = 24
-DATA_PREFIX_LEN = 12
+START_ACK_PAYLOAD_LEN = 16
+END_PAYLOAD_LEN = 2
+RESULT_PAYLOAD_LEN = 2
+DATA_OFFSET_LEN = 8
 
-# Historical protocol-version-1 total, both device types, at doc-writing time.
-# No longer enforced as an equality gate (firmware geometry has since moved:
-# an ECG build was observed reporting 131,076). Kept only as a reference/
-# fallback for callers that want *a* number before a session's START_ACK
-# arrives. See PROFILE below and MAX_RECORD_MULTIPLE for what's actually
-# validated.
-TOTAL_SENSOR_BYTES = 98304
+# stream geometry, fixed by the format version (no negotiable parameters)
+HISTORY_BYTES = 32_768          # rolling history sent at the front of every stream
+HISTORY_UNIT_BYTES = 4_096      # START_ACK reports history size in these units
+HISTORY_UNITS = 8              # 8 * 4096 == HISTORY_BYTES
+FINITE_FUTURE_BYTES = 98_304
+FINITE_TOTAL_BYTES = HISTORY_BYTES + FINITE_FUTURE_BYTES   # 131 072
+ATT_MTU_MIN = 128
 
-# START_ACK's own history_records/forward_records/total_bytes are trusted as
-# long as they're internally consistent (see parse_start_ack) and not
-# absurd — this bounds a single device-type's total record count to guard
-# against a garbled ACK causing unbounded host-side buffering, without
-# pinning to one exact historical geometry that firmware is free to change.
-MAX_RECORD_MULTIPLE = 4
+MODE_FINITE = 0
+MODE_INFINITY = 1
+MODE_NAMES = {MODE_FINITE: "FINITE", MODE_INFINITY: "INFINITY"}
 
-PHASE_HISTORY = 0
-PHASE_FORWARD = 1
-
-STATUS_NAMES = {
-    0x0000: "SUCCESS",
-    0x0001: "NOT_RECORDING",
-    0x0002: "HISTORY_NOT_READY",
-    0x0003: "NOT_SUBSCRIBED",
-    0x0004: "BUSY",
-    0x0005: "MTU_TOO_SMALL",
-    0x0006: "INVALID_COMMAND",
-    0x0007: "UNSUPPORTED_VERSION",
-    0x0008: "CANCELLED",
-    0x0009: "STORAGE_ERROR",
-    0x000A: "INTERNAL_ERROR",
-    0x000B: "NOT_INITIALIZED",
-    0x000C: "WRONG_SESSION",
-    0x000D: "DISCONNECTED",
-}
-STATUS_SUCCESS = 0x0000
-
-STATE_NAMES = {
-    0x00: "NOT_RECORDING",
-    0x01: "HISTORY_FILLING",
-    0x02: "READY",
-    0x03: "ACTIVE",
-    0x04: "ABORTING",
-    0x05: "UNINITIALIZED",
+# END terminal status (uint16)
+END_SUCCESS = 0x0000
+END_NOT_RECORDING = 0x0001
+END_STOPPED = 0x0008
+END_STORAGE_ERROR = 0x0009
+END_INTERNAL_ERROR = 0x000A
+END_DISCONNECTED = 0x000D        # synthesized locally; END delivery not expected
+END_BUFFER_OVERFLOW = 0x000E
+END_STATUS_NAMES = {
+    END_SUCCESS: "SUCCESS",
+    END_NOT_RECORDING: "NOT_RECORDING",
+    END_STOPPED: "STOPPED",
+    END_STORAGE_ERROR: "STORAGE_ERROR",
+    END_INTERNAL_ERROR: "INTERNAL_ERROR",
+    END_DISCONNECTED: "DISCONNECTED",
+    END_BUFFER_OVERFLOW: "BUFFER_OVERFLOW",
 }
 
-# device-type -> expected record geometry (START_ACK validation table)
-DEVICE_PPG = 1
-DEVICE_ECG = 2
+# RESULT command-rejection status (uint16). 0x0002 is a retired reservation
+# (former HISTORY_NOT_READY) and is never emitted by this design.
+RESULT_NOT_RECORDING = 0x0001
+RESULT_NOT_SUBSCRIBED = 0x0003
+RESULT_BUSY = 0x0004
+RESULT_MTU_TOO_SMALL = 0x0005
+RESULT_INVALID_COMMAND = 0x0006
+RESULT_UNSUPPORTED_VERSION = 0x0007
+RESULT_NOT_INITIALIZED = 0x000B
+RESULT_WRONG_SESSION = 0x000C
+RESULT_STATUS_NAMES = {
+    RESULT_NOT_RECORDING: "NOT_RECORDING",
+    0x0002: "RESERVED",
+    RESULT_NOT_SUBSCRIBED: "NOT_SUBSCRIBED",
+    RESULT_BUSY: "BUSY",
+    RESULT_MTU_TOO_SMALL: "MTU_TOO_SMALL",
+    RESULT_INVALID_COMMAND: "INVALID_COMMAND",
+    RESULT_UNSUPPORTED_VERSION: "UNSUPPORTED_VERSION",
+    RESULT_NOT_INITIALIZED: "NOT_INITIALIZED",
+    RESULT_WRONG_SESSION: "WRONG_SESSION",
+}
+
+# product -> record geometry. The product is NOT reported in START_ACK any more;
+# the central knows it from the advertised name (MSense4ECG / MSense4PPG) and
+# looks the rest up here. ECG's "record" is one 4096-byte ECB2 block.
+ECG = "ECG"
+PPG = "PPG"
 PROFILE = {
-    DEVICE_PPG: {
+    ECG: {
+        "name": "ECG",
+        "record_size": 4_096,          # one ECB2 block
+        "samples_per_block": 1_358,
+        "sample_rate": 512.0,
+        "bytes_per_second": 512.0 * 4_096 / 1_358,        # ≈ 1544 B/s
+        "history_records": HISTORY_BYTES // 4_096,        # 8 blocks
+        "finite_future_records": FINITE_FUTURE_BYTES // 4_096,   # 24 blocks
+        "channels": ("ecg",),
+    },
+    PPG: {
         "name": "PPG",
         "record_size": 16,
-        "rate_hz": 256.0,
-        "history_records": 2048,
-        "forward_records": 4096,
+        "sample_rate": 256.0,
+        "bytes_per_second": 256.0 * 16,                   # 4096 B/s
+        "history_records": HISTORY_BYTES // 16,           # 2048 records
+        "finite_future_records": FINITE_FUTURE_BYTES // 16,      # 6144 records
         "channels": ("ir1", "ir2", "g1", "g2"),
-        "overall_timeout_s": 120.0,
-        "fresh_history_s": 8.0,
-    },
-    DEVICE_ECG: {
-        "name": "ECG",
-        "record_size": 12,
-        "rate_hz": 512.0,
-        "history_records": 2731,
-        "forward_records": 5461,
-        "channels": ("ecg",),
-        "overall_timeout_s": 90.0,
-        "fresh_history_s": 5.334,
     },
 }
 
-# Host safety bounds. The idle timeout (no DATA/END for this long) is the real
-# stall detector; overall_timeout_s above is just a generous backstop. The
-# handoff doc's "at least 35/45 s" overall figures are provisional minimums
-# measured on a fast link — a 96 KiB transfer over a slow BLE link plus the
-# forward-window acquisition legitimately runs longer while still progressing.
+# Host safety bounds. The no-progress timeout (no ACK/DATA/END for this long) is
+# the real stall detector; there is no whole-session ceiling for INFINITY.
 HANDSHAKE_TIMEOUT_S = 5.0
-IDLE_TIMEOUT_S = 8.0
+NOPROGRESS_TIMEOUT_S = 15.0        # SENSOR_STREAM_CENTRAL_HOWTO.md §7 default
+# INFINITY never declares a total; cap how many raw bytes the session will hold
+# for diagnostics / a partial-record carry so a runaway stream can't grow
+# unbounded host memory. The live decoder consumes spans as they arrive.
+INFINITY_CARRY_CAP = 1 << 20      # 1 MiB
 
 
 class ProtocolError(Exception):
@@ -116,17 +138,21 @@ class ProtocolError(Exception):
 
 # ── commands ────────────────────────────────────────────────────────────────
 
-def build_command(opcode, session_id):
+def build_command(opcode, stream_id):
     """8-byte command for the NUS RX characteristic."""
-    if not (0 < session_id <= 0xFFFFFFFF):
-        raise ValueError("session_id must be a nonzero uint32")
-    return MAGIC + bytes([PROTOCOL_VERSION, opcode]) + session_id.to_bytes(4, "little")
+    if not (0 < stream_id <= 0xFFFFFFFF):
+        raise ValueError("stream_id must be a nonzero uint32")
+    return MAGIC + bytes([PROTOCOL_VERSION, opcode]) + stream_id.to_bytes(4, "little")
 
 
-def new_session_id():
-    """A random nonzero uint32 suitable as a START request/session ID."""
+def new_stream_id():
+    """A random nonzero uint32 suitable as a START / STOP stream ID."""
     import os
     return int.from_bytes(os.urandom(4), "little") or 1
+
+
+# back-compat alias for callers/tests that still say "session"
+new_session_id = new_stream_id
 
 
 # ── framing ─────────────────────────────────────────────────────────────────
@@ -134,7 +160,7 @@ def new_session_id():
 @dataclass
 class Header:
     msg_type: int
-    session_id: int
+    stream_id: int
     payload_len: int
     payload: bytes
 
@@ -148,7 +174,7 @@ def parse_header(msg):
     if msg[2] != PROTOCOL_VERSION:
         raise ProtocolError(f"unsupported protocol version {msg[2]}")
     msg_type = msg[3]
-    session_id = int.from_bytes(msg[4:8], "little")
+    stream_id = int.from_bytes(msg[4:8], "little")
     payload_len = int.from_bytes(msg[8:10], "little")
     flags = int.from_bytes(msg[10:12], "little")
     if flags != 0:
@@ -157,206 +183,125 @@ def parse_header(msg):
         raise ProtocolError(
             f"length mismatch: notification {len(msg)}, header says {HEADER_LEN + payload_len}"
         )
-    return Header(msg_type, session_id, payload_len, bytes(msg[HEADER_LEN:]))
+    return Header(msg_type, stream_id, payload_len, bytes(msg[HEADER_LEN:]))
 
 
 # ── message payloads ────────────────────────────────────────────────────────
 
 @dataclass
 class StartAck:
-    device_type: int
-    record_format_version: int
-    record_size: int
-    rate_num: int
-    rate_den: int
-    history_records: int
-    forward_records: int
-    total_bytes: int
-    device_id_hex: str
-    device_name: str
-    git_commit: str
-    git_tree_state: int
+    mode: int
+    history_units: int
+    planned_total: int    # sensor bytes for FINITE; 0 (== unknown) for INFINITY
 
     @property
-    def device_name_label(self):
-        return PROFILE.get(self.device_type, {}).get("name", f"type{self.device_type}")
-
-    @property
-    def rate_hz(self):
-        return self.rate_num / self.rate_den if self.rate_den else 0.0
-
-    @property
-    def git_tree_state_label(self):
-        return {0: "clean", 1: "dirty", 2: "unknown"}.get(self.git_tree_state, "?")
+    def mode_name(self):
+        return MODE_NAMES.get(self.mode, f"mode{self.mode}")
 
 
 def parse_start_ack(payload):
     if len(payload) != START_ACK_PAYLOAD_LEN:
-        raise ProtocolError(f"START_ACK payload is {len(payload)} bytes, expected 96")
+        raise ProtocolError(
+            f"START_ACK payload is {len(payload)} bytes, expected {START_ACK_PAYLOAD_LEN}")
 
-    device_type = payload[0]
-    record_format_version = payload[1]
-    record_size = int.from_bytes(payload[2:4], "little")
-    rate_num = int.from_bytes(payload[4:8], "little")
-    rate_den = int.from_bytes(payload[8:12], "little")
-    history_records = int.from_bytes(payload[12:16], "little")
-    forward_records = int.from_bytes(payload[16:20], "little")
-    total_bytes = int.from_bytes(payload[20:24], "little")
-    device_id_hex = payload[24:32].hex().upper()
-    name_len = payload[32]
-    name_field = payload[33:49]
-    git_commit = payload[49:89].decode("ascii", errors="replace")
-    git_tree_state = payload[89]
-    reserved = payload[90:96]
+    mode = payload[0]
+    history_units = payload[1]
+    reserved = payload[2:8]
+    planned_total = int.from_bytes(payload[8:16], "little")
 
-    if name_len > 16:
-        raise ProtocolError(f"START_ACK device-name length {name_len} > 16")
-    if any(name_field[name_len:]):
-        raise ProtocolError("START_ACK bytes after device name are nonzero")
-    if len(git_commit) != 40 or any(c not in "0123456789abcdef" for c in git_commit):
-        raise ProtocolError("START_ACK git commit is not 40 lowercase hex chars")
+    if mode not in (MODE_FINITE, MODE_INFINITY):
+        raise ProtocolError(f"START_ACK bad mode {mode}")
+    if history_units != HISTORY_UNITS:
+        raise ProtocolError(
+            f"START_ACK history units {history_units} != {HISTORY_UNITS}")
     if any(reserved):
         raise ProtocolError("START_ACK reserved bytes nonzero")
-    if (history_records + forward_records) * record_size != total_bytes:
-        raise ProtocolError("START_ACK counts * record_size != total bytes")
-
-    profile = PROFILE.get(device_type)
-    if profile is None:
-        raise ProtocolError(f"START_ACK unknown device type {device_type}")
-    if record_size != profile["record_size"]:
+    if mode == MODE_FINITE and planned_total != FINITE_TOTAL_BYTES:
         raise ProtocolError(
-            f"START_ACK record size {record_size} != {profile['record_size']} for {profile['name']}"
-        )
-    # Exact history/forward counts are firmware's to choose (this has already
-    # changed once across firmware revisions); only guard against a garbled
-    # ACK requesting an unreasonable amount of host-side buffering.
-    known_total = profile["history_records"] + profile["forward_records"]
-    reported_total = history_records + forward_records
-    if history_records <= 0 or forward_records <= 0:
+            f"START_ACK FINITE total {planned_total} != {FINITE_TOTAL_BYTES}")
+    if mode == MODE_INFINITY and planned_total != 0:
         raise ProtocolError(
-            f"START_ACK record geometry {history_records}/{forward_records} not positive"
-        )
-    if reported_total > known_total * MAX_RECORD_MULTIPLE:
-        raise ProtocolError(
-            f"START_ACK record geometry {history_records}/{forward_records} "
-            f"({reported_total} records) exceeds sane bound "
-            f"({known_total * MAX_RECORD_MULTIPLE}) for {profile['name']}"
-        )
-
-    device_name = name_field[:name_len].decode("utf-8", errors="replace")
-    return StartAck(
-        device_type, record_format_version, record_size, rate_num, rate_den,
-        history_records, forward_records, total_bytes, device_id_hex, device_name,
-        git_commit, git_tree_state,
-    )
+            f"START_ACK INFINITY total {planned_total} != 0 (unknown)")
+    return StartAck(mode, history_units, planned_total)
 
 
 @dataclass
 class DataMsg:
-    sequence: int
-    first_record_index: int
-    record_count: int
-    phase: int
-    records: bytes
+    offset: int
+    data: bytes
 
 
-def parse_data(payload, record_size):
-    if len(payload) < DATA_PREFIX_LEN:
-        raise ProtocolError("DATA payload shorter than prefix")
-    sequence = int.from_bytes(payload[0:4], "little")
-    first_record_index = int.from_bytes(payload[4:8], "little")
-    record_count = int.from_bytes(payload[8:10], "little")
-    phase = payload[10]
-    reserved = payload[11]
-    records = payload[DATA_PREFIX_LEN:]
-
-    if reserved != 0:
-        raise ProtocolError("DATA reserved byte nonzero")
-    if phase not in (PHASE_HISTORY, PHASE_FORWARD):
-        raise ProtocolError(f"DATA bad phase {phase}")
-    if record_count == 0:
-        raise ProtocolError("DATA record_count is zero")
-    if len(payload) != DATA_PREFIX_LEN + record_count * record_size:
-        raise ProtocolError(
-            f"DATA length {len(payload)} != {DATA_PREFIX_LEN + record_count * record_size}"
-        )
-    return DataMsg(sequence, first_record_index, record_count, phase, records)
-
-
-@dataclass
-class ResultMsg:
-    status: int
-    peripheral_state: int
-
-    @property
-    def status_name(self):
-        return STATUS_NAMES.get(self.status, f"0x{self.status:04x}")
-
-    @property
-    def peripheral_state_name(self):
-        return STATE_NAMES.get(self.peripheral_state, f"0x{self.peripheral_state:02x}")
-
-
-def parse_result(payload):
-    if len(payload) != RESULT_PAYLOAD_LEN:
-        raise ProtocolError(f"RESULT payload is {len(payload)} bytes, expected 4")
-    if payload[3] != 0:
-        raise ProtocolError("RESULT reserved byte nonzero")
-    return ResultMsg(int.from_bytes(payload[0:2], "little"), payload[2])
+def parse_data(payload):
+    if len(payload) < DATA_OFFSET_LEN + 1:
+        raise ProtocolError("DATA payload has no sensor bytes")
+    offset = int.from_bytes(payload[0:DATA_OFFSET_LEN], "little")
+    data = payload[DATA_OFFSET_LEN:]
+    return DataMsg(offset, data)
 
 
 @dataclass
 class EndMsg:
     status: int
-    peripheral_state: int
-    history_records_sent: int
-    forward_records_captured: int
-    total_bytes_sent: int
-    data_message_count: int
-    detail: int
 
     @property
     def status_name(self):
-        return STATUS_NAMES.get(self.status, f"0x{self.status:04x}")
+        return END_STATUS_NAMES.get(self.status, f"0x{self.status:04x}")
 
 
 def parse_end(payload):
     if len(payload) != END_PAYLOAD_LEN:
-        raise ProtocolError(f"END payload is {len(payload)} bytes, expected 24")
-    if payload[3] != 0:
-        raise ProtocolError("END reserved byte nonzero")
-    return EndMsg(
-        status=int.from_bytes(payload[0:2], "little"),
-        peripheral_state=payload[2],
-        history_records_sent=int.from_bytes(payload[4:8], "little"),
-        forward_records_captured=int.from_bytes(payload[8:12], "little"),
-        total_bytes_sent=int.from_bytes(payload[12:16], "little"),
-        data_message_count=int.from_bytes(payload[16:20], "little"),
-        detail=int.from_bytes(payload[20:24], "little", signed=True),
-    )
+        raise ProtocolError(f"END payload is {len(payload)} bytes, expected {END_PAYLOAD_LEN}")
+    return EndMsg(int.from_bytes(payload[0:2], "little"))
+
+
+@dataclass
+class ResultMsg:
+    status: int
+
+    @property
+    def status_name(self):
+        return RESULT_STATUS_NAMES.get(self.status, f"0x{self.status:04x}")
+
+
+def parse_result(payload):
+    if len(payload) != RESULT_PAYLOAD_LEN:
+        raise ProtocolError(
+            f"RESULT payload is {len(payload)} bytes, expected {RESULT_PAYLOAD_LEN}")
+    return ResultMsg(int.from_bytes(payload[0:2], "little"))
 
 
 # ── session state machine ───────────────────────────────────────────────────
 
-# states
 START_PENDING = "START_PENDING"
 RECEIVING = "RECEIVING"
-COMPLETE = "COMPLETE"
-REJECTED = "REJECTED"
-CANCELLED = "CANCELLED"
-FAILED = "FAILED"
+COMPLETE = "COMPLETE"      # FINITE SUCCESS, fully validated
+STOPPED = "STOPPED"       # explicit matching STOP won the terminal decision
+REJECTED = "REJECTED"     # START rejected via RESULT
+FAILED = "FAILED"         # framing / ordering / device-fault termination
 
-_TERMINAL = {COMPLETE, REJECTED, CANCELLED, FAILED}
+_TERMINAL = {COMPLETE, STOPPED, REJECTED, FAILED}
+
+_UINT64_MAX = (1 << 64) - 1
 
 
 @dataclass
 class StreamSession:
-    """Feed one whole TX notification at a time via ``feed``; never concatenate
-    notifications. Terminal state is one of COMPLETE / REJECTED / CANCELLED /
-    FAILED. On COMPLETE, ``payload`` holds exactly ``start_ack.total_bytes``
-    validated bytes (the size is session-reported, not a fixed constant)."""
+    """Feed one whole TX notification at a time via :meth:`feed`; never
+    concatenate notifications.
 
-    session_id: int
+    ``product`` is ``"ECG"`` / ``"PPG"`` (known from the advertised name).
+    ``expect_mode`` is ``MODE_FINITE`` / ``MODE_INFINITY`` and must match the
+    START command that was sent. ``on_span(offset, data)`` — if set — is called
+    with every accepted contiguous DATA span, in order, for incremental
+    decoding; the raw bytes are still accumulated in ``payload`` for FINITE
+    (so the whole capture can be saved) but not for INFINITY.
+    """
+
+    stream_id: int
+    product: str = ECG
+    expect_mode: int = MODE_FINITE
+    on_span: object = None
+
     state: str = START_PENDING
     start_ack: StartAck = None
     result: ResultMsg = None
@@ -364,11 +309,7 @@ class StreamSession:
     error: str = None
     payload: bytearray = field(default_factory=bytearray)
 
-    # running validation cursors
-    _next_sequence: int = 0
-    _next_record_index: int = 0
-    _data_message_count: int = 0
-    _phase: int = PHASE_HISTORY
+    _next_offset: int = 0
 
     # ---- introspection --------------------------------------------------
 
@@ -377,66 +318,59 @@ class StreamSession:
         return self.state in _TERMINAL
 
     @property
-    def device_type(self):
-        return self.start_ack.device_type if self.start_ack else None
+    def mode(self):
+        return self.start_ack.mode if self.start_ack else self.expect_mode
 
     @property
-    def records_total(self):
-        if not self.start_ack:
-            return 0
-        return self.start_ack.history_records + self.start_ack.forward_records
+    def bytes_received(self):
+        return self._next_offset
 
     @property
-    def records_received(self):
-        if not self.start_ack:
-            return 0
-        return self._next_record_index
+    def bytes_total(self):
+        """Planned FINITE total, or ``None`` for INFINITY / before START_ACK."""
+        if self.start_ack and self.start_ack.mode == MODE_FINITE:
+            return self.start_ack.planned_total
+        return None
+
+    @property
+    def history_done(self):
+        """True once the transport cursor has passed the 32 KiB history region."""
+        return self._next_offset >= HISTORY_BYTES
 
     @property
     def phase_name(self):
-        return "forward" if self._phase == PHASE_FORWARD else "history"
+        return "forward" if self.history_done else "history"
+
+    @property
+    def fs(self):
+        return PROFILE[self.product]["sample_rate"]
 
     def provenance(self, **extra):
-        """Sidecar metadata dict. Callers add wall-clock times etc. via kwargs."""
         d = {
             "protocol_version": PROTOCOL_VERSION,
-            "session_id": self.session_id,
+            "stream_id": self.stream_id,
+            "product": PROFILE[self.product]["name"],
+            "mode": MODE_NAMES.get(self.mode, str(self.mode)),
             "final_state": self.state,
+            "bytes_received": self._next_offset,
         }
         if self.start_ack:
-            a = self.start_ack
-            d.update(
-                device_type=a.device_name_label,
-                device_type_code=a.device_type,
-                device_name=a.device_name,
-                device_id=a.device_id_hex,
-                git_commit=a.git_commit,
-                git_tree_state=a.git_tree_state_label,
-                record_format_version=a.record_format_version,
-                record_size=a.record_size,
-                record_rate=f"{a.rate_num}/{a.rate_den}",
-                history_records=a.history_records,
-                forward_records=a.forward_records,
-            )
+            d["planned_total"] = self.start_ack.planned_total
         if self.end:
-            d.update(
-                final_status=self.end.status_name,
-                total_bytes=self.end.total_bytes_sent,
-                data_message_count=self.end.data_message_count,
-            )
+            d["final_status"] = self.end.status_name
         d.update(extra)
         return d
 
     # ---- the state machine --------------------------------------------
 
     def feed(self, notification):
-        """Process one notification. Returns a list of (kind, obj) events where
-        kind is 'start_ack' | 'data' | 'end' | 'result'. Raises ProtocolError
-        (and moves to FAILED) on any violation."""
+        """Process one notification. Returns a list of ``(kind, obj)`` events
+        where ``kind`` is ``'start_ack' | 'data' | 'end' | 'result'``. Raises
+        :class:`ProtocolError` (and moves to FAILED) on any violation."""
         try:
             return self._feed(bytes(notification))
         except ProtocolError as e:
-            if self.state not in (REJECTED, CANCELLED, COMPLETE):
+            if self.state not in (REJECTED, STOPPED, COMPLETE):
                 self.state = FAILED
             self.error = str(e)
             raise
@@ -446,119 +380,95 @@ class StreamSession:
             raise ProtocolError(f"notification after terminal state {self.state}")
 
         header = parse_header(notification)
-        if header.session_id != self.session_id:
+        if header.stream_id != self.stream_id:
             raise ProtocolError(
-                f"session id {header.session_id:#010x} != expected {self.session_id:#010x}"
-            )
+                f"stream id {header.stream_id:#010x} != expected {self.stream_id:#010x}")
 
         if self.state == START_PENDING:
             if header.msg_type == MSG_START_ACK:
-                self.start_ack = parse_start_ack(header.payload)
+                ack = parse_start_ack(header.payload)
+                if ack.mode != self.expect_mode:
+                    raise ProtocolError(
+                        f"START_ACK mode {ack.mode_name} != requested "
+                        f"{MODE_NAMES.get(self.expect_mode)}")
+                self.start_ack = ack
                 self.state = RECEIVING
-                return [("start_ack", self.start_ack)]
+                return [("start_ack", ack)]
             if header.msg_type == MSG_RESULT:
                 self.result = parse_result(header.payload)
                 self.state = REJECTED
                 self.error = self.result.status_name
                 return [("result", self.result)]
-            raise ProtocolError(f"expected START_ACK/RESULT in START_PENDING, got {header.msg_type:#04x}")
+            raise ProtocolError(
+                f"expected START_ACK/RESULT in START_PENDING, got {header.msg_type:#04x}")
 
         # state == RECEIVING
         if header.msg_type == MSG_DATA:
             return [("data", self._accept_data(header.payload))]
         if header.msg_type == MSG_END:
             return [("end", self._accept_end(header.payload))]
+        if header.msg_type == MSG_RESULT:
+            # a rejected STOP (WRONG_SESSION, ...) — resolves the command but
+            # leaves this stream running; surface it, don't terminate.
+            self.result = parse_result(header.payload)
+            return [("result", self.result)]
         if header.msg_type == MSG_START_ACK:
             raise ProtocolError("second START_ACK")
-        if header.msg_type == MSG_RESULT:
-            raise ProtocolError("RESULT after accepted START_ACK")
         raise ProtocolError(f"unexpected message type {header.msg_type:#04x} in RECEIVING")
 
     def _accept_data(self, payload):
-        a = self.start_ack
-        msg = parse_data(payload, a.record_size)
-
-        if msg.sequence != self._next_sequence:
-            raise ProtocolError(f"DATA sequence {msg.sequence} != expected {self._next_sequence}")
-        if msg.first_record_index != self._next_record_index:
+        msg = parse_data(payload)
+        if msg.offset != self._next_offset:
             raise ProtocolError(
-                f"DATA first index {msg.first_record_index} != expected {self._next_record_index}"
-            )
+                f"DATA offset {msg.offset} != expected {self._next_offset}")
 
-        last_index = msg.first_record_index + msg.record_count - 1
-        if msg.phase == PHASE_HISTORY:
-            if self._phase == PHASE_FORWARD:
-                raise ProtocolError("history DATA after forward phase started")
-            if last_index >= a.history_records:
-                raise ProtocolError("history DATA crosses into forward range")
-        else:  # forward
-            if self._phase == PHASE_HISTORY:
-                if msg.first_record_index != a.history_records:
-                    raise ProtocolError(
-                        f"forward phase starts at index {msg.first_record_index}, "
-                        f"expected {a.history_records}"
-                    )
-                self._phase = PHASE_FORWARD
-            if last_index >= a.history_records + a.forward_records:
-                raise ProtocolError("forward DATA past total record count")
+        frag_len = len(msg.data)
+        if frag_len > _UINT64_MAX - self._next_offset:
+            raise ProtocolError("DATA offset would overflow uint64")
 
-        self.payload.extend(msg.records)
-        self._next_sequence += 1
-        self._next_record_index += msg.record_count
-        self._data_message_count += 1
+        total = self.bytes_total
+        if total is not None and self._next_offset + frag_len > total:
+            raise ProtocolError(
+                f"FINITE DATA past declared total: "
+                f"{self._next_offset + frag_len} > {total}")
+
+        if self.on_span is not None:
+            self.on_span(self._next_offset, bytes(msg.data))
+
+        if self.mode == MODE_FINITE:
+            self.payload.extend(msg.data)
+        else:
+            # INFINITY: don't grow payload unboundedly; keep only a bounded
+            # tail for diagnostics (the live decoder already consumed the span)
+            self.payload.extend(msg.data)
+            if len(self.payload) > INFINITY_CARRY_CAP:
+                del self.payload[:len(self.payload) - INFINITY_CARRY_CAP]
+
+        self._next_offset += frag_len
         return msg
 
     def _accept_end(self, payload):
-        a = self.start_ack
         end = parse_end(payload)
         self.end = end
 
-        # integrity: what we actually received must match what the device
-        # says it sent, regardless of whether the stream ran to completion
-        # or was cut short — a real data-loss signal either way.
-        integrity_failures = []
-        if end.total_bytes_sent != len(self.payload):
-            integrity_failures.append(
-                f"bytes end={end.total_bytes_sent} local={len(self.payload)}")
-        if end.data_message_count != self._data_message_count:
-            integrity_failures.append(
-                f"DATA count end={end.data_message_count} local={self._data_message_count}")
-
-        if end.status == STATUS_SUCCESS:
-            # completeness: only meaningful when the device claims it
-            # finished — compare against the originally-requested total.
-            failures = list(integrity_failures)
-            if end.history_records_sent != a.history_records:
-                failures.append(f"history {end.history_records_sent} != {a.history_records}")
-            if end.forward_records_captured != a.forward_records:
-                failures.append(f"forward {end.forward_records_captured} != {a.forward_records}")
-            if end.total_bytes_sent != a.total_bytes:
-                failures.append(f"total bytes {end.total_bytes_sent} != {a.total_bytes}")
-            if self._next_record_index != a.history_records + a.forward_records:
-                failures.append(
-                    f"records received {self._next_record_index} != "
-                    f"{a.history_records + a.forward_records}"
-                )
-            if end.detail != 0:
-                failures.append(f"detail {end.detail}")
-            if failures:
+        if end.status == END_SUCCESS:
+            if self.mode != MODE_FINITE:
                 self.state = FAILED
-                self.error = "; ".join(failures)
+                self.error = "INFINITY stream ended with SUCCESS"
+            elif self._next_offset != self.start_ack.planned_total:
+                self.state = FAILED
+                self.error = (f"SUCCESS but received {self._next_offset} of "
+                              f"{self.start_ack.planned_total} bytes")
             else:
                 self.state = COMPLETE
-        elif end.status == 0x0008:  # CANCELLED — a legitimate early stop.
-            # Not requiring the full-target counts here is the whole point:
-            # a cancel is *supposed* to fall short of history/forward/total.
-            # Only a genuine integrity mismatch (data actually lost, not
-            # merely "stopped early") is worth flagging.
-            self.state = CANCELLED
-            self.error = ("data loss during cancel: " + "; ".join(integrity_failures)
-                          if integrity_failures else None)
+        elif end.status == END_STOPPED:
+            # explicit user STOP — falling short of any target is expected;
+            # a 1..(record_size-1) partial tail is permitted and kept as-is.
+            self.state = STOPPED
         else:
-            # a genuine device-reported fault (STORAGE_ERROR, INTERNAL_ERROR,
-            # ...), not a deliberate/expected early stop.
-            failures = list(integrity_failures)
-            failures.insert(0, f"status {end.status_name}")
+            # NOT_RECORDING / STORAGE_ERROR / INTERNAL_ERROR / BUFFER_OVERFLOW
+            # / anything unknown: a real termination. Keep the validated prefix
+            # but mark the session failed.
             self.state = FAILED
-            self.error = "; ".join(failures)
+            self.error = f"status {end.status_name}"
         return end

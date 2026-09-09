@@ -6,6 +6,92 @@
 
 ## 🚀 vNext (unreleased)
 
+### 📡 MSense sensor stream v0 + ECB2 ECG blocks
+
+- **New shared sensor-stream protocol (v0)** replaces the protocol-v1 NUS path.
+  Version byte `0`; commands `START` (FINITE) / `STOP` / `START_INFINITY`;
+  16-byte `START_ACK` (no device/git metadata); **byte-offset-addressed `DATA`**
+  (no sequence/phase/record-index); 2-byte `END` / `RESULT`. FINITE is now
+  **128 KiB** (32 KiB rolling history + 96 KiB future). This is a **hard
+  cut-over** — the wristband firmware must be updated to match; there is no
+  fallback. Old `.ecg` / `.ppg` v1 capture blobs still decode offline.
+- **New ECG record format — `ECB2`**: the streamed ECG payload is a sequence of
+  4096-byte CRC-32/ISO-HDLC blocks (1358 samples each, `ETAG`/`PTAG`), not
+  12-byte MAX30001 frames. Leading all-zero history slots are skipped as
+  "unavailable history". PPG's packed 16-byte record is unchanged.
+- **Offline extraction** of downloaded ECG NAND data now supports the `ECF2`
+  block-container file (`ecg:block_v2` format spec, auto-detected by magic):
+  4 MiB chunks of `ECB2` blocks → `ECG` / `ETAG` / `PTAG` / `Counter` / `CDCT`
+  CSV, with multi-chunk recordings stitched into one continuous timeline
+  (ordered by `chunk_index`, split by `recording_id`; missing chunks / sample
+  gaps reported). Old 12-byte `framed` `.ecg` / `.bin` files still decode.
+- **Continuous live stream (`START_INFINITY`)** — a new "▶️ Start live stream"
+  control in the YAMS → ECG/PPG Signal Quality tab opens a continuous ECG/PPG
+  stream decoded into a rolling in-memory plot. **Not** recorded to disk or
+  LSL/XDF in this build (opt-in, per wristband).
+- Product (ECG vs PPG) is now taken from the advertised `MSense4ECG` /
+  `MSense4PPG` name — v0 `START_ACK` carries no product identity.
+- No-progress watchdog default raised 5 s → **15 s** (spec §7); STOP replaces
+  the v1 CANCEL, and a STOPped stream discards its partial tail.
+- Acquisition enable/disable (`da39c931…`) is now a **one-byte** write, per the
+  v0 firmware howto.
+- **Collection Stop is now confirmed** — after the stop write the driver reads
+  `da39c931` back (`0` = stopped, `1` = still recording), retries once, and on
+  failure shows `⚠️ still recording — stop unconfirmed` on the wristband's memo
+  row and writes an `[ACQ] … UNCONFIRMED` journal marker (so a session whose
+  end boundary is uncertain is visible in the XDF). A per-device outcome list
+  is on the YAMS → Control sub-tab. Older firmware whose `da39c931` isn't
+  readable is reported as *not verifiable*, never as a failure.
+
+### 🚦 Session-memo status classification
+
+- Device / stream status colours are now driven by one model
+  (`plasma/status.py`, documented in `docs/failure-levels.md`) instead of
+  scattered keyword matching. An internal ECAM-style 3-level severity
+  (advisory / caution / warning) maps to an Airbus-style colour vocabulary —
+  green (healthy), neutral (status), **blue** (advisory + action), amber
+  (caution), **red** (warning), grey (external). Levels are internal;
+  the operator sees only the colour.
+- **A sensor that stops mid-collection is now always red** (phase-gated). A
+  normal operator Stop is neutral, not red — a completed session and a crashed
+  sensor no longer look identical.
+- **A device row now reflects its own recorded stream going silent** — if the
+  LSL stream a device publishes stalls (`🟡`) or is lost (`🔴`) during a
+  recording, that device's memo row goes amber → red, instead of staying green
+  with a frozen sample count.
+- The irregular **journaler** stream no longer shows a false "🟡 stale" alarm
+  a few seconds after each marker — the recorder's staleness threshold is now
+  rate-aware (periodic streams: seconds; event streams: minutes).
+
+### 🎛️ Headless control & durable fault history
+
+- A running PLASMA now exposes a small typed JSON API (`/status`, `/start`,
+  `/stop`, `/mark`, `/events`) and ships a **`plasma-ctl`** CLI, so a session
+  can be driven and monitored from a script or an unattended rig on the same
+  machine — it operates the same live session as an open browser tab.
+  **Localhost only, no auth.**
+- `plasma-ctl start` / `/start` **report outcomes**: a device that fails to
+  construct, or a sensor that silently isn't collecting, comes back as
+  `ok: false` with the error — previously these were only a browser toast or an
+  `INFO` log line while the UI still said "Collection in progress".
+- New **`events.jsonl`** — an append-only, machine-readable fault history
+  written to both `<data_dir>/events.jsonl` (all sessions, survives restarts)
+  and `<session_dir>/events.jsonl` (travels with the `.xdf`). It records
+  session start/stop, phase changes, `fault` / `recover` transitions (from the
+  internal failure-level model), recorder state, and a 30 s heartbeat.
+- `fault` / `recover` transitions also push **`[FAULT]` / `[RECOVER]` markers**
+  onto the journaler LSL stream, so a mid-collection sensor drop or an
+  uncertain session boundary is visible inside the recording.
+- **MSense SQC snapshot / live-stream transfer errors** (`rejected: BUSY`,
+  `error: no START_ACK`, live `stalled`, …) are now folded into the same
+  L1–L3 model — a failed headless contact check shows up in `/status`
+  `worst_level`, `events.jsonl`, and as a `[FAULT]` marker. `/status` carries
+  the raw `sqc` / `live_stream` state per wristband; trigger a snapshot with
+  the auto-named `/_request` endpoint (see `docs/headless.md`).
+- Genuine device / recorder failures are now logged at `WARNING` / `ERROR`
+  (were `INFO`), so the session log is level-filterable.
+- See `docs/headless.md`.
+
 ### 🔌 Restart / Shut down
 
 - The Configuration tab now has **Restart PLASMA** and **Shut down PLASMA**

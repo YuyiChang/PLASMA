@@ -1,0 +1,39 @@
+/* PLASMA brand indigo (#4038D9), sampled from the logo's plasma globe —
+   nudges Material's default "indigo" palette onto the exact brand hue. */
+:root {
+  --md-primary-fg-color:        #4038D9;
+  --md-primary-fg-color--light: #6a63e6;
+  --md-primary-fg-color--dark:  #2C25AE;
+  --md-accent-fg-color:         #4038D9;
+}
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:  #B0ABFF;
+  --md-accent-fg-color:   #B0ABFF;
+  --md-typeset-a-color:   #B0ABFF;
+}
+
+/* screenshots: framed, centered, click-to-zoom (glightbox picks up the class) */
+.md-typeset img.shot,
+.md-typeset a.glightbox img {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  display: block;
+  margin: 1.2em auto;
+}
+
+/* the memo-panel colour key used on the memo-engine page */
+.memo-key { font-weight: 700; }
+.memo-key.healthy  { color: #15803d; }
+.memo-key.info     { color: #4b5563; }
+.memo-key.advisory { color: #2563eb; }
+.memo-key.caution  { color: #a16207; }
+.memo-key.warning  { color: #b91c1c; }
+.memo-key.guidance { color: #7c3aed; }
+.memo-key.external { color: #6b7280; }
+[data-md-color-scheme="slate"] .memo-key.healthy  { color: #4ade80; }
+[data-md-color-scheme="slate"] .memo-key.info     { color: #9ca3af; }
+[data-md-color-scheme="slate"] .memo-key.advisory { color: #60a5fa; }
+[data-md-color-scheme="slate"] .memo-key.caution  { color: #fbbf24; }
+[data-md-color-scheme="slate"] .memo-key.warning  { color: #f87171; }
+[data-md-color-scheme="slate"] .memo-key.guidance { color: #c084fc; }

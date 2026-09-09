@@ -5,11 +5,10 @@ Quality" tab uses these purely for a light filtered overlay on top of the raw
 waveform; contact/SQI scoring is intentionally out of scope (the operator
 eyeballs the raw signal). See:
 
-- plasma/nus_stream.py — NUS bounded-stream request/receive protocol
-- plasma/ppg_ecg_records.py — packed PPG/ECG record decoders
-- local_docs/NUS_SENSOR_STREAM_CENTRAL_HANDOFF.md,
-  local_docs/PPG_PACKED_16_BYTE_FORMAT.md,
-  local_docs/ECG_TEMP_DATA_FORMAT.md — the wire/record contracts
+- plasma/devices/msense/nus_stream.py — sensor-stream v0 codec + FSM
+- plasma/devices/msense/records.py — ECB2 / packed-16 record decoders
+- docs/SENSOR_STREAM_CENTRAL_HOWTO.md, docs/ECG_BLOCK_FORMAT.md,
+  docs/PPG_PACKED_16_BYTE_FORMAT.md — the wire/record contracts
 """
 import numpy as np
 from scipy.signal import butter, filtfilt, iirnotch

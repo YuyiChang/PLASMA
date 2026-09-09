@@ -27,10 +27,22 @@ FAULTS = {
                 "resumes.",
     },
     "sqc_error": {
-        "label": "SQC stream stalls mid-transfer",
-        "help": "An SQC snapshot gets START_ACK and a few DATA frames, then the "
-                "peripheral goes silent — the no-progress watchdog CANCELs, "
-                "reconnects, and the tab shows '⚠️ stream stalled'.",
+        "label": "SQC snapshot stalls mid-transfer",
+        "help": "A FINITE SQC snapshot gets START_ACK and a few DATA frames, "
+                "then the peripheral goes silent — the no-progress watchdog "
+                "STOPs, reconnects, and the tab shows '⚠️ stream stalled'.",
+    },
+    "stream_stall": {
+        "label": "Live stream stalls mid-transfer",
+        "help": "A continuous (INFINITY) live stream gets START_ACK and a "
+                "handful of DATA frames, then goes silent — the no-progress "
+                "watchdog STOPs and disconnects, and the tab shows an error.",
+    },
+    "acq_stop_ignored": {
+        "label": "Ignores the acquisition-stop command",
+        "help": "The wristband ACKs the stop write but da39c931 still reads 1 — "
+                "the driver retries the stop once, then flags "
+                "'⚠️ still recording — stop unconfirmed' and journals it.",
     },
 }
 

@@ -12,9 +12,13 @@ import pytest
 from plasma.devices.template import PlasmaMemo
 from plasma import journal
 from plasma.app_context import app_context
-from plasma.devices.msense.device import MotionSenseHRV, ERASE_CODE
+from plasma.devices.msense.device import (
+    MotionSenseHRV, ERASE_CODE, AcquisitionStopNotConfirmed,
+)
+from plasma.devices.msense import nus_sim
 from plasma.devices.msense.nus_stream import (
-    StreamSession, PROFILE, DEVICE_ECG, MSG_START_ACK, MSG_END,
+    StreamSession, PROFILE, ECG, MODE_FINITE, MODE_INFINITY,
+    MSG_START_ACK, MSG_END, END_STOPPED, FINITE_TOTAL_BYTES,
 )
 from . import test_nus_stream as _tns
 
@@ -51,6 +55,8 @@ class _FakePeripheral:
         self.address = address
         self.is_connected = connected
         self.writes = []
+        # da39c931 readback: 0/1, or a callable raising to simulate a read error
+        self.acq_enabled = 0
 
     async def connect(self):
         self.is_connected = True
@@ -62,6 +68,10 @@ class _FakePeripheral:
         self.writes.append((char_uuid, bytes(data)))
 
     async def read_gatt_char(self, char_uuid):
+        if char_uuid.startswith("da39c931"):
+            if callable(self.acq_enabled):
+                return self.acq_enabled()          # e.g. lambda: (_ for _ in ()).throw(...)
+            return bytes([int(self.acq_enabled)])
         return b"\x00"
 
     async def start_notify(self, char_uuid, callback):
@@ -79,6 +89,9 @@ def _bare_driver():
     d.t_start = 0.0
     d._sqc_threads_stopped = False
     d._connect_rssi = {}
+    d.sqc_state = {}
+    d.live_state = {}
+    d._acq_stop_status = {}
     d._start_ble_loop()
     return d
 
@@ -166,6 +179,84 @@ def test_battery_handler_parses_and_stores():
     assert d.memo["w1"].get_latest("battery")[1] == 90
 
 
+# ── acquisition-stop confirmation (da39c931 readback) ──────────────────────
+
+def _acq_driver(monkeypatch, acq_enabled):
+    monkeypatch.setattr("plasma.devices.msense.device.ACQ_STOP_READBACK_INTERVAL_S", 0.0)
+    d = _bare_driver()
+    p = _FakePeripheral()
+    p.acq_enabled = acq_enabled
+    d.active_devices = {"w1": p}
+    d.caps = {"w1": {}}
+    d.memo = {"w1": PlasmaMemo("w1")}
+    d.journal_marks = []
+    d.journal_hook = d.journal_marks.append
+    d.session_info = {"participant_enc": 1}
+    d.imu_stream_devices = set()
+    return d, p
+
+
+def test_collection_stop_confirmed_when_readback_zero(monkeypatch):
+    d, p = _acq_driver(monkeypatch, acq_enabled=0)
+    d.collection_ctl("w1", start=False)               # no raise
+    assert d.get_acq_stop_status("w1")["status"] == "confirmed"
+    # exactly one enable write (the stop), no retry
+    assert [w for w in p.writes if w[0].startswith("da39c931")] == \
+        [("da39c931-1d81-48e2-9c68-d0ae4bbd351f", b"\x00")]
+
+
+def test_collection_stop_unconfirmed_retries_then_raises(monkeypatch):
+    d, p = _acq_driver(monkeypatch, acq_enabled=1)     # device never stops
+    with pytest.raises(AcquisitionStopNotConfirmed):
+        d.collection_ctl("w1", start=False)
+    assert d.get_acq_stop_status("w1")["status"] == "unconfirmed"
+    # the stop write was issued twice (initial + one retry)
+    stop_writes = [w for w in p.writes if w[0].startswith("da39c931") and w[1] == b"\x00"]
+    assert len(stop_writes) == 2
+
+
+def test_collection_stop_unverifiable_when_read_raises(monkeypatch):
+    def _boom():
+        raise RuntimeError("char not readable")
+    d, p = _acq_driver(monkeypatch, acq_enabled=_boom)
+    d.collection_ctl("w1", start=False)               # no raise — degrades safely
+    assert d.get_acq_stop_status("w1")["status"] == "unverifiable"
+
+
+def test_collection_start_clears_prior_stop_status(monkeypatch):
+    d, p = _acq_driver(monkeypatch, acq_enabled=1)
+    with pytest.raises(AcquisitionStopNotConfirmed):
+        d.collection_ctl("w1", start=False)
+    assert d.get_acq_stop_status("w1")["status"] == "unconfirmed"
+    p.acq_enabled = 0
+    d.register_enmo = lambda *a: None
+    d.register_battery = lambda *a: None
+    d.collection_ctl("w1", start=True)
+    assert d.get_acq_stop_status("w1")["status"] == "unknown"
+
+
+@pytest.mark.parametrize("acq,sts_contains,mark_contains", [
+    (0, "stopped", "stop confirmed"),
+    (1, "still recording", "UNCONFIRMED"),
+])
+def test_stop_maps_outcome_to_memo_and_journal(monkeypatch, acq, sts_contains, mark_contains):
+    d, p = _acq_driver(monkeypatch, acq_enabled=acq)
+    d.active_outlets = {}
+    d.live_state = {}
+    d.stop()
+    assert sts_contains in d.memo["w1"].sts
+    assert any(mark_contains in m for m in d.journal_marks)
+
+
+def test_stop_unverifiable_keeps_plain_glyph(monkeypatch):
+    d, p = _acq_driver(monkeypatch, acq_enabled=lambda: (_ for _ in ()).throw(RuntimeError()))
+    d.active_outlets = {}
+    d.live_state = {}
+    d.stop()
+    assert d.memo["w1"].sts == "🛑"
+    assert any("not verifiable" in m for m in d.journal_marks)
+
+
 # ── SQC streaming mode dispatch ─────────────────────────────────────────────
 
 def test_sqc_history_phase_done():
@@ -239,14 +330,15 @@ def test_request_all_sqc_snapshots_rejects_overlapping_run():
 def _driver_with_sqc_session(name="w1"):
     d = _bare_driver()
     d.sqc_state = {name: MotionSenseHRV._new_sqc_state()}
-    d.sqc_state[name].update(session=StreamSession(_tns.SID), status="requesting")
+    d.sqc_state[name].update(
+        session=StreamSession(_tns.SID, product=ECG, expect_mode=MODE_FINITE),
+        status="requesting", product=ECG)
     return d
 
 
-def test_nus_data_handler_finalizes_unsolicited_clean_cancel_as_partial(monkeypatch):
-    """A CANCELLED end this driver did NOT itself request (early_cancel_sent
-    unset — e.g. a manual "Cancel all" click, or a device-initiated cancel)
-    must still be decoded/plotted, not discarded as a hard error."""
+def test_nus_data_handler_finalizes_early_stop_as_partial(monkeypatch):
+    """A STOPPED end (quick mode, a manual "Cancel all", or a device-initiated
+    stop) must still be decoded/plotted, not discarded as a hard error."""
     name = "w1"
     d = _driver_with_sqc_session(name)
     finish_calls = []
@@ -256,24 +348,18 @@ def test_nus_data_handler_finalizes_unsolicited_clean_cancel_as_partial(monkeypa
         d.sqc_state[name_]["status"] = "ready"
     monkeypatch.setattr(d, "_finish_sqc_snapshot", _fake_finish)
 
-    d._nus_data_handler(_tns._msg(MSG_START_ACK, _tns._start_ack_payload(DEVICE_ECG)), name)
-    data, _ = _tns._data_msgs(DEVICE_ECG, 100)
-    for m in data[:5]:
+    d._nus_data_handler(_tns._msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)), name)
+    for m in nus_sim.data_stream(bytes(20_000), stream_id=_tns.SID):
         d._nus_data_handler(m, name)
-
-    rs = PROFILE[DEVICE_ECG]["record_size"]
-    local_bytes = 5 * 100 * rs
-    end = _tns._end_payload(DEVICE_ECG, 5, status=0x0008,
-                            override={"history": 500, "forward": 0, "total": local_bytes})
-    d._nus_data_handler(_tns._msg(MSG_END, end), name)
+    d._nus_data_handler(nus_sim.end_message(END_STOPPED, _tns.SID), name)
 
     assert finish_calls == [(name, True, None)]   # partial=True, no warning
     assert d.sqc_state[name]["status"] == "ready"  # not "error"
 
 
-def test_nus_data_handler_finalizes_cancel_with_data_loss_as_warned_partial(monkeypatch):
-    """A CANCELLED end whose counts don't match what was locally received
-    still gets decoded/plotted (not discarded), but carries a warning."""
+def test_nus_data_handler_finalizes_protocol_violation_as_warned_partial(monkeypatch):
+    """A mid-stream framing violation with bytes already accumulated still gets
+    decoded/plotted (not discarded), but carries a warning."""
     name = "w1"
     d = _driver_with_sqc_session(name)
     finish_calls = []
@@ -283,22 +369,15 @@ def test_nus_data_handler_finalizes_cancel_with_data_loss_as_warned_partial(monk
         d.sqc_state[name_]["status"] = "ready"
     monkeypatch.setattr(d, "_finish_sqc_snapshot", _fake_finish)
 
-    d._nus_data_handler(_tns._msg(MSG_START_ACK, _tns._start_ack_payload(DEVICE_ECG)), name)
-    data, _ = _tns._data_msgs(DEVICE_ECG, 100)
-    for m in data[:5]:
-        d._nus_data_handler(m, name)
-
-    rs = PROFILE[DEVICE_ECG]["record_size"]
-    local_bytes = 5 * 100 * rs
-    end = _tns._end_payload(DEVICE_ECG, 5, status=0x0008,
-                            override={"history": 500, "forward": 0, "total": local_bytes - rs})
-    d._nus_data_handler(_tns._msg(MSG_END, end), name)
+    d._nus_data_handler(_tns._msg(MSG_START_ACK, nus_sim.start_ack_payload(MODE_FINITE)), name)
+    d._nus_data_handler(nus_sim.data_message(0, b"\x11" * 200, _tns.SID), name)
+    d._nus_data_handler(nus_sim.data_message(9999, b"\x22" * 200, _tns.SID), name)  # gap
 
     assert len(finish_calls) == 1
     _, partial, warning = finish_calls[0]
     assert partial is True
-    assert warning is not None and "data loss during cancel" in warning
-    assert d.sqc_state[name]["status"] == "ready"  # still plotted, not "error"
+    assert warning is not None and "protocol violation" in warning
+    assert d.sqc_state[name]["status"] == "ready"
 
 
 # ── SQC ↔ session journaler auto-markers ───────────────────────────────────
@@ -324,6 +403,7 @@ def test_sqc_request_pushes_start_marker(monkeypatch):
     p = _FakePeripheral()
     p.mtu_size = 247
     d.active_devices = {"w1": p}
+    d.caps = {"w1": {"nus": True, "product": ECG}}
 
     msg = d.request_sqc_snapshot("w1")
 
@@ -339,6 +419,7 @@ def test_sqc_request_marker_reflects_capture_mode(monkeypatch):
     p = _FakePeripheral()
     p.mtu_size = 247
     d.active_devices = {"w1": p}
+    d.caps = {"w1": {"nus": True, "product": ECG}}
 
     d.request_sqc_snapshot("w1", history_only=True)
     assert d.journal_marks == ["[SQC] w1 start (history-only)"]

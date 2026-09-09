@@ -1,0 +1,96 @@
+site_name: PLASMA Playbook
+site_description: >-
+  Operator handbook for PLASMA — install, configure, pair MSense wristbands,
+  run a session, read the memo panel, and recover from faults.
+site_url: https://yuyichang.github.io/PLASMA/
+repo_url: https://github.com/YuyiChang/PLASMA
+repo_name: YuyiChang/PLASMA
+edit_uri: edit/main/docs/
+copyright: Released under the MIT license.
+docs_dir: docs
+site_dir: site
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+theme:
+  name: material
+  logo: assets/plasma_logo.png
+  favicon: assets/favicon.png
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.sections
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.tabs.link
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+extra_css:
+  - assets/extra.css
+
+plugins:
+  - search
+  - glightbox:
+      touchNavigation: true
+      loop: false
+      effect: zoom
+      width: 90%
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.keys
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Playbook:
+      - Install & first launch: playbook/install.md
+      - Configure PLASMA: playbook/configure.md
+      - Pair MSense wristbands: playbook/pair-msense.md
+      - Run a session: playbook/run-a-session.md
+      - Signal-quality checks: playbook/signal-quality.md
+      - MSense tools (YAMS): playbook/msense-tools.md
+      - The memo engine: playbook/memo-engine.md
+      - Abnormal handling: playbook/abnormal-handling.md
+  - Reference:
+      - Files & paths: reference/files-and-paths.md
+      - Headless control & API: reference/headless.md
+      - Failure levels (internal): reference/failure-levels.md
+      - LSL lifecycle & scoping (internal): reference/lsl-lifecycle-and-scoping.md

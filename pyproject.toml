@@ -29,9 +29,13 @@ obs = ["obsws-python"]
 all = ["plasma-app[msense,qb2,pupil,shimmer,obs]"]
 build = ["pyinstaller"]
 test = ["pytest", "pyxdf"]
+# playbook site (docs/) + the Playwright screenshot-capture tool
+# (scripts/capture_screenshots.py). gradio_client ships with gradio.
+docs = ["mkdocs-material", "mkdocs-glightbox", "playwright"]
 
 [project.scripts]
 plasma = "plasma.__main__:main"
+plasma-ctl = "plasma.ctl:main"
 
 [project.entry-points.pyinstaller40]
 hook-dirs = "plasma.__pyinstaller:get_hook_dirs"

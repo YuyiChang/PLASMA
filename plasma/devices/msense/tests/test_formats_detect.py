@@ -226,6 +226,64 @@ def test_too_few_records_is_inconclusive():
 
 
 # ---------------------------------------------------------------------------
+# ecg:block_v2 (ECF2) container
+# ---------------------------------------------------------------------------
+
+def _w_ecf2(n_blocks=3):
+    from plasma.devices.msense.records import crc32_iso_hdlc
+    hdr = bytearray(4096)
+    hdr[0:4] = b"ECF2"
+    hdr[4:8] = (0).to_bytes(4, "little")
+    hdr[8:16] = (0x0123456789ABCDEF).to_bytes(8, "little")
+    hdr[16:20] = crc32_iso_hdlc(hdr, 16, 20).to_bytes(4, "little")
+    out = bytearray(hdr)
+    for k in range(n_blocks):
+        b = bytearray(4096)
+        b[0:4] = b"ECB2"
+        b[4:8] = (1000 + 1358 * k).to_bytes(4, "little")
+        b[8:12] = (1358 * k).to_bytes(4, "little")
+        for s in range(1358):
+            raw = ((s & 0x3FFFF) << 6)
+            o = 16 + 3 * s
+            b[o], b[o + 1], b[o + 2] = (raw >> 16) & 0xFF, (raw >> 8) & 0xFF, raw & 0xFF
+        b[12:16] = crc32_iso_hdlc(b, 12, 16).to_bytes(4, "little")
+        out += b
+    out += b"\xff" * 4096
+    return bytes(out) + b"\x00" * (4 * 1024 * 1024 - len(out))
+
+
+def test_ecf2_detects_and_decodes():
+    data = _w_ecf2(4)
+    found, *_ = detect_spec(data, "ecg")
+    assert found.name == "block_v2"
+
+    p = tempfile.mktemp(suffix=".bin")
+    with open(p, "wb") as f:
+        f.write(data)
+    df, _ = read_bin(p, get_spec("ecg", "block_v2"))
+    os.unlink(p)
+    assert len(df) == 4 * 1358
+    assert list(df.columns[:4]) == ["ECG", "ETAG", "PTAG", "Counter"]
+    assert df["Counter"].iloc[0] == 0 and df["Counter"].iloc[-1] == 4 * 1358 - 1
+    assert df.attrs["recording_id"] == 0x0123456789ABCDEF
+
+
+def test_ecf2_stops_at_erased_page():
+    df, _ = _read_ecf2_df(_w_ecf2(2))
+    assert len(df) == 2 * 1358
+
+
+def _read_ecf2_df(data):
+    p = tempfile.mktemp(suffix=".bin")
+    with open(p, "wb") as f:
+        f.write(data)
+    try:
+        return read_bin(p, get_spec("ecg", "block_v2"))
+    finally:
+        os.unlink(p)
+
+
+# ---------------------------------------------------------------------------
 # version mapping
 # ---------------------------------------------------------------------------
 

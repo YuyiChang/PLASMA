@@ -7,6 +7,7 @@ from plasma import plugins
 from plasma.app_context import app_context
 from plasma.integrated_panel import IntegratedPanel
 from plasma.config import device_config
+from plasma import api as plasma_api
 
 
 def _handle_sigterm(signum, frame):
@@ -98,20 +99,11 @@ function refresh() {
 }
 """
 
-def main():
-    global app
-
-    try:
-        signal.signal(signal.SIGTERM, _handle_sigterm)
-    except ValueError:
-        pass  # not the main thread (e.g. imported oddly) — atexit still covers normal exit
-
-    plugins.load_plugins()
-    device_config.refresh_defaults()
-
-    ip = IntegratedPanel()
-    # pl = PupilLabsDashboard()
-
+def build_blocks(ip):
+    """Assemble the full PLASMA `gr.Blocks` (every tab + the headless API) for
+    the given `IntegratedPanel`. Shared by `main()` and the screenshot-capture
+    tool (`scripts/capture_screenshots.py`) so both build the identical UI.
+    Does not launch the server."""
     with gr.Blocks(title=app_context().app_name, theme=gr.themes.Ocean(), js=js_func) as app:
         with gr.Tab("Session Dashboard"):
             ip.interface()
@@ -134,6 +126,28 @@ def main():
         # with gr.Tab("PL"):
         #     pl.interface()
 
+        # headless control + situational-awareness endpoints (/status, /start,
+        # /stop, /mark, /events) + the 1 Hz durable event-log pump. Additive —
+        # no UI. See docs/headless.md.
+        plasma_api.register(ip)
+    return app
+
+
+def main():
+    global app
+
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    except ValueError:
+        pass  # not the main thread (e.g. imported oddly) — atexit still covers normal exit
+
+    plugins.load_plugins()
+    device_config.refresh_defaults()
+
+    ip = IntegratedPanel()
+    # pl = PupilLabsDashboard()
+
+    app = build_blocks(ip)
     app.launch(inbrowser=True, share=False)
 
 

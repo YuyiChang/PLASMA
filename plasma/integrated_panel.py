@@ -17,29 +17,29 @@ from plotly.subplots import make_subplots
 VISUALIZER_PLOT_ELEM_ID = "plasma-visualizer-plot"
 MEMO_PANEL_ELEM_ID = "plasma-memo-panel"
 
-# device-status string -> semantic colour. Devices keep setting emoji glyphs on
-# PlasmaMemo.sts (🟢/🟥/⛔ …); the memo panel classifies them into name colours.
-_STATUS_HEX = {
-    "ok": "#15803d",    # green  = collecting
-    "idle": "#1d4ed8",  # blue   = initialised / ready
-    "warn": "#a16207",  # yellow = disconnected / stalled / calibrating
-    "err": "#b91c1c",   # red    = stopped / error
-    "ext": "#6b7280",   # grey   = external stream seen on the network (not recording yet)
-}
+# Device-status string -> presentation colour. Devices keep setting emoji glyphs
+# on PlasmaMemo.sts (🟢/🟥/⛔ …); the failure-level model in plasma/status.py
+# classifies them (internal L1-3 severity + a colour category). See
+# docs/failure-levels.md — levels are internal, the operator only sees colours.
+from plasma import status as _status
+from plasma.status import CATEGORY_HEX as _STATUS_HEX
+from plasma.api import match_recorder_streams
 
 
-def _status_class(sts):
-    s = (sts or "").strip()
-    low = s.lower()
-    if s.startswith("🟢") or "reconnected" in low or "bias saved" in low or "in progress" in low:
-        return "ok"
-    if (any(g in s for g in ("⛔", "❌", "🚫", "🟥", "🛑"))
-            or "fault" in low or "stopped" in low or "reconnect failed" in low):
-        return "err"
-    if (any(g in s for g in ("⚠️", "🎯", "🔌", "🧨"))
-            or "calibrat" in low or "stall" in low or "erased" in low):
-        return "warn"
-    return "idle"
+def _status_class(sts, phase=_status.COLLECTING, **kw):
+    """Presentation category for a status string (key into _STATUS_HEX)."""
+    return _status.render_class(sts, phase, **kw)
+
+
+def _phase_of(session_sts):
+    """SETUP / COLLECTING / STOPPED from the session status line — used when a
+    caller doesn't pass an explicit phase."""
+    low = (session_sts or "").lower()
+    if "in progress" in low:
+        return _status.COLLECTING
+    if "stopped" in low:
+        return _status.STOPPED
+    return _status.SETUP
 
 
 def _sts_detail(sts):
@@ -69,25 +69,28 @@ _MEMO_CSS = (
     f"#{MEMO_PANEL_ELEM_ID} .m-name{{font-weight:600}}"
     f"#{MEMO_PANEL_ELEM_ID} .m-tag{{opacity:.6;font-weight:400;margin-left:7px}}"
     f"#{MEMO_PANEL_ELEM_ID} .m-sub{{color:#555;padding-left:18px;font-size:12px}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-sub.rec{{color:#7c3aed}}"
+    f"#{MEMO_PANEL_ELEM_ID} .m-sub.rec{{color:{_STATUS_HEX['guidance']}}}"
     f"#{MEMO_PANEL_ELEM_ID} .m-dim{{opacity:.55}}"
     "</style>"
 )
 
 
 def build_memo_html(session_sts, session_info, devices, snap, ext_streams=(),
-                    elapsed=None):
+                    elapsed=None, phase=None):
     """Render the memo panel as an HTML string. `snap` is
     SessionRecorder.status() or None. `ext_streams` is a list of
     {"name","type","srate","host"} dicts for LSL streams found on the network
     that aren't PLASMA's own — shown only before recording starts (once `snap`
     is present the recorder lists every stream itself). `elapsed` is an
-    "HH:MM:SS" collection-elapsed string or None. All interpolated text is
-    escaped — gr.HTML does no sanitisation."""
+    "HH:MM:SS" collection-elapsed string or None. `phase` is SETUP / COLLECTING
+    / STOPPED for the failure-level classifier (inferred from `session_sts`
+    when None). All interpolated text is escaped — gr.HTML does no sanitisation."""
     esc = _html.escape
+    if phase is None:
+        phase = _phase_of(session_sts)
     out = [_MEMO_CSS, '<div class="m-wrap">']
 
-    c = _STATUS_HEX[_status_class(session_sts)]
+    c = _STATUS_HEX[_status_class(session_sts, phase)]
     elapsed_html = f'<span class="m-tag">{esc(elapsed)}</span>' if elapsed else ''
     out.append(
         f'<div class="m-hdr" style="color:{c}">{esc(str(session_sts))}'
@@ -97,39 +100,28 @@ def build_memo_html(session_sts, session_info, devices, snap, ext_streams=(),
     )
 
     if snap is not None:
-        rc = {"recording": "ok", "stopped": "err",
-              "unavailable": "err"}.get(snap["state"], "idle")
+        rc = {"recording": "healthy", "stopped": "info",
+              "unavailable": "warning"}.get(snap["state"], "info")
         out.append(
             f'<div class="m-row"><span class="m-name" style="color:{_STATUS_HEX[rc]}">'
             f'📼 {esc(snap["summary"])}</span>'
             f'<span class="m-tag">{esc(os.path.basename(snap["file"]) or "")}</span></div>'
         )
 
-    name_to_memo = {}
-    for dev in devices:
-        try:
-            src = dev.get_sources()
-            for lsl_name, key in dev.lsl_streams().items():
-                if key in src:
-                    name_to_memo[lsl_name] = src[key]
-        except Exception:
-            pass
-
-    recorded, orphans = {}, []
-    if snap is not None:
-        for s in snap["streams"]:
-            m = name_to_memo.get(s["name"])
-            if m is not None and not s["external"]:
-                recorded[id(m)] = s
-            else:
-                orphans.append(s)
+    # match the recorder's per-stream stats to the device that publishes each
+    # stream (shared with plasma.api.session_status)
+    recorded, orphans = match_recorder_streams(devices, snap)
 
     for dev in devices:
         memos = dev.memo.values() if isinstance(dev.memo, dict) else [dev.memo]
         for memo in memos:
             label = getattr(memo, "label", getattr(memo, "name", "?"))
             s = recorded.get(id(memo))
-            c = _STATUS_HEX[_status_class(getattr(memo, "sts", ""))]
+            # a device row escalates when its own recorded stream goes silent,
+            # even if the driver never updated memo.sts
+            hk = ({"stream_health": s["health"], "srate": s.get("srate", 0.0)}
+                  if s is not None else {})
+            c = _STATUS_HEX[_status_class(getattr(memo, "sts", ""), phase, **hk)]
             detail = _sts_detail(getattr(memo, "sts", ""))
             row = [f'<div class="m-row"><span class="m-name" style="color:{c}">'
                    f'{"📼 " if s is not None else ""}{esc(str(label))}</span>']
@@ -142,10 +134,11 @@ def build_memo_html(session_sts, session_info, devices, snap, ext_streams=(),
             out.append("".join(row))
 
     for s in orphans:
-        cls = ("err" if s["health"].startswith("🔴")
-               else "warn" if s["health"].startswith("🟡") else "ok")
+        lvl = _status.health_level(s["health"], s.get("srate", 0.0), phase=phase)
+        cat = {_status.Level.L3: "warning", _status.Level.L2: "caution",
+               _status.Level.L1: "info"}.get(lvl, "healthy")
         out.append(
-            f'<div class="m-row"><span class="m-name" style="color:{_STATUS_HEX[cls]}">'
+            f'<div class="m-row"><span class="m-name" style="color:{_STATUS_HEX[cat]}">'
             f'📼🛰 {esc(s["name"])}</span></div>'
             f'<div class="m-sub rec">{esc(_rec_stats(s))}</div>'
         )
@@ -158,7 +151,7 @@ def build_memo_html(session_sts, session_info, devices, snap, ext_streams=(),
             if e.get("host"):
                 bits.append(e["host"])
             out.append(
-                f'<div class="m-row"><span class="m-name" style="color:{_STATUS_HEX["ext"]}">'
+                f'<div class="m-row"><span class="m-name" style="color:{_STATUS_HEX["external"]}">'
                 f'🛰 {esc(e["name"])}</span>'
                 f'<span class="m-tag">{esc(" · ".join(bits))}</span></div>'
             )
@@ -440,11 +433,11 @@ class IntegratedPanel():
             try:
                 dev.stop()
             except Exception as e:
-                self.logger.info(f"Error stopping previous device before reinit: {e}")
+                self.logger.warning(f"Error stopping previous device before reinit: {e}")
             try:
                 dev.disconnect()
             except Exception as e:
-                self.logger.info(f"Error disconnecting previous device before reinit: {e}")
+                self.logger.warning(f"Error disconnecting previous device before reinit: {e}")
 
         self.available_devices = []
         active_table = device_config.get_active_table()
@@ -469,7 +462,7 @@ class IntegratedPanel():
             try:
                 self.lsl_recorder.stop()
             except Exception as e:
-                self.logger.info(f"Error stopping previous LSL recorder: {e}")
+                self.logger.warning(f"Error stopping previous LSL recorder: {e}")
             self.lsl_recorder = None
 
         session_dir = getattr(self, "session_dir", None) or os.path.join(
@@ -487,7 +480,7 @@ class IntegratedPanel():
                 gr.Warning("LSL recording unavailable (liblsl/pylsl missing?) "
                            "— session will not be captured to XDF.")
         except Exception as e:
-            self.logger.info(f"Could not start LSL recorder: {e}")
+            self.logger.error(f"Could not start LSL recorder: {e}")
             gr.Warning(f"LSL recording failed to start: {e}")
             self.lsl_recorder = None
 
@@ -510,7 +503,7 @@ class IntegratedPanel():
                 dev.session_dir = self.session_dir
                 dev.start()
             except Exception as e:
-                self.logger.info(f"Error starting device {dev.tag}: {e}")
+                self.logger.error(f"Error starting device {dev.tag}: {e}")
         if self.record_lsl:
             self._start_recorder()
         self.sts = "Collection in progress"
@@ -520,14 +513,14 @@ class IntegratedPanel():
             try:
                 dev.stop()
             except Exception as e:
-                self.logger.info(f"Error stopping device {dev.tag}: {e}")
+                self.logger.warning(f"Error stopping device {dev.tag}: {e}")
         if self.lsl_recorder is not None:
             try:
                 self.lsl_recorder.stop()
                 self.logger.info(
                     f"LSL recording stopped -> {self.lsl_recorder.status()['file']}")
             except Exception as e:
-                self.logger.info(f"Error stopping LSL recorder: {e}")
+                self.logger.warning(f"Error stopping LSL recorder: {e}")
         self._collection_stopped = time.monotonic()
         self.sts = "Collection stopped"
 
@@ -568,6 +561,15 @@ class IntegratedPanel():
         out.sort(key=lambda e: e["name"])
         return out
 
+    @property
+    def phase(self):
+        """SETUP (before Start) / COLLECTING / STOPPED — gates the failure-level
+        classifier (a device reporting 'stopped' is a WARNING mid-collection but
+        neutral once the operator has pressed Stop)."""
+        if self._collection_started is None:
+            return _status.SETUP
+        return _status.STOPPED if self._collection_stopped is not None else _status.COLLECTING
+
     def _render_memo(self):
         """HTML for the memo panel. Returns gr.skip() when nothing changed since
         the last tick, so gr.HTML doesn't tear down + re-render its subtree
@@ -581,7 +583,8 @@ class IntegratedPanel():
         html = build_memo_html(
             self.sts, self.session_info, self.available_devices,
             rec.status() if rec is not None else None,
-            ext_streams=self._external_lsl_streams(), elapsed=elapsed)
+            ext_streams=self._external_lsl_streams(), elapsed=elapsed,
+            phase=self.phase)
         if html == getattr(self, "_memo_last", None):
             return gr.skip()
         self._memo_last = html

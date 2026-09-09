@@ -22,6 +22,15 @@ import time
 
 from plasma.xdf_writer import XDFWriter
 from plasma.lsl_util import channel_format_name, is_plasma_origin
+from plasma.status import STALE_S, IRREGULAR_STALE_S
+
+
+def _stale_after(srate):
+    """How long a stream may be silent before it's '🟡 stale'. A periodic
+    stream (srate > 0) at a few seconds; an irregular/event stream (the
+    journaler, Pupil eye events) is silent by nature — only stale after
+    minutes, so it doesn't raise a false alarm."""
+    return STALE_S if (srate and srate > 0) else IRREGULAR_STALE_S
 
 
 class _StreamStat:
@@ -75,11 +84,11 @@ class SessionRecorder:
 
     # ── logging ────────────────────────────────────────────────────────────
 
-    def _logmsg(self, msg):
+    def _logmsg(self, msg, level="info"):
         if self._log is None:
             return
         try:
-            self._log.info("[lsl-recorder] %s", msg)
+            getattr(self._log, level, self._log.info)("[lsl-recorder] %s", msg)
         except Exception:
             pass
 
@@ -96,7 +105,8 @@ class SessionRecorder:
         try:
             import pylsl
         except Exception as e:  # liblsl missing, bad build, ...
-            self._logmsg(f"pylsl/liblsl unavailable — recording disabled: {e}")
+            self._logmsg(f"pylsl/liblsl unavailable — recording disabled: {e}",
+                         "warning")
             with self._lock:
                 self._state = "unavailable"
             return False
@@ -113,7 +123,7 @@ class SessionRecorder:
             writer = XDFWriter()
             writer.open(path)
         except Exception as e:
-            self._logmsg(f"could not open XDF file: {e}")
+            self._logmsg(f"could not open XDF file: {e}", "error")
             with self._lock:
                 self._state = "unavailable"
             return False
@@ -124,7 +134,7 @@ class SessionRecorder:
         try:
             infos = pylsl.resolve_streams(wait_time=1.0)
         except Exception as e:
-            self._logmsg(f"resolve_streams failed: {e}")
+            self._logmsg(f"resolve_streams failed: {e}", "warning")
             infos = []
         try:
             self._resolver = pylsl.ContinuousResolver()
@@ -180,12 +190,12 @@ class SessionRecorder:
             try:
                 self._writer.write_stream_footer(sid)
             except Exception as e:
-                self._logmsg(f"footer failed for {stat.name}: {e}")
+                self._logmsg(f"footer failed for {stat.name}: {e}", "warning")
 
         try:
             self._writer.close()
         except Exception as e:
-            self._logmsg(f"error closing XDF: {e}")
+            self._logmsg(f"error closing XDF: {e}", "error")
 
         for inlet in list(self._inlets.values()):
             try:
@@ -220,7 +230,7 @@ class SessionRecorder:
                                       processing_flags=pylsl.proc_none)
         except Exception as e:
             self._logmsg(f"could not open inlet for "
-                         f"{_safe_name(info)}: {e}")
+                         f"{_safe_name(info)}: {e}", "warning")
             return
 
         try:
@@ -234,7 +244,8 @@ class SessionRecorder:
             external = not is_plasma_origin(full)
             info_xml = full.as_xml()
         except Exception as e:
-            self._logmsg(f"skipping unrecordable stream {_safe_name(info)}: {e}")
+            self._logmsg(f"skipping unrecordable stream {_safe_name(info)}: {e}",
+                         "warning")
             _close_quietly(inlet)
             return
 
@@ -242,7 +253,7 @@ class SessionRecorder:
         try:
             self._writer.write_stream_header(sid, info_xml, fmt, nchan)
         except Exception as e:
-            self._logmsg(f"stream header failed for {name}: {e}")
+            self._logmsg(f"stream header failed for {name}: {e}", "error")
             _close_quietly(inlet)
             return
         self._next_sid += 1
@@ -313,14 +324,15 @@ class SessionRecorder:
                 self._mark_lost(sid, stat)
                 continue
             except Exception as e:
-                self._logmsg(f"pull_chunk error on {stat.name}: {e}")
+                self._logmsg(f"pull_chunk error on {stat.name}: {e}", "warning")
                 continue
 
             if tstamps:
                 try:
                     self._writer.write_samples(sid, tstamps, samples)
                 except Exception as e:
-                    self._logmsg(f"write_samples failed for {stat.name}: {e}")
+                    self._logmsg(f"write_samples failed for {stat.name}: {e}",
+                                 "error")
                     continue
                 wrote_any = True
                 with self._lock:
@@ -328,7 +340,7 @@ class SessionRecorder:
                     stat.last_ts = tstamps[-1]
                     stat.last_recv = now
                     stat.health = "🟢"
-            elif not final and now - stat.last_recv > 3.0:
+            elif not final and now - stat.last_recv > _stale_after(stat.srate):
                 with self._lock:
                     stat.health = "🟡 stale"
         return wrote_any
@@ -341,7 +353,7 @@ class SessionRecorder:
         with self._lock:
             stat.dead = True
             stat.health = "🔴 lost"
-        self._logmsg(f"stream lost: {stat.name} (sid {sid})")
+        self._logmsg(f"stream lost: {stat.name} (sid {sid})", "warning")
 
     def _sync_clocks(self, timeout):
         pylsl = self._lsl

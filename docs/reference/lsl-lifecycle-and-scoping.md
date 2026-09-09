@@ -1,5 +1,9 @@
 # LSL stream lifecycle & scoping — notes and future work
 
+!!! warning "Internal design notes"
+    This is a developer design document about known rough edges, not operator
+    guidance. Status: **not implemented.**
+
 Status: **not implemented.** PLASMA currently runs on the default liblsl
 session and the built-in recorder captures *every* LSL stream visible on the
 machine/LAN. This document records the known rough edges and the agreed

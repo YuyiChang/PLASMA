@@ -100,22 +100,24 @@ Six record layouts exist across the three sensors. Every one is a fixed-size rec
 
 Both sample at 32 Hz; they differ in the clock the counter is expressed in, and in whether `Timestamp` is present. The IMU variant is chosen by device version / "Force v4.7.0+ format" — there is no per-sensor IMU selector.
 
-### ECG — 1 variant
+### ECG — 2 variants
 
-| Variant | Frame | Layout | Tick field | Tick rate | Sample rate | Tick step |
-|---|---|---|---|---|---|---|
-| framed | 12 B | `0xA5 0xEC` sync, `type` (0x01 = sample), `flags` (ETAG bits 0–2, PTAG bits 3–5), `seq` uint32 LE, `raw24` **big-endian**, `crc8` | bytes 4–8 | 512 Hz | 512 Hz | 1 |
+| Variant | Unit | Layout | Sample rate | Notes |
+|---|---|---|---|---|
+| `framed` | 12 B frame | `0xA5 0xEC` sync, `type` (0x01 = sample), `flags` (ETAG bits 0–2, PTAG bits 3–5), `seq` uint32 LE, `raw24` **big-endian**, `crc8` | 512 Hz | pre-v0 firmware. Self-describing: sync word + CRC-8 (poly 0x07) over bytes 2–10; sample is signed 18-bit from `raw24` bits 23:6. |
+| `block_v2` | `ECF2` 4 MiB chunk | 4 KiB `ECF2` header (`chunk_index`, `recording_id`, CRC-32) then up to 1023 `ECB2` data blocks (4096 B: `ECB2` magic, `first_rtc_tick`, `first_sample_index`, CRC-32/ISO-HDLC, 1358×3-byte samples) then erased `0xFF` pages | 512 Hz | v0 firmware. Columns `ECG`, `ETAG`, `PTAG`, `Counter` (= `first_sample_index + i`). `CDCT = filename t0 + Counter/512` — one continuous clock across every chunk of a `recording_id`. See `ECG_BLOCK_FORMAT.md`. |
 
-The only self-describing format of the six: a sync word plus CRC-8 (poly 0x07, init 0x00) over bytes 2–10. The ECG sample is a signed 18-bit value taken from `raw24` bits 23:6. Note `raw24` is big-endian while `seq` is little-endian, inside the same frame.
+`block_v2` is a self-describing container (like IMU `v3`): resolved by its `ECF2` magic, not a version number. Multi-chunk recordings are re-ordered by `chunk_index`, split by `recording_id`, and a missing chunk or sample-index gap is reported to the console (not silently joined).
 
 ### Erased and invalid records
 
 | Layout | How an unwritten / invalid record is recognised |
 |---|---|
 | PPG `legacy`, IMU `legacy` | field value `-1` (row dropped only if *every* field is `-1`) |
-| PPG `v2`, PPG `packed16`, IMU `v2`, ECG | `Counter` / `seq` == `0xFFFFFFFF` |
+| PPG `v2`, PPG `packed16`, IMU `v2`, ECG `framed` | `Counter` / `seq` == `0xFFFFFFFF` |
 | PPG `packed16` | additionally: a whole record of `0xFF`, or any channel with bits 19–31 set |
-| ECG | additionally: bad sync word, wrong type byte, or CRC-8 mismatch |
+| ECG `framed` | additionally: bad sync word, wrong type byte, or CRC-8 mismatch |
+| ECG `block_v2` | a data page whose first 4 bytes are all `0xFF` marks end-of-data; decoding stops at the first block that fails magic / CRC-32 / reserved-bytes / ETAG / continuity, keeping the valid prefix |
 
 Only *complete trailing* erased records are trimmed in `packed16`; interior ones are kept so they surface in the malformed count rather than silently shifting every later record.
 
@@ -130,10 +132,10 @@ Each sensor has its own selector, and all three share one vocabulary:
 | Choice | Behaviour |
 |---|---|
 | `auto` **(default)** | Detect from file contents, per file. Falls back to the device version if detection is inconclusive. |
-| `version` | Follow `uuid.txt` only: v4.7.0+ → `v2`, otherwise `legacy`. The pre-1.6 behaviour; cannot ever select `packed16`. |
-| `legacy` / `v2` / `packed16` / `framed` | Force that layout. |
+| `version` | Follow `uuid.txt` only: v4.7.0+ → `v2`, otherwise `legacy`. The pre-1.6 behaviour; cannot ever select `packed16` or `block_v2`. |
+| `legacy` / `v2` / `packed16` / `framed` / `v3` / `block_v2` | Force that layout. |
 
-Firmware carrying `packed16` has **no distinguishing version number**, which is why `auto` detects rather than trusting the version file.
+Firmware carrying `packed16` or `block_v2` has **no distinguishing version number**, which is why `auto` detects rather than trusting the version file.
 
 Because resolution happens per file, one folder may legitimately contain captures in different layouts and each is decoded correctly.
 
@@ -161,9 +163,9 @@ The selectors live in the **⚙️ Advanced extraction options** accordion, iden
 
 ## Detecting the format without `uuid.txt`
 
-**All six variants are detectable from file contents alone.** `uuid.txt` is not required, and where the two disagree the contents are the more reliable source.
+**Every variant is detectable from file contents alone.** `uuid.txt` is not required, and where the two disagree the contents are the more reliable source. The container formats (IMU `v3` / ACF3, ECG `block_v2` / ECF2) are identified by their file magic; the flat per-record layouts below use a counter-alignment test.
 
-The reason is that every layout embeds a monotonic counter at a fixed offset that advances by a fixed step. Guessing the record size wrong misaligns that field, so it reads as noise. The test is therefore:
+The reason the flat layouts are separable is that every one embeds a monotonic counter at a fixed offset that advances by a fixed step. Guessing the record size wrong misaligns that field, so it reads as noise. The test is therefore:
 
 > For each candidate (record size, tick offset), read the uint32 at that offset in every record, skipping all-`0xFF` rows, and measure what fraction of consecutive differences equal the layout's expected step.
 
@@ -229,7 +231,7 @@ Force a specific layout (rarely needed now that `auto` finds them):
 |---|---|---|
 | `--ppg_format` | `auto`, `version`, `legacy`, `v2`, `packed16` | `auto` |
 | `--ac_format` | `auto`, `version`, `legacy`, `v2` | `auto` |
-| `--ecg_format` | `auto`, `version`, `framed` | `auto` |
+| `--ecg_format` | `auto`, `version`, `framed`, `block_v2` | `auto` |
 | `--validate_with_uuid` | flag | off |
 | `--on_format_conflict` | `warn`, `raise`, `trust_uuid` | `warn` |
 | `--sniff_threshold` | float | `0.90` |
