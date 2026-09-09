@@ -1,5 +1,9 @@
 # Headless control & situational awareness
 
+!!! info "Reference"
+    Operator-facing summary: [The memo engine → Reading it headlessly](../playbook/memo-engine.md#reading-it-headlessly).
+    This page is the full API contract.
+
 PLASMA is a browser app, but a running instance also exposes a small typed
 JSON API and ships a CLI (`plasma-ctl`) so it can be driven and monitored from
 a script, a cron job, or a supervisor on the same machine. Everything operates
@@ -130,7 +134,7 @@ Each MSense source in `/status` carries:
 | `level` / `category` / `level_reason` | the SQC / live state **folded into the source's failure level** |
 
 Health / failure mapping (`plasma.status.sqc_level`, mirrors
-`docs/failure-levels.md`):
+`failure-levels.md`):
 
 | SQC / live state | level | meaning |
 |---|---|---|
@@ -209,14 +213,14 @@ visible inside the recording itself.
 |---|---|
 | `session_start` / `session_stop` | phase entered COLLECTING / STOPPED |
 | `phase` | any phase transition |
-| `fault` | a source rose to L2 or L3 — a device/link failure, a silent recorded stream, or an SQC / live-stream transfer error (see `docs/failure-levels.md`); `sts` carries the reason |
+| `fault` | a source rose to L2 or L3 — a device/link failure, a silent recorded stream, or an SQC / live-stream transfer error (see `failure-levels.md`); `sts` carries the reason |
 | `recover` | a source that had been ≥ L2 dropped back to ≤ L1 |
 | `recorder` | the XDF recorder's state changed |
 | `device_added` / `device_removed` | a source appeared / went away |
 | `heartbeat` | every 30 s — carries `worst_level` + phase, so a monitor can tell "alive and nominal" from "dead" |
 
 Levels 1–3 are the internal ECAM-style severity model documented in
-`docs/failure-levels.md`; they are not shown in the GUI but are the right thing
+`failure-levels.md`; they are not shown in the GUI but are the right thing
 for a headless supervisor to gate on.
 
 ---

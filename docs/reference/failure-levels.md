@@ -164,7 +164,7 @@ device-row fold in `build_memo_html` calls `classify(..., stream_health=…)`.
 memo panel, but **folded into the per-source level in `plasma/api.py`
 `session_status()`** (and hence `worst_level`, `events.jsonl`, `[FAULT]`
 markers) so a headless supervisor sees a failed contact check. See
-`docs/headless.md`.
+`headless.md`.
 
 | status | **level / colour** |
 |---|---|
