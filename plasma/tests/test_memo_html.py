@@ -150,6 +150,14 @@ def test_matched_stream_folds_into_device_row_once():
     assert "m-sub rec" in h
 
 
+def test_two_bands_same_label_both_render():
+    """Two MSense wristbands never renamed from the factory default share a
+    memo label but are keyed separately — both rows must show."""
+    memo = {"E4:B0:AA": _Memo("MSense4PPG"), "E4:B0:BB": _Memo("MSense4PPG")}
+    h = build_memo_html("Collection in progress", _SI, [_Dev(memo)], None)
+    assert h.count(">MSense4PPG</span>") == 2
+
+
 def test_dict_memo_only_one_band_recorded():
     memo = {"A": _Memo("A"), "B": _Memo("B")}
 

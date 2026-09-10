@@ -129,38 +129,46 @@ def _records(blob):
     return blob.get("devices", []) if isinstance(blob, dict) else []
 
 
+def _row_ok(rec):
+    return (rec.get("Enabled", True) and str(rec.get("Name", "")).strip()
+            and str(rec.get("UUID / MAC Address", "")).strip())
+
+
 def active_devices(blob):
-    """Name -> UUID/MAC of wristbands that are both listed and enabled."""
+    """address -> BLE Name for wristbands that are both listed and enabled.
+
+    Keyed by **address**, not Name: two rows may legitimately share a Name
+    (two identical unrenamed wristbands), but an address is unique — a
+    duplicate address is genuinely one device. The driver threads this key
+    through its per-wristband state (memo/caps/sqc_state/…), so a Name key
+    would silently collapse the duplicates to one connected+recorded device.
+    """
     return {
-        rec["Name"]: rec["UUID / MAC Address"]
-        for rec in _records(blob)
-        if rec.get("Enabled", True) and str(rec.get("Name", "")).strip()
-        and str(rec.get("UUID / MAC Address", "")).strip()
+        rec["UUID / MAC Address"]: rec["Name"]
+        for rec in _records(blob) if _row_ok(rec)
     }
 
 
 def imu_stream_devices(blob):
-    """Names of wristbands with the demo IMU-stream characteristic enabled."""
+    """Addresses of wristbands with the demo IMU-stream characteristic enabled."""
     return {
-        rec["Name"]
+        rec["UUID / MAC Address"]
         for rec in _records(blob)
-        if rec.get("Enabled", True) and rec.get("IMU Stream", False)
-        and str(rec.get("Name", "")).strip()
+        if _row_ok(rec) and rec.get("IMU Stream", False)
     }
 
 
 def display_labels(blob):
-    """Name -> ``"Name (Nickname)"`` for listed+enabled wristbands (bare Name
-    when Nickname is blank). Display only — the BLE Name stays the identifier
-    for LSL stream names, status/memo keys and gyro-bias lookup."""
+    """address -> ``"Name (Nickname)"`` for listed+enabled wristbands (bare Name
+    when Nickname is blank). Display only — the address is the identifier for
+    memo/status keys; LSL stream names and gyro-bias are keyed by address too."""
     out = {}
     for rec in _records(blob):
-        name = str(rec.get("Name", "")).strip()
-        if not (rec.get("Enabled", True) and name
-                and str(rec.get("UUID / MAC Address", "")).strip()):
+        if not _row_ok(rec):
             continue
+        name = str(rec["Name"]).strip()
         nick = str(rec.get("Nickname", "")).strip()
-        out[name] = f"{name} ({nick})" if nick else name
+        out[rec["UUID / MAC Address"]] = f"{name} ({nick})" if nick else name
     return out
 
 
@@ -175,8 +183,9 @@ def config_section(host):
             "connecting to a wristband without removing it from the list. IMU Stream is demo firmware "
             "not every wristband has — only check it for units known to support it. Nickname is an "
             "optional label: when set, the Session dashboard status panel and Signal visualizer show "
-            "\"Name (Nickname)\"; leave it blank to show just the device name. The BLE Name stays the "
-            "identifier for LSL streams, saved files and gyro-bias.\n\n"
+            "\"Name (Nickname)\"; leave it blank to show just the device name. Two wristbands may "
+            "share a Name (the UUID/MAC address is the identifier) — a Nickname each tells them "
+            "apart on screen.\n\n"
             "**Scan** for wristbands in range, tick the ones to add, then Append (keep the current "
             "list) or Overwrite, then **Apply MSense wristbands**. Scan before initializing devices "
             "on the Session dashboard — the Mac has a single BLE radio, and edits here only take "
@@ -206,7 +215,16 @@ def config_section(host):
             records = _msense_records_from_df(df)
             host.update_plugin_config("msense", {"devices": records})
             n_enabled = sum(1 for rec in records if rec["Enabled"])
-            return f"Saved — {n_enabled}/{len(records)} MSense wristband(s) enabled"
+            msg = f"Saved — {n_enabled}/{len(records)} MSense wristband(s) enabled"
+            # the address is the identity key — two enabled rows with the same
+            # one are treated as one device (last wins)
+            addrs = [rec["UUID / MAC Address"].strip() for rec in records
+                     if rec["Enabled"] and rec["UUID / MAC Address"].strip()]
+            dupes = sorted({a for a in addrs if addrs.count(a) > 1})
+            if dupes:
+                msg += (f" — ⚠️ {', '.join(dupes)} listed more than once; "
+                        f"only the last row for each address is used")
+            return msg
 
         def _scan():
             from plasma.devices.msense.ble_scan import scan_msense

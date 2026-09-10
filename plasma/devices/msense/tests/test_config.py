@@ -60,7 +60,7 @@ def test_records_from_df_handles_nan_nickname_and_drops_blank_rows():
 
 # ── display_labels ─────────────────────────────────────────────────────────
 
-def test_display_labels_name_paren_nickname():
+def test_display_labels_keyed_by_address():
     blob = {"devices": [
         {"Name": "MSense4ECG-Z5G4A", "Nickname": "left wrist", "UUID / MAC Address": "u1", "Enabled": True},
         {"Name": "MSense4ECG-EX4BT", "Nickname": "", "UUID / MAC Address": "u2", "Enabled": True},
@@ -69,42 +69,41 @@ def test_display_labels_name_paren_nickname():
     ]}
     out = display_labels(blob)
     assert out == {
-        "MSense4ECG-Z5G4A": "MSense4ECG-Z5G4A (left wrist)",
-        "MSense4ECG-EX4BT": "MSense4ECG-EX4BT",
+        "u1": "MSense4ECG-Z5G4A (left wrist)",
+        "u2": "MSense4ECG-EX4BT",
     }
 
 
-# ── two wristbands sharing a Name collapse (Name is the identity key) ───────
+# ── two wristbands sharing a Name stay distinct (address is the identity key) ──
 
-def test_same_name_collapses_to_one_entry():
-    """`Name` is the identity key for every downstream selection helper — and in
-    turn for the driver's `memo` dict, its `active_devices` / `active_outlets` /
-    LSL outlets and the gyro-bias lookup, all keyed by Name. Two *enabled*
-    records that share a Name collapse to a single entry (these are dict / set
-    comprehensions — the last address silently wins), so only one of the two
-    wristbands is ever connected or recorded and the memo panel shows one row.
-    Nickname is display-only and does not disambiguate. Names must be unique."""
+def test_same_name_kept_as_two_entries():
+    """The address, not the Name, is the identity key for every selection helper
+    — and in turn for the driver's per-wristband state (memo/caps/sqc_state/…),
+    its LSL outlets and the gyro-bias lookup. Two *enabled* records that share a
+    Name are two real wristbands and stay separate: both connect, both record,
+    both get a memo row. `display_name(addr)` maps each back to its label."""
     blob = {"devices": [
         {"Name": "MSense4ECG", "Nickname": "left", "UUID / MAC Address": "AA-AA",
          "Enabled": True, "IMU Stream": True},
         {"Name": "MSense4ECG", "Nickname": "right", "UUID / MAC Address": "BB-BB",
          "Enabled": True, "IMU Stream": True},
     ]}
-    assert active_devices(blob) == {"MSense4ECG": "BB-BB"}      # first row lost
-    assert imu_stream_devices(blob) == {"MSense4ECG"}
-    assert display_labels(blob) == {"MSense4ECG": "MSense4ECG (right)"}
+    assert active_devices(blob) == {"AA-AA": "MSense4ECG", "BB-BB": "MSense4ECG"}
+    assert imu_stream_devices(blob) == {"AA-AA", "BB-BB"}
+    assert display_labels(blob) == {
+        "AA-AA": "MSense4ECG (left)", "BB-BB": "MSense4ECG (right)"}
 
 
-def test_distinct_names_same_address_are_both_kept():
-    """The mirror case: two rows, same physical wristband, different Names — both
-    survive selection (Name, not address, is the key), so the band would be
-    connected twice. Add-by-scan dedupes on address to prevent this, but a
-    hand-edited table can still produce it."""
+def test_same_address_on_two_rows_collapses():
+    """The mirror case: two rows, one physical wristband (same address) — now
+    genuinely one device, so it collapses to a single entry (last row's Name
+    wins). Add-by-scan already dedupes on address; this covers a hand-edited
+    table."""
     blob = {"devices": [
         {"Name": "band-A", "Nickname": "", "UUID / MAC Address": "AA-AA", "Enabled": True},
         {"Name": "band-B", "Nickname": "", "UUID / MAC Address": "AA-AA", "Enabled": True},
     ]}
-    assert active_devices(blob) == {"band-A": "AA-AA", "band-B": "AA-AA"}
+    assert active_devices(blob) == {"AA-AA": "band-B"}
 
 
 # ── merge_msense_records ────────────────────────────────────────────────────

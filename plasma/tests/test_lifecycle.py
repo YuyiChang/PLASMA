@@ -142,3 +142,26 @@ def test_atexit_cleanup_swallows_errors():
     p.lsl_recorder = _Boom()
     p.available_devices = [_Boom()]
     p._atexit_cleanup()          # must not raise
+
+
+# ── get_visual_sources: two sub-sources may share a display label ───────────
+
+def test_get_visual_sources_disambiguates_repeated_labels():
+    class _Memo:
+        def __init__(self, label):
+            self.label = label
+            self.channels = {"ENMO": [1, 2, 3]}
+
+    class _Dev:
+        tag = "msense"
+        memo = {"E4:B0:AA": _Memo("MSense4PPG"), "E4:B0:BB": _Memo("MSense4PPG")}
+
+        def get_sources(self):
+            return self.memo
+
+    p = _bare_panel()
+    p.available_devices = [_Dev()]
+    sources = p.get_visual_sources()
+    assert len(sources) == 2                       # neither wristband dropped
+    assert "MSense4PPG" in sources
+    assert any(k != "MSense4PPG" and k.startswith("MSense4PPG") for k in sources)

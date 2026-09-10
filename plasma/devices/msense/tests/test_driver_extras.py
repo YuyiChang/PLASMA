@@ -126,6 +126,25 @@ def test_erase_right_code_writes_68_and_disconnects():
     assert d.active_devices == {} and d.active_outlets == {}
 
 
+def test_finish_gyro_calibration_is_keyed_by_address(monkeypatch):
+    saved = []
+    monkeypatch.setattr("plasma.devices.msense.device.save_gyro_bias",
+                        lambda addr, bias, n: saved.append((addr, bias, n)))
+    d = _bare_driver()
+    addr = "E4:B0:AA:BB:CC:DD"
+    d._state_lock = threading.Lock()
+    d.gyro_bias = {}
+    d.gyro_calib = {addr: {"until": 0.0, "sum": [3.0, 6.0, 9.0], "n": 3}}
+    d.memo = {addr: PlasmaMemo(addr, label="MSense4ECG (left)")}
+    d.display_labels = {addr: "MSense4ECG (left)"}
+
+    d._finish_gyro_calibration(addr)
+
+    assert d.gyro_bias[addr] == (1.0, 2.0, 3.0)
+    assert saved == [(addr, (1.0, 2.0, 3.0), 3)]
+    assert d.memo[addr].sts == "✅ Bias saved"
+
+
 def test_get_sqc_devices_filters_on_nus_capability():
     d = _bare_driver()
     d.active_devices = {"w1": object(), "w2": object(), "w3": object()}

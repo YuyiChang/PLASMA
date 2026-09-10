@@ -74,6 +74,13 @@
   end boundary is uncertain is visible in the XDF). A per-device outcome list
   is on the YAMS → Control sub-tab. Older firmware whose `da39c931` isn't
   readable is reported as *not verifiable*, never as a failure.
+- **Two MSense wristbands with the same BLE Name no longer collapse into one.**
+  The driver now keys every per-wristband structure (memo row, SQC/live state,
+  capabilities, LSL outlet, gyro bias) by the wristband's **address** instead of
+  its Name, so two unrenamed factory-default units both connect, both record and
+  both show a memo row. `"Name (Nickname)"` still labels every row and message
+  unchanged — give the two a Nickname each to tell them apart on screen. The
+  Configuration tab warns if the same address is listed on two enabled rows.
 
 ### 🚦 Session-memo status classification
 

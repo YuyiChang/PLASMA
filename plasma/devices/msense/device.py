@@ -150,17 +150,21 @@ class MotionSenseHRV(PlasmaDevice):
         self.gyro_bias = {}
         self.gyro_calib = {}
         self.sqc_state = {}
-        # name -> live INFINITY-stream state (see _new_live_state); only ever
+        # Every per-wristband dict below is keyed by the wristband's BLE
+        # address (config.active_devices) — unique even when two wristbands
+        # share a Name. `display_name(addr)` maps a key back to "Name (Nickname)"
+        # for anything the operator sees.
+        # addr -> live INFINITY-stream state (see _new_live_state); only ever
         # one NUS stream (SQC snapshot OR live) active per wristband at a time.
         self.live_state = {}
-        # name -> {"status": confirmed|unconfirmed|unverifiable|unknown,
-        #          "checked_at": ts} — set by collection_ctl(name, False), see
-        # _confirm_acq_stopped. Cleared on the next collection_ctl(name, True).
+        # addr -> {"status": confirmed|unconfirmed|unverifiable|unknown,
+        #          "checked_at": ts} — set by collection_ctl(addr, False), see
+        # _confirm_acq_stopped. Cleared on the next collection_ctl(addr, True).
         self._acq_stop_status = {}
-        # names with an open "[SQC] … start" journaler marker, awaiting an "end"
-        # once the stream reaches a terminal status (see _sqc_watchdog_loop).
+        # addresses with an open "[SQC] … start" journaler marker, awaiting an
+        # "end" once the stream reaches a terminal status (see _sqc_watchdog_loop).
         self._sqc_journal_open = set()
-        self.battery = {}          # name -> last battery %
+        self.battery = {}          # addr -> last battery %
         # rssi at connect time — bleak has no live RSSI query on a connected
         # client (that's not a standard GATT op; RSSI only comes from
         # advertisement data during a scan), so we cache what the scan saw
@@ -168,30 +172,31 @@ class MotionSenseHRV(PlasmaDevice):
         self._connect_rssi = {}
         # what each wristband actually subscribed to — older firmware lacks NUS,
         # not every unit has the demo IMU-stream characteristic
-        self.caps = {}             # name -> {"nus": bool, "imu": bool, "battery": bool}
+        self.caps = {}             # addr -> {"nus": bool, "imu": bool, "battery": bool}
         self.auto_reconnect = True
         self._last_reconnect_sweep = 0.0
         # guards orientation_quat/gyro_calib/gyro_bias, mutated from both the
         # Gradio/main thread (start/stop/reset/calibrate) and the BLE notify
         # callback thread (imu_stream_handler)
         self._state_lock = threading.Lock()
-        for k, addr in self.device_list.items():
+        for addr, blename in self.device_list.items():
             channels = ["ENMO", "counter", "battery"]
-            self.caps[k] = {"nus": False, "imu": False, "battery": False,
-                            "product": None, "acq_readback": False}
+            self.caps[addr] = {"nus": False, "imu": False, "battery": False,
+                               "product": None, "acq_readback": False}
             groups = {}
-            if k in self.imu_stream_devices:
+            if addr in self.imu_stream_devices:
                 channels += ["AccX", "AccY", "AccZ", "Q0", "Q1", "Q2", "Q3", "OrientX", "OrientY", "OrientZ", "OrientW"]
                 groups = {
                     "Accel (g)": ["AccX", "AccY", "AccZ"],
                     "Quaternion Δ (per-frame)": ["Q0", "Q1", "Q2", "Q3"],
                     "Orientation (composed)": ["OrientX", "OrientY", "OrientZ", "OrientW"],
                 }
-                self.orientation_quat[k] = IDENTITY_QUAT
-                self.gyro_bias[k] = bias_by_addr.get(addr, (0.0, 0.0, 0.0))
-            self.memo[k] = PlasmaMemo(k, channels=channels, label=self.display_labels.get(k, k),
-                                      channel_groups=groups)
-            self.sqc_state[k] = self._new_sqc_state()
+                self.orientation_quat[addr] = IDENTITY_QUAT
+                self.gyro_bias[addr] = bias_by_addr.get(addr, (0.0, 0.0, 0.0))
+            self.memo[addr] = PlasmaMemo(addr, channels=channels,
+                                         label=self.display_labels.get(addr, blename),
+                                         channel_groups=groups)
+            self.sqc_state[addr] = self._new_sqc_state()
 
         # fallback reference in case data arrives before start() is clicked;
         # start() resets this to the true session-start time
@@ -222,17 +227,19 @@ class MotionSenseHRV(PlasmaDevice):
         ``msense_demo`` blob instead of ``msense``."""
         from . import config as mcfg
         blob = device_config.get_plugin_config(self.CONFIG_KEY)
-        self.device_list = mcfg.active_devices(blob)
-        self.imu_stream_devices = mcfg.imu_stream_devices(blob)
-        # Name -> "Name (Nickname)" for UI panels; identifier stays the Name.
+        self.device_list = mcfg.active_devices(blob)          # addr -> BLE Name
+        self.imu_stream_devices = mcfg.imu_stream_devices(blob)   # {addr}
+        # addr -> "Name (Nickname)" for anything the operator sees; the
+        # per-wristband identifier is the address (see display_name()).
         self.display_labels = mcfg.display_labels(blob)
 
-    def _make_client(self, addr, name):
-        """The BLE client object for ``addr``. A seam so MSenseDemo can hand
-        back a fake peripheral that generates synthetic notifications."""
+    def _make_client(self, addr, key):
+        """The BLE client object for ``addr``. ``key`` is the per-wristband
+        dict key (the address) the disconnect callback reports. A seam so
+        MSenseDemo can hand back a fake peripheral."""
         return BleakClient(
             addr,
-            disconnected_callback=lambda c, nm=name: self._on_unexpected_disconnect(nm),
+            disconnected_callback=lambda c, nm=key: self._on_unexpected_disconnect(nm),
         )
 
     def _shutdown_cleanup(self):
@@ -334,7 +341,7 @@ class MotionSenseHRV(PlasmaDevice):
         self.ctl_state = "Start device connection"
 
         # quick sanity check
-        for name, addr in self.device_list.items():
+        for addr, blename in self.device_list.items():
             self.info(f"Connecting to device {addr}")
             # assert addr in self.devices.keys(), self.info(f"Target device not found {addr}")
 
@@ -351,50 +358,50 @@ class MotionSenseHRV(PlasmaDevice):
                     # bind nm by default arg — otherwise the callback closes
                     # over the loop variable and fires with whichever device
                     # happened to be last when the loop finished
-                    p = self._make_client(addr, name)
+                    p = self._make_client(addr, addr)
                     # bounded: bleak's connect() actually respects this
                     # timeout (unlike simplepyble's, confirmed via a macOS
                     # thread dump to hold the GIL hostage indefinitely) —
                     # don't let one bad device freeze the whole connect loop
                     self._run_async(p.connect())
                     self.info(f"{n} connected")
-                    self.active_devices[name] = p
-                    self.active_outlets[name] = MsenseOutlet(n, addr)
-                    self._connect_rssi[name] = dev.get("rssi")
-                    self.caps[name]["product"] = dev.get("product")
+                    self.active_devices[addr] = p
+                    self.active_outlets[addr] = MsenseOutlet(n, addr)
+                    self._connect_rssi[addr] = dev.get("rssi")
+                    self.caps[addr]["product"] = dev.get("product")
                     try:
-                        self._ensure_mtu(p, name)
+                        self._ensure_mtu(p, addr)
                     except Exception as e:
                         self.info(f"{n}: MTU negotiation error: {e}")
                     try:
-                        self.register_nus_notify(p, name)
-                        self.caps[name]["nus"] = True
+                        self.register_nus_notify(p, addr)
+                        self.caps[addr]["nus"] = True
                     except Exception as e:
                         self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
                     # can we read the acquisition-enable char back? (used to
                     # confirm a collection stop — see _confirm_acq_stopped)
-                    self.caps[name]["acq_readback"] = (
-                        self._read_acq_enabled(name, p) is not None)
+                    self.caps[addr]["acq_readback"] = (
+                        self._read_acq_enabled(addr, p) is not None)
                     try:
                         raw = self._run_async(p.read_gatt_char(BATTERY_CHAR_UUID))
                         pct = raw[0]
-                        self.battery[name] = pct
-                        self.caps[name]["battery"] = True
-                        self.memo[name].set_latest(f"🔋 {pct}%")
+                        self.battery[addr] = pct
+                        self.caps[addr]["battery"] = True
+                        self.memo[addr].set_latest(f"🔋 {pct}%")
                     except Exception as e:
                         self.info(f"battery read unavailable on {n}: {e}")
                 except Exception as e:
                     self.info(f"Error connecting to {n}: {e}")
-                    self.memo[name].sts = "⛔ connect failed"
-                    self.active_devices.pop(name, None)
-                    self.active_outlets.pop(name, None)
+                    self.memo[addr].sts = "⛔ connect failed"
+                    self.active_devices.pop(addr, None)
+                    self.active_outlets.pop(addr, None)
                     try:
                         if p is not None and p.is_connected:
                             self._run_async(p.disconnect())
                     except Exception:
                         pass
             else:
-                self.memo[name].sts = "⛔ device not found"
+                self.memo[addr].sts = "⛔ device not found"
 
         # run the 1 Hz supervisor as soon as anything is connected — it now also
         # does the auto-reconnect sweep, not just SQC stall recovery
@@ -455,20 +462,21 @@ class MotionSenseHRV(PlasmaDevice):
         except Exception as e:
             self.info(f"Error stopping live streams: {e}")
         for name, p in list(self.active_devices.items()):
+            disp = self.display_name(name)
             print(name, p.is_connected)
             try:
                 self.collection_ctl(name, False)
                 confirmed = self._acq_stop_status.get(name, {}).get("status") == "confirmed"
                 self.memo[name].sts = "🛑 stopped" if confirmed else "🛑"
-                self.journal(f"[ACQ] {name} stop "
+                self.journal(f"[ACQ] {disp} stop "
                              + ("confirmed" if confirmed
                                 else "not verifiable (da39c931 unreadable)"))
             except AcquisitionStopNotConfirmed as e:
                 self.info(str(e))
                 self.memo[name].sts = "⚠️ still recording — stop unconfirmed"
-                self.journal(f"[ACQ] {name} stop UNCONFIRMED (da39c931 still 1 after retry)")
+                self.journal(f"[ACQ] {disp} stop UNCONFIRMED (da39c931 still 1 after retry)")
             except Exception as e:
-                self.info(f"Error stopping {name}: {e}")
+                self.info(f"Error stopping {disp}: {e}")
                 self.memo[name].sts = "⚠️ stop failed"
 
         self.ctl_state = "Collection stopped"
@@ -482,7 +490,7 @@ class MotionSenseHRV(PlasmaDevice):
         """Fired by bleak when a wristband drops BLE on its own (out of
         range, battery) — without this the UI never reflected an in-session
         disconnect until the next Stop press."""
-        self.info(f"{name} disconnected unexpectedly")
+        self.info(f"{self.display_name(name)} disconnected unexpectedly")
         if name in self.memo:
             self.memo[name].sts = "🔌 disconnected"
 
@@ -537,6 +545,7 @@ class MotionSenseHRV(PlasmaDevice):
 
         done, failed = 0, []
         for name, p in list(self.active_devices.items()):
+            disp = self.display_name(name)
             try:
                 self._run_async(p.write_gatt_char(CTL_ERASE_CHAR_UUID,
                                                    struct.pack("<B", ERASE_CODE),
@@ -544,8 +553,8 @@ class MotionSenseHRV(PlasmaDevice):
                 self.memo[name].sts = "🧨 erased — re-Initialize"
                 done += 1
             except Exception as e:
-                self.info(f"erase write failed on {name}: {e}")
-                failed.append(f"{name}: {e}")
+                self.info(f"erase write failed on {disp}: {e}")
+                failed.append(f"{disp}: {e}")
 
         self.info(f"Flash erase issued to {done} wristband(s); failed: {failed}")
         self._journal_finished_sqc(reason="disconnected")
@@ -569,7 +578,7 @@ class MotionSenseHRV(PlasmaDevice):
             return "No wristband connected."
         out = []
         for name, p in list(self.active_devices.items()):
-            out.append(f"### {name}")
+            out.append(f"### {self.display_name(name)}")
             try:
                 for service in p.services:
                     for ch in service.characteristics:
@@ -586,35 +595,36 @@ class MotionSenseHRV(PlasmaDevice):
             return "⛔ enter an integer"
         lines = []
         for name, p in list(self.active_devices.items()):
+            disp = self.display_name(name)
             try:
                 self._run_async(p.write_gatt_char(CTL_ENC_CHAR_UUID, struct.pack("<I", val), response=True))
                 back = struct.unpack("<I", self._run_async(p.read_gatt_char(CTL_ENC_CHAR_UUID)))[0]
-                lines.append(f"{name}: wrote {val}, read back {back}")
+                lines.append(f"{disp}: wrote {val}, read back {back}")
             except Exception as e:
-                lines.append(f"{name}: {e}")
+                lines.append(f"{disp}: {e}")
         return "\n".join(lines) or "No wristband connected."
 
     def start_gyro_calibration(self, duration=3.0):
         now = time.time()
-        for name in self.imu_stream_devices:
-            if name in self.active_devices:
+        for addr in self.imu_stream_devices:
+            if addr in self.active_devices:
                 with self._state_lock:
-                    self.gyro_calib[name] = {"until": now + duration, "sum": [0.0, 0.0, 0.0], "n": 0}
-                self.memo[name].sts = "🎯 Calibrating..."
-                self.info(f"Started gyro bias calibration for {name} ({duration}s) — keep the wristband still")
+                    self.gyro_calib[addr] = {"until": now + duration, "sum": [0.0, 0.0, 0.0], "n": 0}
+                self.memo[addr].sts = "🎯 Calibrating..."
+                self.info(f"Started gyro bias calibration for {self.display_name(addr)} "
+                          f"({duration}s) — keep the wristband still")
 
-    def _finish_gyro_calibration(self, name):
+    def _finish_gyro_calibration(self, addr):
         with self._state_lock:
-            calib = self.gyro_calib.pop(name, None)
+            calib = self.gyro_calib.pop(addr, None)
             if calib is None or calib["n"] == 0:
                 return
             bias = tuple(s / calib["n"] for s in calib["sum"])
-            self.gyro_bias[name] = bias
-        addr = self.device_list.get(name)
+            self.gyro_bias[addr] = bias
         if addr:
             save_gyro_bias(addr, bias, calib["n"])
-        self.memo[name].sts = "✅ Bias saved"
-        self.info(f"Gyro bias calibrated for {name}: {bias} (n={calib['n']})")
+        self.memo[addr].sts = "✅ Bias saved"
+        self.info(f"Gyro bias calibrated for {self.display_name(addr)}: {bias} (n={calib['n']})")
 
     def _write_acq_enable(self, peripheral, on):
         self._run_async(peripheral.write_gatt_char(
@@ -952,7 +962,8 @@ class MotionSenseHRV(PlasmaDevice):
         for cap in ("nus", "imu", "battery"):
             on = sum(1 for n in conn if self.caps.get(n, {}).get(cap))
             parts.append(f"{cap.upper() if cap == 'nus' else cap.capitalize()} on {on}/{len(conn)}")
-        missing_nus = [n for n in conn if not self.caps.get(n, {}).get("nus")]
+        missing_nus = [self.display_name(n) for n in conn
+                       if not self.caps.get(n, {}).get("nus")]
         s = " · ".join(parts)
         if missing_nus:
             s += f" — NUS unavailable on: {', '.join(missing_nus)}"
@@ -960,8 +971,9 @@ class MotionSenseHRV(PlasmaDevice):
 
     def display_name(self, name):
         """UI label for a wristband: ``"Name (Nickname)"`` when a nickname is
-        configured, else the bare Name. ``name`` stays the identifier."""
-        return self.display_labels.get(name, name)
+        configured, else the bare Name. The per-wristband key (a BLE address)
+        stays the identifier — this is display only."""
+        return getattr(self, "display_labels", {}).get(name, name)
 
     def _new_reassembler(self, product):
         return EcgBlockReassembler() if product == ECG else Packed16Reassembler()
@@ -991,20 +1003,21 @@ class MotionSenseHRV(PlasmaDevice):
         """Pull a FINITE snapshot. max_seconds / history_only enable quick mode:
         the stream is STOPped early and the validated prefix kept (see
         _sqc_watchdog_loop)."""
+        disp = self.display_name(name)
         peripheral = self.active_devices.get(name)
         if peripheral is None or not peripheral.is_connected:
-            return f"⛔ {name} not connected"
+            return f"⛔ {disp} not connected"
 
         product = self._sqc_product(name)
         if product is None:
-            return f"⛔ {name}: unknown product (not an MSense4ECG / MSense4PPG?)"
+            return f"⛔ {disp}: unknown product (not an MSense4ECG / MSense4PPG?)"
 
         state = self.sqc_state.setdefault(name, self._new_sqc_state())
         if state["status"] in ("requesting", "receiving", "finishing"):
-            return f"⏳ {name} snapshot already in progress"
+            return f"⏳ {disp} snapshot already in progress"
         live = self.live_state.get(name)
         if live and live["status"] in ("requesting", "streaming", "stopping"):
-            return f"⏳ {name} live stream running — stop it first"
+            return f"⏳ {disp} live stream running — stop it first"
 
         if max_seconds is not None and max_seconds <= 0:
             max_seconds = None
@@ -1012,7 +1025,7 @@ class MotionSenseHRV(PlasmaDevice):
         mtu, mtu_err = self._check_stream_mtu(peripheral, name)
         if mtu_err:
             state.update(status="error", error=mtu_err)
-            return f"⛔ {name}: {mtu_err}"
+            return f"⛔ {disp}: {mtu_err}"
 
         self._ensure_sqc_threads()
         rssi = self._connect_rssi.get(name)
@@ -1035,19 +1048,19 @@ class MotionSenseHRV(PlasmaDevice):
                                                         build_command(OP_START, sid), response=True))
         except Exception as e:
             state.update(status="error", error=f"request failed: {e}")
-            self.info(f"SQC START failed for {name}: {e}")
-            return f"⛔ {name} request failed: {e}"
+            self.info(f"SQC START failed for {disp}: {e}")
+            return f"⛔ {disp} request failed: {e}"
 
         mode = ("history-only" if history_only
                 else f"quick {max_seconds:g}s" if max_seconds else "full")
-        self.info(f"SQC START sent to {name} ({product}, stream {sid:#010x}, mtu={mtu}, "
+        self.info(f"SQC START sent to {disp} ({product}, stream {sid:#010x}, mtu={mtu}, "
                   f"rssi={rssi} @connect, {mode})")
         self._sqc_debug(name, f"START stream={sid:#010x} {product} mtu={mtu} rssi={rssi}@connect mode={mode}")
         if name in self._sqc_journal_open:   # prior run's marker never closed
-            self.journal(f"[SQC] {name} end (superseded)")
+            self.journal(f"[SQC] {disp} end (superseded)")
         self._sqc_journal_open.add(name)
-        self.journal(f"[SQC] {name} start ({mode})")
-        return f"📡 {name}: waiting for START_ACK…"
+        self.journal(f"[SQC] {disp} start ({mode})")
+        return f"📡 {disp}: waiting for START_ACK…"
 
     # terminal statuses shared by every SQC runner's completion polling and by
     # the hybrid history/forward handoff predicate below
@@ -1192,12 +1205,13 @@ class MotionSenseHRV(PlasmaDevice):
             return False
 
     def cancel_sqc_snapshot(self, name):
+        disp = self.display_name(name)
         state = self.sqc_state.get(name)
         if not state or not state.get("session"):
-            return f"⛔ {name}: nothing to cancel"
-        return (f"✖ {name}: stop sent"
+            return f"⛔ {disp}: nothing to cancel"
+        return (f"✖ {disp}: stop sent"
                 if self._stop_stream(name, state["session"], "user cancel")
-                else f"⛔ {name} cancel failed")
+                else f"⛔ {disp} cancel failed")
 
     def cancel_all_sqc_snapshots(self):
         active = [n for n, s in self.sqc_state.items()
@@ -1454,7 +1468,7 @@ class MotionSenseHRV(PlasmaDevice):
             if reason is None and status not in self._SQC_TERMINAL_STATUSES:
                 continue
             self._sqc_journal_open.discard(name)
-            self.journal(f"[SQC] {name} end ({reason or status})")
+            self.journal(f"[SQC] {self.display_name(name)} end ({reason or status})")
 
     def _sqc_watchdog_loop(self):
         """1 Hz supervisor (runs off the BLE callback thread). Per active SQC
@@ -1821,24 +1835,25 @@ class MotionSenseHRV(PlasmaDevice):
     def start_live_stream(self, name):
         """Begin a continuous INFINITY stream — decoded into an in-memory
         rolling buffer for the live plot. Not written to disk or LSL (yet)."""
+        disp = self.display_name(name)
         peripheral = self.active_devices.get(name)
         if peripheral is None or not peripheral.is_connected:
-            return f"⛔ {name} not connected"
+            return f"⛔ {disp} not connected"
         product = self._sqc_product(name)
         if product is None:
-            return f"⛔ {name}: unknown product (not an MSense4ECG / MSense4PPG?)"
+            return f"⛔ {disp}: unknown product (not an MSense4ECG / MSense4PPG?)"
 
         sqc = self.sqc_state.get(name)
         if sqc and sqc["status"] in ("requesting", "receiving", "finishing"):
-            return f"⏳ {name} snapshot in progress — wait for it to finish"
+            return f"⏳ {disp} snapshot in progress — wait for it to finish"
         live = self.live_state.setdefault(name, self._new_live_state())
         if live["status"] in ("requesting", "streaming", "stopping"):
-            return f"⏳ {name} live stream already running"
+            return f"⏳ {disp} live stream already running"
 
         mtu, mtu_err = self._check_stream_mtu(peripheral, name)
         if mtu_err:
             live.update(status="error", error=mtu_err)
-            return f"⛔ {name}: {mtu_err}"
+            return f"⛔ {disp}: {mtu_err}"
 
         self._ensure_sqc_threads()
         fs = PROFILE[product]["sample_rate"]
@@ -1861,18 +1876,19 @@ class MotionSenseHRV(PlasmaDevice):
                 NUS_RX_CHAR_UUID, build_command(OP_START_INFINITY, sid), response=True))
         except Exception as e:
             live.update(status="error", error=f"request failed: {e}")
-            return f"⛔ {name} live start failed: {e}"
-        self.info(f"live stream START_INFINITY sent to {name} ({product}, stream {sid:#010x})")
+            return f"⛔ {disp} live start failed: {e}"
+        self.info(f"live stream START_INFINITY sent to {disp} ({product}, stream {sid:#010x})")
         self._sqc_debug(name, f"LIVE START_INFINITY stream={sid:#010x} {product}")
-        return f"📡 {name}: live {product} stream starting…"
+        return f"📡 {disp}: live {product} stream starting…"
 
     def stop_live_stream(self, name):
+        disp = self.display_name(name)
         live = self.live_state.get(name)
         if not live or not live.get("session"):
-            return f"⛔ {name}: no live stream"
+            return f"⛔ {disp}: no live stream"
         live["status"] = "stopping"
         self._stop_stream(name, live["session"], "user stop")
-        return f"✖ {name}: live stream stop sent"
+        return f"✖ {disp}: live stream stop sent"
 
     def stop_all_live_streams(self):
         active = [n for n, s in self.live_state.items()

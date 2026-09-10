@@ -38,19 +38,19 @@ class MSenseDemo(MotionSenseHRV):
 
     def _load_device_config(self):
         blob = self._read_blob()
-        self.device_list = _config.active_devices(blob)
-        self.imu_stream_devices = _config.imu_stream_devices(blob)
-        self.display_labels = _config.display_labels(blob)
-        self._sensor_type = _config.sensor_types(blob)     # Name -> "PPG"/"ECG"
-        self._demo_faults = _config.device_faults(blob)    # Name -> fault id
+        self.device_list = _config.active_devices(blob)        # addr -> Name
+        self.imu_stream_devices = _config.imu_stream_devices(blob)   # {addr}
+        self.display_labels = _config.display_labels(blob)     # addr -> label
+        self._sensor_type = _config.sensor_types(blob)     # addr -> "PPG"/"ECG"
+        self._demo_faults = _config.device_faults(blob)    # addr -> fault id
         self._demo_collecting = False
 
     def _read_blob(self):
         from plasma.config import device_config
         return device_config.get_plugin_config(self.CONFIG_KEY)
 
-    def fault_for(self, name):
-        return self._demo_faults.get(name, _faults.NO_FAULT)
+    def fault_for(self, addr):
+        return self._demo_faults.get(addr, _faults.NO_FAULT)
 
     # ── BLE seams ───────────────────────────────────────────────────────────
 
@@ -59,19 +59,21 @@ class MSenseDemo(MotionSenseHRV):
         with the ``device_not_found`` fault is left out, so the inherited
         ``connect_devices`` marks it '⛔ device not found'."""
         self.devices = {}
-        for name, addr in self.device_list.items():
-            if self.fault_for(name) == "device_not_found":
+        for addr, blename in self.device_list.items():
+            if self.fault_for(addr) == "device_not_found":
                 continue
             self.devices[addr] = {
-                "name": f"{name} [{addr}]",
+                "name": f"{blename} [{addr}]",
                 "address": addr,
                 "rssi": -55,
-                "product": self._sensor_type.get(name, "PPG"),
+                "product": self._sensor_type.get(addr, "PPG"),
             }
         self.info(f"demo scan: {list(self.devices)}")
 
-    def _make_client(self, addr, name):
-        return FakePeripheral(self, name, addr)
+    def _make_client(self, addr, key):
+        # the driver keys per-wristband state by address — the fake carries it
+        # as its handle so fault_for() / _on_unexpected_disconnect() line up
+        return FakePeripheral(self, key, addr)
 
     # ── collection state (seen by the fake's live generators) ───────────────
 

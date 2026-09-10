@@ -23,9 +23,11 @@ _COLUMNS = ["Name", "Nickname", "Sensor", "Enabled", "IMU Stream", "Fault"]
 _SENSORS = ("PPG", "ECG")
 
 
-def _synth_addr(name):
-    """A stable, MAC-shaped fake address for a demo wristband name."""
-    h = hashlib.md5(str(name).encode("utf-8")).digest()
+def _synth_addr(name, nickname=""):
+    """A stable, MAC-shaped fake address for a demo wristband. Derived from
+    Name **and** Nickname so two rows sharing a Name still get distinct
+    addresses (the driver keys per-wristband state by address)."""
+    h = hashlib.md5(f"{name}\x00{nickname}".encode("utf-8")).digest()
     return "DE:" + ":".join(f"{b:02X}" for b in h[:5])
 
 
@@ -52,30 +54,35 @@ def _enabled(blob):
 
 # ── selection helpers (take host.get_plugin_config("msense_demo")) ────────────
 
+def _addr(r):
+    return _synth_addr(r["Name"], r["Nickname"])
+
+
 def active_devices(blob):
-    """Name -> synthetic address for enabled demo wristbands."""
-    return {r["Name"]: _synth_addr(r["Name"]) for r in _enabled(blob)}
+    """address -> Name for enabled demo wristbands (keyed by address to match
+    the real driver — see plasma.devices.msense.config.active_devices)."""
+    return {_addr(r): r["Name"] for r in _enabled(blob)}
 
 
 def imu_stream_devices(blob):
-    return {r["Name"] for r in _enabled(blob) if r["IMU Stream"]}
+    return {_addr(r) for r in _enabled(blob) if r["IMU Stream"]}
 
 
 def display_labels(blob):
     out = {}
     for r in _enabled(blob):
-        out[r["Name"]] = f"{r['Name']} ({r['Nickname']})" if r["Nickname"] else r["Name"]
+        out[_addr(r)] = f"{r['Name']} ({r['Nickname']})" if r["Nickname"] else r["Name"]
     return out
 
 
 def sensor_types(blob):
-    """Name -> "PPG" | "ECG"."""
-    return {r["Name"]: r["Sensor"] for r in _enabled(blob)}
+    """address -> "PPG" | "ECG"."""
+    return {_addr(r): r["Sensor"] for r in _enabled(blob)}
 
 
 def device_faults(blob):
-    """Name -> fault id."""
-    return {r["Name"]: r["Fault"] for r in _enabled(blob)}
+    """address -> fault id."""
+    return {_addr(r): r["Fault"] for r in _enabled(blob)}
 
 
 # ── Configuration-tab section ────────────────────────────────────────────────

@@ -22,8 +22,8 @@ def _blob(*rows):
     return {"devices": list(rows)}
 
 
-def _row(name, sensor="PPG", enabled=True, imu=True, fault="none"):
-    return {"Name": name, "Nickname": "", "Sensor": sensor, "Enabled": enabled,
+def _row(name, sensor="PPG", enabled=True, imu=True, fault="none", nickname=""):
+    return {"Name": name, "Nickname": nickname, "Sensor": sensor, "Enabled": enabled,
             "IMU Stream": imu, "Fault": fault}
 
 
@@ -45,6 +45,12 @@ def demo_blob(monkeypatch):
 def _make_device():
     d = MSenseDemo(SESSION_INFO, logger=None, tag="MSense Demo (simulated)")
     return d
+
+
+def _key(d, config_name):
+    """The driver's per-wristband key (synthetic BLE address) for a demo
+    wristband looked up by its configured Name."""
+    return next(a for a, n in d.device_list.items() if n == config_name)
 
 
 def _teardown(d):
@@ -124,16 +130,37 @@ def test_connects_and_streams_live(demo_blob):
     d = _make_device()
     try:
         assert isinstance(d, MotionSenseHRV)
-        assert "DEMO-PPG-01" in d.active_devices
-        assert isinstance(d.active_devices["DEMO-PPG-01"], FakePeripheral)
-        assert d.get_sqc_devices() == ["DEMO-PPG-01"]
+        name = _key(d, "DEMO-PPG-01")
+        assert name in d.active_devices
+        assert isinstance(d.active_devices[name], FakePeripheral)
+        assert d.get_sqc_devices() == [name]
 
         d.session_dir = None
         d.start()
-        memo = d.memo["DEMO-PPG-01"]
+        memo = d.memo[name]
         assert _wait(lambda: len(memo.channels.get("ENMO", [])) >= 2, timeout=6)
         assert _wait(lambda: len(memo.channels.get("OrientW", [])) >= 5, timeout=6)
         d.stop()
+    finally:
+        _teardown(d)
+
+
+def test_two_wristbands_with_the_same_name_stay_distinct(demo_blob):
+    """Two enabled rows sharing a Name are two wristbands: both connect, each
+    gets its own key / memo row / SQC state, and display_name() maps each key
+    back to its own label. Before the address-keyed fix one silently replaced
+    the other. (A Nickname each is what keeps the synthetic demo addresses
+    distinct — real hardware always has distinct addresses.)"""
+    demo_blob(_row("MSense4PPG", sensor="PPG", imu=False, nickname="left"),
+              _row("MSense4PPG", sensor="PPG", imu=False, nickname="right"))
+    d = _make_device()
+    try:
+        assert len(d.device_list) == 2
+        assert len(d.active_devices) == 2
+        assert len(d.memo) == 2
+        assert sorted(d.get_sqc_devices()) == sorted(d.active_devices)
+        assert sorted(d.display_name(k) for k in d.active_devices) == [
+            "MSense4PPG (left)", "MSense4PPG (right)"]
     finally:
         _teardown(d)
 
@@ -145,7 +172,7 @@ def test_collection_stop_confirmed(demo_blob, monkeypatch):
     demo_blob(_row("DEMO-PPG", sensor="PPG", imu=False))
     d = _make_device()
     try:
-        name = "DEMO-PPG"
+        name = _key(d, "DEMO-PPG")
         assert d.caps[name]["acq_readback"] is True
         d.journal_hook = (marks := []).append
         d.session_dir = None
@@ -165,7 +192,7 @@ def test_collection_stop_ignored_by_firmware_is_flagged(demo_blob, monkeypatch):
     demo_blob(_row("DEMO-PPG", sensor="PPG", imu=False, fault="acq_stop_ignored"))
     d = _make_device()
     try:
-        name = "DEMO-PPG"
+        name = _key(d, "DEMO-PPG")
         d.journal_hook = (marks := []).append
         d.session_dir = None
         d.start()
@@ -189,7 +216,7 @@ def test_sqc_snapshot_ready(demo_blob, sensor, fs):
     demo_blob(_row(f"DEMO-{sensor}", sensor=sensor, imu=False))
     d = _make_device()
     try:
-        name = f"DEMO-{sensor}"
+        name = _key(d, f"DEMO-{sensor}")
         d.request_sqc_snapshot(name)
         assert _wait(lambda: d.get_sqc_status(name)["status"] in ("ready", "error"),
                      timeout=20)
@@ -210,7 +237,7 @@ def test_live_stream_starts_and_stops(demo_blob, sensor):
     demo_blob(_row(f"DEMO-{sensor}", sensor=sensor, imu=False))
     d = _make_device()
     try:
-        name = f"DEMO-{sensor}"
+        name = _key(d, f"DEMO-{sensor}")
         msg = d.start_live_stream(name)
         assert "live" in msg
         assert _wait(lambda: d.get_live_stream_status(name)["status"] == "streaming",
@@ -236,7 +263,7 @@ def test_live_stream_stall_recovers(demo_blob, monkeypatch):
     demo_blob(_row("DEMO-ECG", sensor="ECG", imu=False, fault="stream_stall"))
     d = _make_device()
     try:
-        name = "DEMO-ECG"
+        name = _key(d, "DEMO-ECG")
         d.start_live_stream(name)
         assert _wait(lambda: d.get_live_stream_status(name)["status"] == "error",
                      timeout=15)
@@ -250,8 +277,9 @@ def test_fault_device_not_found(demo_blob):
     demo_blob(_row("GHOST", fault="device_not_found"))
     d = _make_device()
     try:
-        assert "GHOST" not in d.active_devices
-        assert d.memo["GHOST"].sts == "⛔ device not found"
+        name = _key(d, "GHOST")
+        assert name not in d.active_devices
+        assert d.memo[name].sts == "⛔ device not found"
     finally:
         _teardown(d)
 
@@ -260,7 +288,7 @@ def test_fault_disconnect_then_reconnect(demo_blob):
     demo_blob(_row("DEMO-PPG-01", fault="disconnect_reconnect"))
     d = _make_device()
     try:
-        name = "DEMO-PPG-01"
+        name = _key(d, "DEMO-PPG-01")
         first_client = d.active_devices[name]
         d.session_dir = None
         d.start()
@@ -282,7 +310,7 @@ def test_fault_sqc_stream_stall(demo_blob, monkeypatch):
     demo_blob(_row("DEMO-ECG", sensor="ECG", imu=False, fault="sqc_error"))
     d = _make_device()
     try:
-        name = "DEMO-ECG"
+        name = _key(d, "DEMO-ECG")
         d.request_sqc_snapshot(name)
         assert _wait(lambda: d.memo[name].sts == "⚠️ stream stalled", timeout=15)
         assert d.get_sqc_status(name)["status"] == "error"
