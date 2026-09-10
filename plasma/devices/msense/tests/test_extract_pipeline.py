@@ -53,6 +53,52 @@ def _w_ac_v2(n, start=0, step=16):
                                 start + i * step) for i in range(n))
 
 
+# ── ACF3 (ac:v3) container writer — header + ACB1 blocks + ACT2 terminal ──────
+AC_V3_REGION = 4 * 1024 * 1024 - 2 * 4096
+
+
+def _acf3_crc(buf, off, length):
+    import zlib
+    patched = bytearray(buf)
+    patched[off:off + length] = bytes(length)
+    return zlib.crc32(bytes(patched)) & 0xFFFFFFFF
+
+
+def _acf3_header():
+    h = bytearray(4096)
+    struct.pack_into("<4sHH", h, 0, b"ACF3", 3, 2)
+    struct.pack_into("<II", h, 8, 1125, 2)       # ODR 1125/2 = 562.5 Hz
+    struct.pack_into("<HH", h, 16, 2, 16384)
+    struct.pack_into("<I", h, 24, 512)           # anchor clock Hz
+    struct.pack_into("<I", h, 28, 32)
+    struct.pack_into("<BBBB", h, 32, 0, 0, 1, 32)
+    struct.pack_into("<I", h, 20, _acf3_crc(bytes(h), 20, 4))
+    return bytes(h)
+
+
+def _acf3_block(first_seq, n=680, anchor_tick=0):
+    body = bytearray(16)
+    struct.pack_into("<4sII", body, 0, b"ACB1", anchor_tick, first_seq)
+    body += b"".join(struct.pack("<3h", (i * 2) | (i & 1), 1000 + i, -1000 - i)
+                     for i in range(n))
+    struct.pack_into("<I", body, 12, _acf3_crc(bytes(body), 12, 4))
+    return bytes(body)
+
+
+def _acf3_terminal(valid_len):
+    t = bytearray(4096)
+    struct.pack_into("<4sI", t, 0, b"ACT2", valid_len)
+    struct.pack_into("<I", t, 8, _acf3_crc(bytes(t), 8, 4))
+    return bytes(t)
+
+
+def _w_acf3(first_seq, n_blocks=2):
+    blocks = [_acf3_block(first_seq + 680 * k) for k in range(n_blocks)]
+    region = b"".join(blocks)
+    region += bytes(AC_V3_REGION - len(region))
+    return _acf3_header() + region + _acf3_terminal(sum(len(b) for b in blocks))
+
+
 def test_pure_pipeline_never_imports_gradio():
     code = (
         "import sys;"
@@ -141,6 +187,24 @@ def test_extract_ecf2_chunk_gap_is_reported(capsys):
 
         extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
         assert "missing chunk" in capsys.readouterr().out
+
+
+def test_ac_v3_multichunk_boundary_gap_reported(capsys):
+    """A first_sample_sequence jump across an ACF3 chunk boundary is a firmware
+    drop — _stitch_ac_v3_chunks reports it and still joins the chunks."""
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        # chunk 0: seq 0..1359 ; chunk 1 resumes at 1400 — 40 samples dropped
+        with open(os.path.join(src, "ac17000000000_0.bin"), "wb") as f:
+            f.write(_w_acf3(0, n_blocks=2))
+        with open(os.path.join(src, "ac17000000000_1.bin"), "wb") as f:
+            f.write(_w_acf3(1400, n_blocks=2))
+
+        report = extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
+        assert "40 sample(s) dropped at the chunk 1 boundary" in capsys.readouterr().out
+
+        df = pd.read_csv(report.out_paths[0])
+        assert len(df) == 4 * 680            # chunks joined, nothing fabricated
+        assert df["Counter"].tolist() == (list(range(0, 1360)) + list(range(1400, 2760)))
 
 
 def test_extract_dir_dry_run_writes_nothing():

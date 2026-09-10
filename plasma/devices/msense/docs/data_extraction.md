@@ -91,14 +91,17 @@ Six record layouts exist across the three sensors. Every one is a fixed-size rec
 
 `legacy` carries a per-record `Timestamp`; the two newer layouts drop it and keep only the free-running global tick. `packed16` (see `data/PPG_PACKED_16_BYTE_FORMAT.md`) additionally packs each channel into three bytes, so bits 19–31 of every channel must read as zero — that constraint is what makes it self-validating.
 
-### IMU / accelerometer — 2 variants
+### IMU / accelerometer — 3 variants
 
 | Variant | Record | Fields, in order | Tick field | Tick rate | Sample rate | Tick step |
 |---|---|---|---|---|---|---|
 | `legacy` | 30 B (`<3h4f2i`) | `AccX/Y/Z` int16, `QuatX/Y/Z` float32, `ENMO` float32, `Timestamp` int32, `Counter` int32 | bytes 26–30 | 320 Hz | 32 Hz | 10 |
 | `v2` | 26 B (`<3h4fI`) | `AccX/Y/Z` int16, `QuatX/Y/Z` float32, `ENMO` float32, `Counter` uint32 | bytes 22–26 | 512 Hz | 32 Hz | 16 |
+| `v3` | `ACF3` 4 MiB chunk | 4 KiB `ACF3` header then up to 1022 `ACB1` data blocks (4096 B: `ACB1` magic, `anchor_tick`, `first_sample_sequence`, CRC-32/ISO-HDLC, 680×6-byte `AccX/Y/Z` int16 — X bit 0 is an FSYNC marker, masked off) then an `ACT2` terminal | 562.5 Hz | v0+ firmware, ICM-20948. Columns `AccX/Y/Z`, `Counter` (= `first_sample_sequence + i`). Each block re-anchors CDCT to its own RTC tick. See `ACCELEROMETER_BINARY_FORMAT.md`. |
 
-Both sample at 32 Hz; they differ in the clock the counter is expressed in, and in whether `Timestamp` is present. The IMU variant is chosen by device version / "Force v4.7.0+ format" — there is no per-sensor IMU selector.
+`legacy` and `v2` both sample at 32 Hz; they differ in the clock the counter is expressed in, and in whether `Timestamp` is present. The `legacy` / `v2` choice is made by device version / "Force v4.7.0+ format" — there is no per-sensor IMU selector.
+
+`v3` is a self-describing container, resolved by its `ACF3` magic, not a version number. The firmware may drop samples while still advancing `first_sample_sequence`, so a forward jump between blocks records how many samples were lost — this is reported to the console and counted (`Samples lost to firmware drops` in `session_summary.txt`), but the missing rows are **not** fabricated, so `Counter` keeps its real gap. A backwards or implausibly large jump fails sequence validation like a bad CRC (strict raises; otherwise the valid prefix is kept). Multi-chunk sessions are re-ordered by chunk index; a `first_sample_sequence` discontinuity at a chunk boundary, a missing chunk, or a chunk `0000` that does not start at sequence 0 is reported to the console (not silently joined).
 
 ### ECG — 2 variants
 
@@ -118,6 +121,7 @@ Both sample at 32 Hz; they differ in the clock the counter is expressed in, and 
 | PPG `packed16` | additionally: a whole record of `0xFF`, or any channel with bits 19–31 set |
 | ECG `framed` | additionally: bad sync word, wrong type byte, or CRC-8 mismatch |
 | ECG `block_v2` | a data page whose first 4 bytes are all `0xFF` marks end-of-data; decoding stops at the first block that fails magic / CRC-32 / reserved-bytes / ETAG / continuity, keeping the valid prefix |
+| IMU `v3` | a block that fails `ACB1` magic / CRC-32, or whose `first_sample_sequence` moves backwards, is dropped and counted; a *forward* sequence jump is instead read as a firmware-dropped-sample count (reported, not dropped). A short/garbled tail stops the scan, keeping the valid prefix |
 
 Only *complete trailing* erased records are trimmed in `packed16`; interior ones are kept so they surface in the malformed count rather than silently shifting every later record.
 

@@ -66,7 +66,14 @@ AC_V3_BLOCK_SIZE = 4096
 AC_V3_BLOCK_HEADER_SIZE = 16
 AC_V3_SAMPLE_SIZE = 6
 AC_V3_SAMPLES_PER_BLOCK = (AC_V3_BLOCK_SIZE - AC_V3_BLOCK_HEADER_SIZE) // AC_V3_SAMPLE_SIZE
+AC_V3_MAX_DATA_BLOCKS = AC_V3_REGION_SIZE // AC_V3_BLOCK_SIZE   # 1022 full blocks fit exactly
 AC_V3_COUNTS_PER_G = 16384.0    # raw_count / 16384.0 = g, at the documented +/-2 g full scale
+_U32 = 1 << 32
+# A forward jump in first_sample_sequence larger than a whole chunk could hold
+# cannot be a real firmware drop (the drop buffer is a handful of blocks) — it
+# is corruption / a torn file. Anything above this, or any backwards jump, is a
+# sequence-validation failure per the format doc's decoder procedure step 3.
+_AC_V3_MAX_CREDIBLE_DROP = AC_V3_MAX_DATA_BLOCKS * AC_V3_SAMPLES_PER_BLOCK
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +185,14 @@ def _sniff_ac_v3(data: bytes) -> float:
     return 1.0 if data[:4] == AC_V3_MAGIC else 0.0
 
 
+def _ac_v3_chunk_index(basename):
+    """Zero-based chunk index from a `<id><sensor><session_id>_<chunk>.bin`
+    filename; 0 for a non-chunked name (`first_sample_sequence` starts at 0 for
+    chunk `0000` — the format doc, "Session filenames and chunking")."""
+    m = re.search(r"_(\d+)\.bin$", basename)
+    return int(m.group(1)) if m else 0
+
+
 def _read_ac_v3(filepath, strict=False):
     """Decode one ACF3 accelerometer chunk: 4 KiB header, ACB1 data blocks, ACT2 terminal.
 
@@ -226,6 +241,11 @@ def _read_ac_v3(filepath, strict=False):
     x_parts, y_parts, z_parts, seq_parts, t_parts = [], [], [], [], []
     off = 0
     n_bad_blocks = 0
+    n_bad_samples = 0
+    first_seq_seen = None
+    expected_seq = None      # seq the next block should open at, if nothing was dropped
+    dropped_total = 0
+    seq_gaps = []            # (prev_block_end_seq, this_block_first_seq, n_dropped)
     sample_period = odr_den / odr_num       # seconds per accelerometer sample
     while off + AC_V3_BLOCK_HEADER_SIZE <= valid_len:
         remaining = valid_len - off
@@ -236,14 +256,32 @@ def _read_ac_v3(filepath, strict=False):
 
         ok = (bmagic == AC_V3_BLOCK_MAGIC and n_samples > 0
               and _ac_v3_crc32_ok(block, 12, 4, bcrc))
+        # step 3 of the decoder procedure: "Validate each magic, sequence, and
+        # CRC". A firmware drop advances first_sample_sequence but skips samples,
+        # so a forward jump is a dropped-sample count; a backwards jump (or a
+        # jump too large to be a real drop) fails validation like a bad CRC.
+        drop = 0
+        if ok and expected_seq is not None:
+            delta = (first_seq - expected_seq) & (_U32 - 1)
+            if 0 < delta <= _AC_V3_MAX_CREDIBLE_DROP:
+                drop = delta
+            elif delta != 0:
+                ok = False       # backwards / implausible — sequence invalid
+
         if not ok:
             n_bad_blocks += 1
+            n_bad_samples += n_samples if 0 < n_samples < AC_V3_SAMPLES_PER_BLOCK \
+                else AC_V3_SAMPLES_PER_BLOCK
             # A short/garbled tail (interrupted collection, or a mid-file tear)
             # cannot be trusted to resync cleanly: stop rather than guess.
             if interrupted or block_len < AC_V3_BLOCK_SIZE:
                 break
             off += AC_V3_BLOCK_SIZE
             continue
+
+        if drop:
+            dropped_total += drop
+            seq_gaps.append((int(expected_seq), int(first_seq), int(drop)))
 
         raw = np.frombuffer(block, dtype="<u2", count=n_samples * 3,
                             offset=AC_V3_BLOCK_HEADER_SIZE).reshape(-1, 3)
@@ -253,6 +291,9 @@ def _read_ac_v3(filepath, strict=False):
         seq_parts.append(first_seq + np.arange(n_samples, dtype=np.uint32))
         t_parts.append(anchor_tick / anchor_hz + np.arange(n_samples) * sample_period)
 
+        if first_seq_seen is None:
+            first_seq_seen = int(first_seq)
+        expected_seq = (int(first_seq) + n_samples) & (_U32 - 1)
         off += block_len
 
     if not seq_parts:
@@ -270,7 +311,6 @@ def _read_ac_v3(filepath, strict=False):
     df["CDCT"] = t0 + np.concatenate(t_parts)
     df["init_CDCT"] = t0
 
-    n_bad_samples = n_bad_blocks * AC_V3_SAMPLES_PER_BLOCK
     if n_bad_blocks:
         msg = (f"AC {basename}: {n_bad_blocks} ACF3 block(s) failed validation "
                f"(~{n_bad_samples} samples)" + (" — collection ended mid-block" if interrupted else ""))
@@ -278,7 +318,23 @@ def _read_ac_v3(filepath, strict=False):
             raise ValueError(msg)
         print(msg + " — dropped")
 
+    chunk_index = _ac_v3_chunk_index(basename)
+    if dropped_total:
+        msg = (f"AC {basename}: {dropped_total} sample(s) dropped by firmware "
+               f"across {len(seq_gaps)} block boundary(ies)")
+        if strict:
+            raise ValueError(msg)
+        print(msg)
+    if chunk_index == 0 and first_seq_seen not in (None, 0):
+        print(f"AC {basename}: first chunk does not start at sequence 0 "
+              f"(first_sample_sequence={first_seq_seen}) — earlier data may be missing")
+
     df.attrs["malformed_records"] = n_bad_samples
+    df.attrs["dropped_samples"] = int(dropped_total)
+    df.attrs["seq_gaps"] = seq_gaps
+    df.attrs["first_seq"] = first_seq_seen
+    df.attrs["last_seq"] = int(counter[-1])
+    df.attrs["chunk_index"] = chunk_index
     df.attrs["trailing_bytes"] = 0
     df.attrs["spec"] = "ac:v3"
     return df, dt

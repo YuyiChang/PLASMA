@@ -48,7 +48,8 @@ DEFAULT_SESSION_TABLE = "session_table.csv"
 class ExtractionReport:
     """What one extraction produced."""
     resolutions: list = field(default_factory=list)   # list[Resolution]
-    malformed: int = 0
+    malformed: int = 0                                 # corrupt records dropped
+    dropped: int = 0                                   # samples the firmware never wrote (ACF3 seq gaps)
     out_paths: list = field(default_factory=list)      # written CSV/PKL paths
     readme_path: str | None = None
     n_files: int = 0                                   # .bin files inspected
@@ -58,6 +59,8 @@ class ExtractionReport:
         s = f"Extracted {n_out} file(s) from {self.n_files} binary(ies)"
         if self.malformed:
             s += f"; {self.malformed} malformed record(s) dropped"
+        if self.dropped:
+            s += f"; {self.dropped} sample(s) lost to firmware drops"
         conflicts = sum(1 for r in self.resolutions if r.agrees is False)
         if conflicts:
             s += f"; {conflicts} uuid.txt conflict(s)"
@@ -165,6 +168,7 @@ class DataExtractor():
         # from more than one firmware, and the resolution is evidence we keep.
         self.resolutions = []
         self.malformed = 0
+        self.dropped = 0
         self.out_paths = []
 
         self.encoding_alias = self.get_encoding_alias() if self.df is not None else {}
@@ -243,6 +247,7 @@ class DataExtractor():
             for res in self.resolutions:
                 file.write(res.row() + "\n")
             file.write(f"\nMalformed records dropped = {self.malformed}\n")
+            file.write(f"Samples lost to firmware drops (ACF3 seq gaps) = {self.dropped}\n")
             conflicts = [r for r in self.resolutions if r.agrees is False]
             if conflicts:
                 file.write(f"uuid.txt conflicts = {len(conflicts)} "
@@ -263,6 +268,7 @@ class DataExtractor():
         res = self.resolve(full_path, sensor)
         df, dt = formats.read_bin(full_path, res.spec, strict=self.strict)
         self.malformed += df.attrs.get('malformed_records', 0)
+        self.dropped += df.attrs.get('dropped_samples', 0)
         return df, res
 
     def extract_csv(self, search_prefix, file_name, id=-1):
@@ -324,7 +330,9 @@ class DataExtractor():
 
         Container formats need no CDCT recompute:
         - `ac:v3` (ACF3) anchors every sample to a session-continuous RTC tick
-          per block internally.
+          per block internally. Chunks are re-ordered by `chunk_index` and a
+          `first_sample_sequence` discontinuity at a chunk boundary (firmware
+          drop, or a missing chunk) is reported.
         - `ecg:block_v2` (ECF2) makes `CDCT = t0 + Counter/512` where `Counter`
           is the recording-local sample ordinal that already advances across
           chunks — so plain concatenation is continuous. ECF2 chunks are
@@ -350,10 +358,13 @@ class DataExtractor():
             return None, None
 
         is_ecb2 = spec is not None and spec.key == "ecg:block_v2"
+        is_ac_v3 = spec is not None and spec.key == "ac:v3"
         session_dfs = []
         for t0, dfs in sessions.items():
             if is_ecb2:
                 session_dfs.extend(_stitch_ecb2_chunks(dfs))
+            elif is_ac_v3:
+                session_dfs.append(_stitch_ac_v3_chunks(dfs))
             elif len(dfs) == 1:
                 session_dfs.append(dfs[0])
             else:
@@ -423,6 +434,33 @@ def _stitch_ecb2_chunks(dfs):
     return out
 
 
+def _stitch_ac_v3_chunks(dfs):
+    """Order ACF3 chunk DataFrames by `chunk_index` and report a
+    `first_sample_sequence` discontinuity at a chunk boundary — a firmware drop
+    ("a larger difference records the number of missing samples", per the
+    format doc) or a missing chunk. CDCT is already absolute per chunk (each
+    ACB1 block carries its own RTC anchor), so this only concatenates."""
+    group = sorted(dfs, key=lambda d: d.attrs.get("chunk_index", 0))
+    prev = None
+    for d in group:
+        ci = d.attrs.get("chunk_index", 0)
+        if ci == 0 and d.attrs.get("first_seq") not in (None, 0):
+            print(f"AC session: chunk 0 starts at sequence "
+                  f"{d.attrs.get('first_seq')}, not 0 — earlier data missing")
+        if prev is not None:
+            if ci != prev.attrs.get("chunk_index", 0) + 1:
+                print(f"AC session: missing chunk between index "
+                      f"{prev.attrs.get('chunk_index')} and {ci} — joined anyway")
+            first, last = d.attrs.get("first_seq"), prev.attrs.get("last_seq")
+            if first is not None and last is not None:
+                gap = (int(first) - int(last) - 1) & ((1 << 32) - 1)
+                if gap:
+                    print(f"AC session: {gap} sample(s) dropped at the chunk "
+                          f"{ci} boundary")
+        prev = d
+    return pd.concat(group, ignore_index=True)
+
+
 def counter_validity_check(df: pd.DataFrame, spec=None):
     """Report how many counter deltas depart from the layout's expected step.
 
@@ -489,6 +527,7 @@ def extract_dir(in_dir, out_dir, *, df=None, note="", options=None,
     return ExtractionReport(
         resolutions=extractor.resolutions,
         malformed=extractor.malformed,
+        dropped=extractor.dropped,
         out_paths=extractor.out_paths,
         readme_path=getattr(extractor, "readme_path", None),
         n_files=n_files,

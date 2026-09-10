@@ -16,6 +16,8 @@ from plasma.devices.msense.config import (
     merge_msense_records,
     merge_device_info_into_blob,
     import_device_info,
+    active_devices,
+    imu_stream_devices,
     display_labels,
 )
 
@@ -70,6 +72,39 @@ def test_display_labels_name_paren_nickname():
         "MSense4ECG-Z5G4A": "MSense4ECG-Z5G4A (left wrist)",
         "MSense4ECG-EX4BT": "MSense4ECG-EX4BT",
     }
+
+
+# ── two wristbands sharing a Name collapse (Name is the identity key) ───────
+
+def test_same_name_collapses_to_one_entry():
+    """`Name` is the identity key for every downstream selection helper — and in
+    turn for the driver's `memo` dict, its `active_devices` / `active_outlets` /
+    LSL outlets and the gyro-bias lookup, all keyed by Name. Two *enabled*
+    records that share a Name collapse to a single entry (these are dict / set
+    comprehensions — the last address silently wins), so only one of the two
+    wristbands is ever connected or recorded and the memo panel shows one row.
+    Nickname is display-only and does not disambiguate. Names must be unique."""
+    blob = {"devices": [
+        {"Name": "MSense4ECG", "Nickname": "left", "UUID / MAC Address": "AA-AA",
+         "Enabled": True, "IMU Stream": True},
+        {"Name": "MSense4ECG", "Nickname": "right", "UUID / MAC Address": "BB-BB",
+         "Enabled": True, "IMU Stream": True},
+    ]}
+    assert active_devices(blob) == {"MSense4ECG": "BB-BB"}      # first row lost
+    assert imu_stream_devices(blob) == {"MSense4ECG"}
+    assert display_labels(blob) == {"MSense4ECG": "MSense4ECG (right)"}
+
+
+def test_distinct_names_same_address_are_both_kept():
+    """The mirror case: two rows, same physical wristband, different Names — both
+    survive selection (Name, not address, is the key), so the band would be
+    connected twice. Add-by-scan dedupes on address to prevent this, but a
+    hand-edited table can still produce it."""
+    blob = {"devices": [
+        {"Name": "band-A", "Nickname": "", "UUID / MAC Address": "AA-AA", "Enabled": True},
+        {"Name": "band-B", "Nickname": "", "UUID / MAC Address": "AA-AA", "Enabled": True},
+    ]}
+    assert active_devices(blob) == {"band-A": "AA-AA", "band-B": "AA-AA"}
 
 
 # ── merge_msense_records ────────────────────────────────────────────────────

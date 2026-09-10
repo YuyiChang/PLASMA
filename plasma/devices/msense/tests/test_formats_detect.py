@@ -578,6 +578,66 @@ def test_ac_v3_strict_raises_on_bad_header_crc():
     raise AssertionError("expected ValueError")
 
 
+def test_ac_v3_reports_firmware_dropped_samples(capsys):
+    """A forward jump in first_sample_sequence is a firmware-dropped-sample count
+    (format doc, "Data blocks"): report it, do not fabricate the missing rows."""
+    spec = get_spec("ac", "v3")
+    b0 = w_ac_v3_block(0, straight_samples(680, 0))
+    b1 = w_ac_v3_block(680, straight_samples(680, 680))
+    b2 = w_ac_v3_block(1385, straight_samples(680, 1385))     # 25 samples dropped
+    p = write_tmp(w_ac_v3_file([b0, b1, b2]), "ac")
+    df, _ = read_bin(p, spec)
+
+    assert len(df) == 3 * 680                                  # nothing fabricated
+    assert list(df["Counter"]) == (list(range(0, 680)) + list(range(680, 1360))
+                                   + list(range(1385, 2065)))
+    assert df.attrs["dropped_samples"] == 25
+    assert df.attrs["seq_gaps"] == [(1360, 1385, 25)]
+    assert df.attrs["first_seq"] == 0
+    assert df.attrs["malformed_records"] == 0
+    assert "25 sample(s) dropped by firmware" in capsys.readouterr().out
+
+    try:
+        read_bin(p, spec, strict=True)
+    except ValueError as e:
+        assert "dropped by firmware" in str(e)
+        return
+    raise AssertionError("expected ValueError under strict")
+
+
+def test_ac_v3_backwards_sequence_rejected(capsys):
+    """A backwards (or implausibly large) sequence jump fails validation like a
+    bad CRC: strict raises, default keeps the valid prefix."""
+    spec = get_spec("ac", "v3")
+    b0 = w_ac_v3_block(0, straight_samples(680, 0))
+    b1 = w_ac_v3_block(680, straight_samples(680, 680))
+    b2 = w_ac_v3_block(680, straight_samples(680, 680))        # repeats b1's sequence
+    p = write_tmp(w_ac_v3_file([b0, b1, b2]), "ac")
+
+    df, _ = read_bin(p, spec)
+    assert len(df) == 2 * 680                                  # b2 dropped
+    assert list(df["Counter"]) == list(range(0, 1360))
+    assert df.attrs["malformed_records"] == AC_V3_SAMPLES_PER_BLOCK
+    assert df.attrs["dropped_samples"] == 0
+
+    try:
+        read_bin(p, spec, strict=True)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError under strict")
+
+
+def test_ac_v3_first_chunk_must_start_at_zero(capsys):
+    """Chunk 0000 must open at sequence 0; a non-zero start means earlier data
+    is missing (format doc, "Session filenames and chunking")."""
+    spec = get_spec("ac", "v3")
+    p = write_tmp(w_ac_v3_file([w_ac_v3_block(340, straight_samples(680, 340))]), "ac")
+    df, _ = read_bin(p, spec)                                  # tolerated
+    assert len(df) == 680
+    assert df.attrs["first_seq"] == 340
+    assert "does not start at sequence 0" in capsys.readouterr().out
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     failures = 0
