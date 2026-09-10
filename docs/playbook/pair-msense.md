@@ -32,9 +32,9 @@ Dashboard.
 
 | Column | Meaning |
 |---|---|
-| **Name** | The BLE advertised name. This is the **identity** — it names the LSL stream, the saved files, and the gyro-bias record. Don't change it unless the wristband's name really changed. |
-| **Nickname** | Optional, display-only. Shown as *"Name (Nickname)"* on the dashboard and in the signal viewer. Use it for "left wrist" / "chest". |
-| **UUID / MAC Address** | The connection address (a UUID on macOS, a MAC elsewhere). |
+| **Name** | The BLE advertised name. Used to label the LSL stream and the saved files. Two wristbands *may* share a Name — the address below is the identity. |
+| **Nickname** | Optional, display-only. Shown as *"Name (Nickname)"* on the dashboard and in the signal viewer. Use it for "left wrist" / "chest" — and to tell apart two wristbands that share a Name. |
+| **UUID / MAC Address** | The connection address (a UUID on macOS, a MAC elsewhere). This is the **identity**: each wristband's status, gyro-bias record and per-device state is keyed by it. Listing the same address on two enabled rows is flagged on Apply (only the last is used). |
 | **Enabled** | Untick to **park** a wristband — kept in the list, skipped at Initialize. |
 | **IMU Stream** | Tick **only** for units whose firmware has the demo IMU characteristic. Ticking it on a unit that lacks it just logs a warning at Start. |
 

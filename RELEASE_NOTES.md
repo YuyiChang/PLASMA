@@ -46,6 +46,17 @@
   CSV, with multi-chunk recordings stitched into one continuous timeline
   (ordered by `chunk_index`, split by `recording_id`; missing chunks / sample
   gaps reported). Old 12-byte `framed` `.ecg` / `.bin` files still decode.
+- **ACF3 (`ac:v3`) accelerometer extraction now reports firmware-dropped
+  samples.** A forward jump in `first_sample_sequence` between `ACB1` blocks is
+  decoded as the count of samples the firmware dropped (per the format spec):
+  it is logged and totalled (`Samples lost to firmware drops` in
+  `session_summary.txt`, `ExtractionReport.dropped`), but the missing rows are
+  not fabricated, so `Counter` keeps its true gap and clock-sync is unaffected.
+  A backwards / implausibly large jump now fails sequence validation like a bad
+  block CRC (`--strict` raises; otherwise the valid prefix is kept). Multi-chunk
+  sessions report a `first_sample_sequence` break at a chunk boundary and a
+  chunk `0000` that does not start at sequence 0. Files with no drops decode
+  byte-identically to before.
 - **Continuous live stream (`START_INFINITY`)** — a new "▶️ Start live stream"
   control in the YAMS → ECG/PPG Signal Quality tab opens a continuous ECG/PPG
   stream decoded into a rolling in-memory plot. **Not** recorded to disk or
@@ -63,6 +74,13 @@
   end boundary is uncertain is visible in the XDF). A per-device outcome list
   is on the YAMS → Control sub-tab. Older firmware whose `da39c931` isn't
   readable is reported as *not verifiable*, never as a failure.
+- **Two MSense wristbands with the same BLE Name no longer collapse into one.**
+  The driver now keys every per-wristband structure (memo row, SQC/live state,
+  capabilities, LSL outlet, gyro bias) by the wristband's **address** instead of
+  its Name, so two unrenamed factory-default units both connect, both record and
+  both show a memo row. `"Name (Nickname)"` still labels every row and message
+  unchanged — give the two a Nickname each to tell them apart on screen. The
+  Configuration tab warns if the same address is listed on two enabled rows.
 
 ### 🚦 Session-memo status classification
 

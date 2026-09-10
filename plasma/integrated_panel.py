@@ -263,14 +263,20 @@ class IntegratedPanel():
 
     def get_visual_sources(self):
         """Flat {"device tag [· sub-source]": PlasmaMemo} map of every live
-        source that currently has at least one data channel to plot."""
+        source that currently has at least one data channel to plot.
+
+        Two sub-sources can carry the same display label (e.g. two MSense
+        wristbands never renamed from the factory default) — disambiguate the
+        second and later with their own key so neither drops out of the map."""
         sources = {}
         for dev in self.available_devices:
             for name, memo in dev.get_sources().items():
-                if memo.channels:
-                    # label = name if name == dev.tag else f"{dev.tag} · {name}"
-                    label = getattr(memo, "label", name)
-                    sources[label] = memo
+                if not memo.channels:
+                    continue
+                label = getattr(memo, "label", name)
+                if label in sources:
+                    label = f"{label} · {name}"
+                sources[label] = memo
         return sources
 
     def refresh_visual_sources(self):

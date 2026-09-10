@@ -81,7 +81,9 @@ timeouts, and status/error codes:
 Driver side: `plasma/devices/msense/nus_stream.py` is the pure protocol codec
 (`StreamSession`, no BLE); `device.py`'s `register_nus_notify`,
 `request_sqc_snapshot`, `_nus_data_handler`, `_finish_sqc_snapshot` drive it
-over BLE per wristband, keyed by `self.sqc_state[name]`.
+over BLE per wristband, keyed by `self.sqc_state[addr]` (the BLE address — every
+per-wristband dict in `device.py` is keyed by address, so two wristbands sharing
+a Name stay separate; `display_name(addr)` gives the `"Name (Nickname)"` label).
 
 ### Scheduling an SQC pull across multiple wristbands
 
