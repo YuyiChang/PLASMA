@@ -96,7 +96,6 @@ _RULES = [
     # ── construction / connection failures (SETUP-blocking) → L3 ───────
     ("connect failed", lambda o, l: "connect failed" in l, Level.L3, None, False),
     ("device not found", lambda o, l: "device not found" in l, Level.L3, None, False),
-    ("reconnect failed", lambda o, l: "reconnect failed" in l, Level.L3, None, False),
     ("obs fault", lambda o, l: l.startswith("fault:"), Level.L3, None, False),
     ("fault", lambda o, l: _has(o, "⛔", "🚫") or o.startswith("❌") or "fault" in l,
      Level.L3, None, False),
@@ -111,8 +110,12 @@ _RULES = [
 
     # ── link / stream recovery in progress → L2 ───────────────────────
     ("stream stalled", lambda o, l: "stall" in l, Level.L2, None, False),
-    ("disconnected", lambda o, l: "disconnected" in l
-     or (o.startswith("🔌") and "reconnect" not in l), Level.L2, None, False),
+    # a dropped link is always L2 here — the watchdog retries indefinitely and
+    # never emits a distinct "failed" status. The row still escalates to L3
+    # (same string, red) via the recorder-stream fold once the wristband's
+    # recorded stream has been silent past STALE_LOST_AGE (see health_level).
+    ("disconnected", lambda o, l: "disconnected" in l or o.startswith("🔌"),
+     Level.L2, None, False),
 
     # ── advisories / operational states → L1 ──────────────────────────
     ("erased", lambda o, l: "erased" in l or "🧨" in o, Level.L1, "advisory", False),

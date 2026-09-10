@@ -93,4 +93,5 @@ nav:
       - Files & paths: reference/files-and-paths.md
       - Headless control & API: reference/headless.md
       - Failure levels (internal): reference/failure-levels.md
+      - MSense reconnect behaviour (internal): reference/msense-reconnect.md
       - LSL lifecycle & scoping (internal): reference/lsl-lifecycle-and-scoping.md

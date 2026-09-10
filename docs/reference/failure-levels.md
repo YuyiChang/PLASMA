@@ -86,7 +86,17 @@ SETUP:       "not collecting" is normal → suppressed to NONE.
 
 ### Escalation timers (L2 → L3)
 
-- `🔌 disconnected` → reconnect sweeps exhaust / `🔌 reconnect failed` → L3.
+- `🔌 disconnected` stays **L2** for as long as the link is down — the 10 s
+  watchdog keeps retrying and never gives up on its own, so there is no
+  attempt counter, no back-off, and no separate "reconnect failed" status.
+  The row escalates to **L3 / red** through the recorder-stream path: the
+  wristband's recorded stream goes `🟡 stale` and then, past `STALE_LOST_AGE`
+  (≈30 s), `health_level` returns L3 and the device-row fold picks it up.
+  Same message, colour only — an extended disconnect that PLASMA is still
+  working on. A successful sweep writes `🔄 reconnected` → back to healthy.
+  (During SETUP, before any recording, a wristband that drops and can't
+  reconnect stays L2 — nothing is being lost yet.) Full mechanism:
+  [MSense reconnect behaviour](msense-reconnect.md).
 - recorder `🟡 stale` on a periodic stream → still no data past `STALE_LOST_AGE`
   (≈30 s) → L3.
 - battery advisory → below a hard floor → L2 → dropout → L3.
@@ -126,9 +136,8 @@ per-stream `health`. `class` = the pre-model `_status_class` bucket.
 
 | Status string | Source | class → **level / colour** |
 |---|---|---|
-| `🔌 disconnected` | `_on_unexpected_disconnect` | warn → **L2 / caution** — auto-reconnect ≤10 s |
-| `🔄 reconnected` | `_reconnect_peripheral` (ok) | ok → NONE / **healthy** (cleared L2) |
-| `🔌 reconnect failed` | `_reconnect_peripheral` (fail) | err → **L3 / warning** |
+| `🔌 disconnected` | `_on_unexpected_disconnect`; kept as-is by `_reconnect_peripheral` when a reconnect attempt fails | warn → **L2 / caution** — auto-reconnect retries every 10 s. The device row escalates to **L3 / warning** (same string, red) once its recorded stream has been silent past `STALE_LOST_AGE` (≈30 s). |
+| `🔄 reconnected` | `_reconnect_peripheral` (ok) | ok → NONE / **healthy** (clears the L2/L3) |
 | `⚠️ stream stalled` | `_sqc_recover` | warn → **L2 / caution** |
 | `🎯 Calibrating...` | `start_gyro_calibration` | warn → **L1 / info** |
 | `✅ Bias saved` | `_finish_gyro_calibration` | ok → NONE / info |

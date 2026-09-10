@@ -42,9 +42,9 @@ wristband's **Fault** column in Configuration → "MSense Demo (simulated)".
 
 | | |
 |---|---|
-| **Memo** | row **red**, `reconnect failed` |
-| **Cause** | the reconnect sweeps were exhausted |
-| **Do** | the wristband is out for the rest of the session. **🎛️ Control → Advanced → 🔄 Reconnect now** for a manual attempt; otherwise power-cycle the wristband and re-Initialize (this starts a new session folder). |
+| **Memo** | row **red**, still `disconnected` (same message as the amber state — only the colour escalates once the recording's been silent ≈30 s) |
+| **Cause** | the link has stayed down through repeated reconnect attempts; the watchdog is still retrying every ~10 s but hasn't succeeded |
+| **Do** | the wristband is effectively out for now. **🎛️ Control → Advanced → 🔄 Reconnect now** to force an attempt; if it won't come back, power-cycle the wristband and re-Initialize (this starts a new session folder). If it does reconnect, the row returns to green (`reconnected`). |
 
 ---
 

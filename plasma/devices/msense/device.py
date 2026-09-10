@@ -1589,8 +1589,11 @@ class MotionSenseHRV(PlasmaDevice):
         except Exception as e:
             self.info(f"SQC: {name} reconnect FAILED ({reason}): {e}")
             self._sqc_debug(name, f"  reconnect FAILED/timed out: {e}")
+            # keep "🔌 disconnected" — the watchdog retries every sweep and
+            # never gives up. The row goes red on its own once the recorded
+            # stream has been stale past STALE_LOST_AGE (see failure-levels.md).
             if name in self.memo:
-                self.memo[name].sts = "🔌 reconnect failed"
+                self.memo[name].sts = "🔌 disconnected"
             return
         self.active_devices[name] = peripheral
 

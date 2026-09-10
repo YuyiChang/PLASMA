@@ -50,9 +50,10 @@ CASES = [
     ("⚠️ still recording — stop unconfirmed", STOPPED, Level.L2, "caution"),
     ("⚠️ stop failed", STOPPED, Level.L2, "caution"),
 
-    # link / stream recovery — L2 (auto-clears)
+    # link / stream recovery — L2 (auto-clears). A dropped link stays L2 even
+    # after a failed reconnect attempt (the watchdog retries forever); the row
+    # only goes red via the recorded-stream stale fold — see test_memo_html.
     ("🔌 disconnected", COLLECTING, Level.L2, "caution"),
-    ("🔌 reconnect failed", COLLECTING, Level.L3, "warning"),
     ("⚠️ stream stalled", COLLECTING, Level.L2, "caution"),
 
     # advisories / operational states — L1

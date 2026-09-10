@@ -203,7 +203,7 @@ def test_eventlog_fault_then_recover(tmp_path):
     log = api.SessionEventLog(p, data_dir=str(tmp_path))
 
     log.tick()                                   # baseline — healthy
-    memo.sts = "🔌 reconnect failed"             # -> L3
+    memo.sts = "⚠️ start failed"                  # -> L3
     log.tick()
     memo.sts = "🔄 reconnected"                  # -> healthy
     log.tick()

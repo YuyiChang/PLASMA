@@ -571,8 +571,9 @@ def test_ensure_notify_idempotent_across_start_stop_start():
 
 def test_reconnect_peripheral_bounded_when_connect_hangs(monkeypatch):
     """A connect() that never returns must not stall _reconnect_peripheral
-    forever — it should give up after the bounded timeout and mark the
-    device as failed instead of hanging. _reconnect_peripheral builds a
+    forever — it should give up after the bounded timeout and leave the
+    device showing "🔌 disconnected" (the watchdog retries next sweep;
+    there is no distinct "failed" status). _reconnect_peripheral builds a
     fresh BleakClient for the reconnect attempt (not reusing the old one —
     reconnecting on the same client isn't reliable on macOS's CoreBluetooth
     backend), so the hang is injected via a patched BleakClient constructor."""
@@ -598,4 +599,4 @@ def test_reconnect_peripheral_bounded_when_connect_hangs(monkeypatch):
     elapsed = time.time() - start
 
     assert elapsed < 1.0
-    assert d.memo["w1"].sts == "🔌 reconnect failed"
+    assert d.memo["w1"].sts == "🔌 disconnected"

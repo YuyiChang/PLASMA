@@ -26,7 +26,6 @@ from plasma.status import COLLECTING, STOPPED, SETUP
     ("🚫 FAULT", SETUP, "warning"),
     ("⛔ connect failed", SETUP, "warning"),
     ("⛔ device not found", SETUP, "warning"),
-    ("🔌 reconnect failed", COLLECTING, "warning"),
     ("❌ Fault: no device", SETUP, "warning"),
     ("FAULT: boom", COLLECTING, "warning"),
     ("⚠️ start failed", COLLECTING, "warning"),
@@ -60,6 +59,18 @@ def test_device_row_escalates_on_silent_recorded_stream():
     lost = build_memo_html("Collection in progress", _SI, [dev],
                            _snap([_stream("MSense [x]", health="🔴 lost")]))
     assert f'color:{"#b91c1c"}">📼 MSense' in lost         # red (L3)
+
+
+def test_disconnected_row_goes_red_when_recorded_stream_is_lost():
+    """`🔌 disconnected` stays amber (L2) on its own — the watchdog is still
+    retrying — but the row turns red once the wristband's recorded stream has
+    been silent long enough to count as lost. Same status string, colour only."""
+    dev = _Dev(_Memo("MSense", sts="🔌 disconnected"), streams={"MSense [x]": "dev"})
+    amber = build_memo_html("Collection in progress", _SI, [dev], _snap([]))
+    assert f'color:{"#a16207"}">MSense' in amber           # amber (L2), still retrying
+    red = build_memo_html("Collection in progress", _SI, [dev],
+                          _snap([_stream("MSense [x]", health="🔴 lost")]))
+    assert f'color:{"#b91c1c"}">📼 MSense' in red          # red (L3)
 
 
 def test_sts_detail_strips_leading_glyph():
