@@ -14,9 +14,20 @@ This module MUST NOT import PyInstaller at top level: ``plasma/tests`` imports i
 in the CI ``test`` job, which has no ``pyinstaller`` installed.
 """
 import os
+import platform
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _PKG_ROOT = os.path.join(HERE, "plasma")
+
+
+def linux_arch_tag(machine=None):
+    """``x64`` / ``arm64`` for the Linux frozen-binary name and release-asset
+    label. ``app_linux.spec`` builds natively for whatever arch the runner is,
+    so the same spec produces ``PLASMA_Linux_x64`` on an x86-64 runner and
+    ``PLASMA_Linux_arm64`` on ``ubuntu-*-arm``."""
+    m = (machine or platform.machine()).lower()
+    return {"aarch64": "arm64", "arm64": "arm64",
+            "x86_64": "x64", "amd64": "x64"}.get(m, m)
 
 # Directory names never collected as part of the frozen package.
 _SKIP_DIRS = {"__pycache__", "tests", "__pyinstaller", ".git", ".pytest_cache"}
