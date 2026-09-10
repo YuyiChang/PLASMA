@@ -82,3 +82,35 @@ def test_spec_common_walk_covers_every_dynamic_plugin_module():
     assert "plasma.devices" in hi
     assert "plasma.devices.msense" in hi
     assert any(m.startswith("plasma.devices.msense.panels.") for m in hi)
+
+
+# ── the Linux spec builds natively for x86-64 and aarch64 from one file ───────
+
+def test_linux_arch_tag():
+    sys.path.insert(0, str(_ROOT))
+    import spec_common
+
+    assert spec_common.linux_arch_tag("x86_64") == "x64"
+    assert spec_common.linux_arch_tag("amd64") == "x64"
+    assert spec_common.linux_arch_tag("aarch64") == "arm64"
+    assert spec_common.linux_arch_tag("arm64") == "arm64"
+    # app_linux.spec derives the EXE name from this
+    assert f"PLASMA_Linux_{spec_common.linux_arch_tag('aarch64')}" == "PLASMA_Linux_arm64"
+
+
+def test_build_yml_has_the_arm64_job():
+    ci = (_ROOT / ".github" / "workflows" / "build.yml").read_text()
+    assert "build-linux-arm64:" in ci
+    assert re.search(r"runs-on:\s*ubuntu-\S*-arm\b", ci), "arm64 job needs an -arm runner"
+    assert "PLASMA-Linux-arm64" in ci and "dist/PLASMA_Linux_arm64" in ci
+    # liblsl comes from the sccn release, not conda (no conda-forge aarch64 build)
+    assert "sccn/liblsl/releases" in ci
+
+
+def test_arm64_job_omits_qb2():
+    # blickfeld-qb2 is sdist-only on aarch64; installing [all] would break the
+    # build. The qb2 plugin still ships (lazy _STATIC import) — see plasma.plugins.
+    ci = (_ROOT / ".github" / "workflows" / "build.yml").read_text()
+    arm = ci.split("build-linux-arm64:", 1)[1].split("\n  build-windows:", 1)[0]
+    assert 'pip install -e ".[msense,pupil,shimmer,obs,build]"' in arm
+    assert '.[all' not in arm

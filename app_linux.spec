@@ -6,6 +6,7 @@
 # filesystem walk rather than collect_submodules / the pyinstaller40 hook.
 import glob
 import os
+import platform
 import shutil
 import sys
 import tempfile
@@ -13,20 +14,24 @@ import tempfile
 _SPEC_DIR = globals().get('SPECPATH') or os.path.dirname(os.path.abspath(SPEC))
 if _SPEC_DIR not in sys.path:
     sys.path.insert(0, _SPEC_DIR)
-from spec_common import common_datas, plasma_datas, plasma_hiddenimports
+from spec_common import common_datas, linux_arch_tag, plasma_datas, plasma_hiddenimports
 
 datas = common_datas() + plasma_datas()
 
 # liblsl is not bundled in the Linux pylsl wheel — get it from conda
-# (`conda install -c conda-forge liblsl`) or a distro package. pylsl's
-# package-scope loader only checks for `liblsl.so` / `lsl.so` (no versioned
-# soname), so the file we bundle into pylsl/lib must have exactly that name.
+# (`conda install -c conda-forge liblsl`, x86-64 only), a distro package, or the
+# sccn/liblsl release .deb (used by the aarch64 CI job, which points $PYLSL_LIB
+# straight at it). pylsl's package-scope loader only checks for `liblsl.so` /
+# `lsl.so` (no versioned soname), so the file we bundle into pylsl/lib must have
+# exactly that name.
+_triple = {'x86_64': 'x86_64-linux-gnu',
+           'aarch64': 'aarch64-linux-gnu'}.get(platform.machine(), '')
 _roots = [
     os.path.join(os.environ.get('CONDA_PREFIX', ''), 'lib'),
-    '/usr/lib/x86_64-linux-gnu',
+    f'/usr/lib/{_triple}' if _triple else '/usr/lib',
     '/usr/local/lib',
     '/usr/lib',
-    '/lib/x86_64-linux-gnu',
+    f'/lib/{_triple}' if _triple else '/lib',
 ]
 _liblsl = None
 if os.environ.get('PYLSL_LIB') and os.path.isfile(os.environ['PYLSL_LIB']):
@@ -76,7 +81,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='PLASMA_Linux_x64',
+    name=f'PLASMA_Linux_{linux_arch_tag()}',
     icon='plasma/resources/icons/plasma.png',
     debug=False,
     bootloader_ignore_signals=False,

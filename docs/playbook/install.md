@@ -14,7 +14,12 @@ PLASMA runs a local web server and opens in your browser at
     |---|---|
     | macOS (Apple silicon) | `PLASMA_MacOS_arm64` |
     | Linux (x86-64) | `PLASMA_Linux_x64` |
+    | Linux arm64 — Jetson Orin, **JetPack 6** | `PLASMA_Linux_arm64` |
     | Windows (x86-64) | `PLASMA_Windows_x64.exe` |
+
+    `PLASMA_Linux_arm64` is built against Ubuntu 22.04 (glibc 2.35), so it needs
+    **JetPack 6**. On JetPack 5 (Ubuntu 20.04), install from source instead. It
+    does not bundle the qb2 LiDAR plugin.
 
     It is a **single console executable**, not a `.app` or installer. On macOS,
     the first run is blocked by Gatekeeper — right-click → **Open**, or

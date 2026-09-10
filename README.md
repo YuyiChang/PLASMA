@@ -31,14 +31,18 @@ pip install "plasma-app[msense] @ git+https://github.com/YuyiChang/PLASMA@v2.0.0
 The distribution is `plasma-app`; the import package is `plasma`. Extras map to
 plugins: `msense`, `qb2`, `pupil`, `shimmer`, `obs` (and `all`).
 
-## Known issue
+## Known issue / future works
 
 - [ ] need manually set lidar ip addr
 - [ ] the built-in LSL→XDF recorder captures **every** stream on the default
       liblsl session, so a concurrent `pytest` run or another lab tool leaks
       into the recording; re-Initialize doesn't fully tear down old outlets.
       Direction (SessionID scoping, outlet lifecycle): [`docs/reference/lsl-lifecycle-and-scoping.md`](docs/reference/lsl-lifecycle-and-scoping.md)
-
+- [ ] interactive=false on ses/sub when collection started
+- [x] linux aarch64 build — `PLASMA_Linux_arm64` for Jetson Orin (JetPack 6); CI job `build-linux-arm64`
+- [ ] infrequent stream (e.g., PLASMA journaler) shows green after recording stop
+- [ ] doc for msense workflow with better screenshots
+- [ ] memo `stage` transition logic optimization (e.g., timing of "ready to start" msg wrt sensor init status)
 
 ## developing a sensor plugin
 

@@ -137,6 +137,19 @@
 - Offline features (USB download, `.bin` extraction) are out of scope for the
   simulated device.
 
+### 📦 Packaging
+
+- **New release binary: `PLASMA_Linux_arm64`** — a PyInstaller build for
+  **NVIDIA Jetson Orin** (aarch64 Linux), alongside the existing x86-64 Linux,
+  macOS arm64 and Windows binaries. Built in CI on GitHub's `ubuntu-22.04-arm`
+  runner, so it targets **JetPack 6** (Ubuntu 22.04 / glibc 2.35); on JetPack 5
+  install from source. `liblsl` comes from the sccn/liblsl release `.deb`
+  (conda-forge has no aarch64 build). The **qb2 LiDAR plugin is not bundled**
+  (`blickfeld-qb2` is sdist-only on aarch64) — it still appears in the catalog
+  and only errors if a LiDAR is Initialized.
+- `app_linux.spec` now builds natively for whichever arch the runner is
+  (`PLASMA_Linux_x64` / `PLASMA_Linux_arm64`) from one spec file.
+
 ---
 
 ## 🚀 v2.0.0
