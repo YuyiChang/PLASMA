@@ -1345,6 +1345,16 @@ class MotionSenseHRV(PlasmaDevice):
         diag["skipped_history_slots"] = getattr(r, "skipped_history_slots", 0)
         self._diag_proc(diag, t_entry, session.bytes_received)
 
+        # once the stream is terminal no more notifications route here
+        # (_nus_data_handler gates on `not session.is_terminal`), so the 30 s
+        # ring + StreamSession + reassembler are just dead weight until the
+        # next start_live_stream — release them now. `status`/`error`/`diag`
+        # stay so the SQC tab still shows the final state.
+        if state["status"] in ("stopped", "error"):
+            state["ring"] = None
+            state["session"] = None
+            state["reassembler"] = None
+
     def _live_ingest(self, state, name):
         """Pull whatever the reassembler has completed and append it to the
         rolling ring buffer (bounded to LIVE_WINDOW_S)."""

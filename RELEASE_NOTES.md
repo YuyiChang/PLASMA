@@ -6,6 +6,27 @@
 
 ## 🚀 vNext (unreleased)
 
+### 🧠 Live-plot browser memory
+
+- The MSense **Signal Quality** / live-stream, **IMU / Orientation**, and
+  **Data Dashboard** plots no longer grow the browser tab's memory until it
+  reloads (Safari) or crashes (Chrome). Root cause was Gradio's `gr.Plot`
+  recreating the whole Plotly `<div>` on every timer tick without ever calling
+  `Plotly.purge` (gradio#10252). Fixes, layered:
+  - a page-level `MutationObserver` purges every discarded Plotly graph div
+    (freeing its handlers + WebGL context);
+  - each plot's refresh **timer runs only while its tab is on screen** — off-tab
+    it pauses, resuming on return (the plot freezes on its last frame);
+  - every plot handler returns `gr.skip()` when nothing changed, so an
+    idle-but-visible tab does no Plotly work;
+  - the on-screen trace is **downsampled** to ~3000 points (peaks preserved);
+    a **"Downsample plot for speed"** toggle in the SQC "📈 Plot options"
+    accordion turns it off for a full-rate zoomable trace. The saved snapshot /
+    CSV / XDF are never decimated.
+- Server side: a closed browser tab now stops any running live stream; a live
+  stream's rolling buffer is released when it ends; per-channel plot buffers
+  gained a hard size cap.
+
 ### 📡 MSense sensor stream v0 + ECB2 ECG blocks
 
 - **New shared sensor-stream protocol (v0)** replaces the protocol-v1 NUS path.

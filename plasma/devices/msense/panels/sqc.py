@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from plasma.app_context import app_context
+from plasma.plot_util import decimate_minmax
 from ..signal_quality import filter_ecg, filter_ppg
 from ._common import msense_device as _msense_device
 
@@ -31,14 +32,11 @@ def _fmt_bytes(n):
         return f"{n / (1024 * 1024):.2f} MiB"
     return f"{n / 1024:.1f} KiB"
 
-# Plotly recreates the chart's DOM on every figure update, which resets page
-# scroll position — worse the more subplot rows there are. A first attempt
-# hooked scroll save/restore into the Gradio .click()/.tick() event chain
-# (fn=None + js= steps chained with .then()) — that broke plot rendering
-# entirely (including the live "receiving" preview), likely an interaction
-# between chaining and gr.Timer's repeat-triggering, not fully root-caused.
-# Reverted; see SCROLL_GUARD_ELEM_ID below for the replacement approach,
-# which doesn't touch this file's event wiring at all.
+# gr.Plot destroys + recreates the chart's whole <div> on every figure update
+# (gradio#10252) — that resets page scroll and, worse, orphans a Plotly graph
+# div (handlers + WebGL context) each tick. The page-level MutationObserver in
+# plasma/__main__.py's js_func purges each removed div and restores scroll; the
+# timer here only ticks while this sub-tab is visible (see panels/tools.py).
 SCROLL_GUARD_ELEM_ID = "sqc-plot-container"
 
 
@@ -71,6 +69,12 @@ def build_sqc_tab(ip):
                 ppg_y_max = gr.Number(value=1000, label="Filtered Y-axis max")
             show_hist_boundary = gr.Checkbox(
                 value=True, label="Show history/forward boundary")
+            decimate_plot = gr.Checkbox(
+                value=True, label="Downsample plot for speed",
+                info="Caps each trace at ~3000 points (peaks preserved) so the "
+                     "browser stays responsive during long captures. The saved "
+                     "snapshot / CSV keeps full resolution. Untick for a "
+                     "zoomable full-rate trace on screen.")
 
         sqc_status = gr.Markdown()
         # elem_id lets a page-level script (plasma/__main__.py's js_func)
@@ -79,13 +83,22 @@ def build_sqc_tab(ip):
         sqc_plot = gr.Plot(show_label=False, elem_id=SCROLL_GUARD_ELEM_ID)
 
         # coarse refresh — the BLE transfer is slow, so ~1 Hz is plenty and
-        # keeps re-decoding / re-plotting the growing signal cheap
-        sqc_timer = gr.Timer(value=1.0, active=True)
+        # keeps re-decoding / re-plotting the growing signal cheap. Starts
+        # inactive: armed by a Snapshot / live-stream / Refresh, and by the
+        # IMU-tab gate in tools.py while the sub-tab is visible; disarms itself
+        # a few ticks after everything goes terminal. gr.Plot leaks its Plotly
+        # div on every tick (gradio#10252), so an idle timer here is expensive.
+        sqc_timer = gr.Timer(value=1.0, active=False)
+        ip._sqc_timer = sqc_timer
+
+        # every capture control also (re)arms sqc_timer — the refresh loop only
+        # runs while there's something to render.
+        _ARM = lambda msg: (msg, gr.Timer(active=True))
 
         def _request(mode, max_seconds=None, stream_mode="Sequential"):
             dev = _msense_device(ip)
             if dev is None:
-                return "⛔ MSense device not initialized — initialize it on the Session dashboard tab first"
+                return _ARM("⛔ MSense device not initialized — initialize it on the Session dashboard tab first")
             history_only = (mode == "History Only")
             ms = None
             if mode == "Custom":
@@ -95,49 +108,60 @@ def build_sqc_tab(ip):
                     ms = None
                 if ms is not None and ms <= 0:
                     ms = None
-            return dev.request_all_sqc_snapshots(
+            return _ARM(dev.request_all_sqc_snapshots(
                 max_seconds=ms, history_only=history_only,
-                stream_mode=stream_mode.lower())
+                stream_mode=stream_mode.lower()))
 
         def _cancel():
             dev = _msense_device(ip)
             if dev is None:
-                return "⛔ MSense device not initialized"
-            return dev.cancel_all_sqc_snapshots()
+                return _ARM("⛔ MSense device not initialized")
+            return _ARM(dev.cancel_all_sqc_snapshots())
 
         def _live_start():
             dev = _msense_device(ip)
             if dev is None:
-                return "⛔ MSense device not initialized"
+                return _ARM("⛔ MSense device not initialized")
             msgs = [dev.start_live_stream(n) for n in dev.get_sqc_devices()]
-            return "\n".join(msgs) or "⛔ No NUS-capable wristbands connected"
+            return _ARM("\n".join(msgs) or "⛔ No NUS-capable wristbands connected")
 
         def _live_stop():
             dev = _msense_device(ip)
             if dev is None:
-                return "⛔ MSense device not initialized"
-            return dev.stop_all_live_streams()
+                return _ARM("⛔ MSense device not initialized")
+            return _ARM(dev.stop_all_live_streams())
 
         def _on_mode_change(mode):
             return gr.update(interactive=(mode == "Custom"))
 
-        plot_opt_inputs = [ppg_display_mode, ppg_y_min, ppg_y_max, show_hist_boundary]
+        plot_opt_inputs = [ppg_display_mode, ppg_y_min, ppg_y_max, show_hist_boundary,
+                           decimate_plot]
 
-        def _update_with_opts(mode, lo, hi, show_boundary):
-            return _update_sqc(ip, mode, lo, hi, show_boundary)
+        def _update_with_opts(mode, lo, hi, show_boundary, decimate):
+            return _update_sqc(ip, mode, lo, hi, show_boundary, decimate)
 
-        btn_refresh_sqc.click(_update_with_opts, inputs=plot_opt_inputs,
-                              outputs=[sqc_status, sqc_plot])
-        btn_request_sqc.click(_request, inputs=[sqc_mode, sqc_max_s, sqc_stream_mode], outputs=sqc_status)
-        btn_cancel_sqc.click(_cancel, outputs=sqc_status)
-        btn_live_start.click(_live_start, outputs=sqc_status)
-        btn_live_stop.click(_live_stop, outputs=sqc_status)
+        def _arm_then_refresh(mode, lo, hi, show_boundary, decimate):
+            txt, fig = _update_sqc(ip, mode, lo, hi, show_boundary, decimate)
+            return txt, fig, gr.Timer(active=True)
+
+        # the refresh loop runs only while the Signal Quality sub-tab is on
+        # screen (armed by the tab-select gate in tools.py / __main__.py, and
+        # by any capture control below as a fallback). Each tick still returns
+        # gr.skip() for the plot when nothing changed, so an idle-but-visible
+        # tab costs no Plotly work.
+        _ctl_out = [sqc_status, sqc_timer]
+        _plot_out = [sqc_status, sqc_plot]
+        btn_refresh_sqc.click(_arm_then_refresh, inputs=plot_opt_inputs,
+                              outputs=[sqc_status, sqc_plot, sqc_timer])
+        btn_request_sqc.click(_request, inputs=[sqc_mode, sqc_max_s, sqc_stream_mode],
+                              outputs=_ctl_out)
+        btn_cancel_sqc.click(_cancel, outputs=_ctl_out)
+        btn_live_start.click(_live_start, outputs=_ctl_out)
+        btn_live_stop.click(_live_stop, outputs=_ctl_out)
         sqc_mode.change(_on_mode_change, inputs=sqc_mode, outputs=sqc_max_s)
-        sqc_timer.tick(fn=_update_with_opts, inputs=plot_opt_inputs,
-                       outputs=[sqc_status, sqc_plot])
+        sqc_timer.tick(fn=_update_with_opts, inputs=plot_opt_inputs, outputs=_plot_out)
         for comp in plot_opt_inputs:
-            comp.change(_update_with_opts, inputs=plot_opt_inputs,
-                       outputs=[sqc_status, sqc_plot])
+            comp.change(_update_with_opts, inputs=plot_opt_inputs, outputs=_plot_out)
 
     with gr.Accordion(open=False, label="ℹ️ Help"):
         gr.Markdown(
@@ -181,10 +205,12 @@ def build_sqc_tab(ip):
                 )
 
 
-def _update_sqc(ip, ppg_mode="Filtered", ppg_y_min=-1000, ppg_y_max=1000, show_hist_boundary=True):
+def _update_sqc(ip, ppg_mode="Filtered", ppg_y_min=-1000, ppg_y_max=1000,
+                show_hist_boundary=True, decimate=True):
     dev = _msense_device(ip)
     if dev is None:
-        return "⛔ MSense device not initialized — initialize it on the Session dashboard tab first", gr.update()
+        return ("⛔ MSense device not initialized — initialize it on the Session dashboard tab first",
+                gr.update())
 
     names = dev.get_sqc_devices()
     caps_note = dev.caps_summary()
@@ -298,8 +324,25 @@ def _update_sqc(ip, ppg_mode="Filtered", ppg_y_min=-1000, ppg_y_max=1000, show_h
     except (TypeError, ValueError):
         y_range = (-1000, 1000)
 
-    fig = (_build_sqc_figure(results, ppg_mode, y_range, bool(show_hist_boundary))
-           if results else gr.update())
+    if not results:
+        ip._sqc_plot_sig = None
+        return "\n".join(lines), gr.update()
+
+    # Skip re-sending the figure when its inputs are byte-identical to the last
+    # render — gr.Plot recreates its whole Plotly <div> for every value it
+    # receives (gradio#10252), so an unchanged figure still costs browser
+    # memory. A live stream's buffers grow every tick, so it never skips (and
+    # the client-side purge in __main__.py keeps that bounded).
+    plot_sig = (ppg_mode, y_range, bool(show_hist_boundary), bool(decimate),
+                tuple((disp, r.get("streaming"), r.get("device_type"),
+                       tuple((ch, len(v)) for ch, v in r["channels"].items()))
+                      for disp, r in results))
+    if plot_sig == getattr(ip, "_sqc_plot_sig", None):
+        return "\n".join(lines), gr.skip()
+    ip._sqc_plot_sig = plot_sig
+
+    fig = _build_sqc_figure(results, ppg_mode, y_range, bool(show_hist_boundary),
+                            bool(decimate))
     return "\n".join(lines), fig
 
 
@@ -316,8 +359,31 @@ def _channel_color(ch_name, idx):
     return _PPG_CHANNEL_COLORS.get(ch_name, _FALLBACK_COLORS[idx % len(_FALLBACK_COLORS)])
 
 
+# filtfilt is the per-tick hot spot on a big/static "ready" snapshot — memoise
+# on a cheap fingerprint of the raw array so a re-render doesn't re-filter.
+_FILT_CACHE = {}
+
+
+def _filtered(y, fs, is_ecg):
+    if len(y) <= 64:            # padlen for the 3rd-order filtfilt is ~21
+        return None
+    key = (is_ecg, len(y), float(fs), round(float(y[0]), 3),
+           round(float(y[len(y) // 2]), 3), round(float(y[-1]), 3))
+    hit = _FILT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        out = filter_ecg(y, fs) if is_ecg else filter_ppg(y, fs)
+    except Exception:
+        return None
+    if len(_FILT_CACHE) > 16:
+        _FILT_CACHE.clear()
+    _FILT_CACHE[key] = out
+    return out
+
+
 def _build_sqc_figure(results, ppg_mode="Filtered", ppg_y_range=(-1000, 1000),
-                      show_hist_boundary=True):
+                      show_hist_boundary=True, decimate=True):
     """One row per device/capture — every channel a device reports (all 4 PPG
     optical channels, or ECG's single channel) is a trace sharing that row's
     axes, rather than eating its own row. PPG's raw signal is dominated by a
@@ -376,27 +442,24 @@ def _build_sqc_figure(results, ppg_mode="Filtered", ppg_y_range=(-1000, 1000),
             y = np.asarray(y, dtype=float)
             n_samples = max(n_samples, len(y))
             t = np.arange(len(y)) / fs
-            # filter on the fly for any row with enough samples — full,
-            # History Only, Custom, and the still-streaming preview alike.
-            # filter_ppg / filter_ecg are 3rd-order Butterworth via filtfilt;
-            # its default padlen is 3*(order*2+1)=21, so ~64 samples is a
-            # safe floor.
-            can_filter = len(y) > 64
-            filt = None
-            if can_filter:
-                try:
-                    filt = filter_ecg(y, fs) if is_ecg else filter_ppg(y, fs)
-                except Exception:
-                    filt = None
+            # filter on the fly (memoised) for any row with enough samples —
+            # full, History Only, Custom, and the still-streaming preview alike.
+            filt = _filtered(y, fs, is_ecg)
+
+            def _xy(yy):
+                # cap the on-screen trace; the disk snapshot keeps full rate
+                return decimate_minmax(t, yy, 3000) if decimate else (t, yy)
 
             if is_ecg:
                 # unchanged: always raw (primary, blue) + filtered (secondary,
                 # red), no legend — ECG is already a single labeled channel
-                fig.add_trace(go.Scatter(x=t, y=y, mode="lines", name="raw",
+                xr, yr = _xy(y)
+                fig.add_trace(go.Scatter(x=xr, y=yr, mode="lines", name="raw",
                                          line=dict(color="#1f77b4"), showlegend=False),
                               row=i, col=1, secondary_y=False)
                 if filt is not None:
-                    fig.add_trace(go.Scatter(x=t, y=filt, mode="lines", name="filtered",
+                    xf, yf = _xy(filt)
+                    fig.add_trace(go.Scatter(x=xf, y=yf, mode="lines", name="filtered",
                                              line=dict(color="#d62728", width=1), opacity=0.7,
                                              showlegend=False),
                                   row=i, col=1, secondary_y=True)
@@ -411,7 +474,8 @@ def _build_sqc_figure(results, ppg_mode="Filtered", ppg_y_range=(-1000, 1000),
             color = _channel_color(ch_name, idx)
             if show_raw:
                 legend_name = f"{ch_name} raw"
-                fig.add_trace(go.Scatter(x=t, y=y, mode="lines", name=legend_name,
+                xr, yr = _xy(y)
+                fig.add_trace(go.Scatter(x=xr, y=yr, mode="lines", name=legend_name,
                                          line=dict(color=color),
                                          legendgroup=legend_name,
                                          showlegend=legend_name not in seen_legend_names),
@@ -419,7 +483,8 @@ def _build_sqc_figure(results, ppg_mode="Filtered", ppg_y_range=(-1000, 1000),
                 seen_legend_names.add(legend_name)
             if show_filt:
                 legend_name = f"{ch_name} filtered"
-                fig.add_trace(go.Scatter(x=t, y=filt, mode="lines", name=legend_name,
+                xf, yf = _xy(filt)
+                fig.add_trace(go.Scatter(x=xf, y=yf, mode="lines", name=legend_name,
                                          line=dict(color=color, width=1.4,
                                                     dash="dot" if show_raw else "solid"),
                                          legendgroup=legend_name,
