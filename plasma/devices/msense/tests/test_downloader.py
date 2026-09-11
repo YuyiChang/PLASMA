@@ -87,6 +87,52 @@ def test_download_without_browsing_is_a_no_op(drives):
     assert updates[0][3].constructor_args["interactive"] is False
 
 
+def test_download_auto_extract_skips_the_raw_zip(drives, monkeypatch, tmp_path):
+    """auto=True extracts straight out of the copied raw folder (extract_folder)
+    instead of zipping it and immediately unzipping that zip for extraction —
+    no "zipping"/"zipped" phase is ever reached when extraction succeeds, and
+    exactly one zip (the extracted one) is produced."""
+    fake_zip = tmp_path / "fake_extracted.zip"
+    fake_zip.write_bytes(b"\0")
+    seen = {}
+
+    def fake_extract_folder(in_dir, out_dir=None, options=None):
+        seen["devices"] = sorted(os.listdir(in_dir))
+        return str(fake_zip)
+
+    monkeypatch.setattr(D, "extract_folder", fake_extract_folder)
+
+    updates = list(D._download(["123456"], drives, True, gr.Progress(), *_OPT_DEFAULTS))
+    head, table, log, btn = updates[-1]
+
+    assert seen["devices"] == ["AA-BB-CC-DD-EE-01", "AA-BB-CC-DD-EE-02"]
+    rows = _val(table)
+    assert [r[0] for r in rows] == ["AA-BB-CC-DD-EE-01", "AA-BB-CC-DD-EE-02", "archive"]
+    assert all("done" in r[1] for r in rows)      # never "zipping"/"zipped"
+    assert "extracted" in _val(head)
+    b = btn.constructor_args
+    assert b["interactive"] and b["value"] == str(fake_zip)
+
+
+def test_download_auto_extract_falls_back_to_raw_zip_on_failure(drives, monkeypatch):
+    """If extract_folder raises, _download still delivers a real raw zip of
+    `dst` (built once, as the fallback — not a leftover from an earlier step)."""
+    def boom(in_dir, out_dir=None, options=None):
+        raise RuntimeError("bad bin file")
+
+    monkeypatch.setattr(D, "extract_folder", boom)
+
+    updates = list(D._download(["123456"], drives, True, gr.Progress(), *_OPT_DEFAULTS))
+    head, table, log, btn = updates[-1]
+
+    rows = _val(table)
+    phases = dict((r[0], r[1]) for r in rows)
+    assert "failed" in phases["archive"]
+    assert "extraction failed" in _val(log)
+    b = btn.constructor_args
+    assert b["interactive"] and b["value"].endswith("_msense.zip") and os.path.exists(b["value"])
+
+
 def test_download_reports_a_failed_drive(tmp_path):
     good = tmp_path / "good"
     good.mkdir()

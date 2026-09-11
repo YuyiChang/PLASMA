@@ -57,7 +57,12 @@ class ExtractionOptions:
     table): those differ per surface, while these must not.
     """
     legacy_fs: bool = False
-    save_format: str = "csv"
+    # "feather" (Arrow IPC, via pyarrow) is the default: ~20-30x faster to
+    # write and ~2-4x smaller on disk than "csv" for these numeric-heavy
+    # tables (benchmarked on synthetic AC/ECG-shaped data). "pickle" is also
+    # available. Pick "csv" explicitly if the output needs to be plain text —
+    # e.g. `clocksync.py`'s YAMS sync tool only reads CSV.
+    save_format: str = "feather"
     ignore_id_parsing: bool = False
     ppg_format: str = "auto"
     ac_format: str = "auto"

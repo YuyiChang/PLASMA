@@ -31,7 +31,9 @@ class ExtractionOptionsPanel:
             self.accordion = accordion
             with gr.Row():
                 self.legacy_fs = gr.Checkbox(False, label="(Uncommon) legacy sampling rate")
-                self.save_format = gr.Radio(["csv", "pickle"], value="csv", label="Save format")
+                self.save_format = gr.Radio(
+                    ["feather", "csv", "pickle"], value="feather", label="Save format",
+                    info="feather (fast, binary) · csv (plain text, needed for clocksync) · pickle")
                 self.ignore_id_parsing = gr.Checkbox(False, label="Ignore subject/session ID parsing")
             with gr.Row():
                 self.ppg_format = gr.Dropdown(PPG_FORMAT_CHOICES, value="auto",

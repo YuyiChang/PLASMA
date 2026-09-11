@@ -120,7 +120,8 @@ def test_extract_dir_report_shape():
         with open(os.path.join(src, "ac1700000000.bin"), "wb") as f:
             f.write(_w_ac_v2(500))
 
-        report = extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
 
         assert isinstance(report, ExtractionReport)
         names = sorted(os.path.basename(p) for p in report.out_paths)
@@ -139,7 +140,8 @@ def test_extract_ecf2_single_file():
     with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
         with open(os.path.join(src, "ecg1700000000.bin"), "wb") as f:
             f.write(_w_ecf2(3))
-        report = extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
 
         assert [os.path.basename(p) for p in report.out_paths] == ["ecg.csv"]
         df = pd.read_csv(report.out_paths[0])
@@ -162,7 +164,8 @@ def test_extract_ecf2_multi_chunk_is_time_continuous():
         with open(os.path.join(src, "ecg17000000000_1.bin"), "wb") as f:
             f.write(_w_ecf2(2, chunk_index=1, start_index=2 * SPB, start_tick=1000 + 2 * SPB))
 
-        report = extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
         df = pd.read_csv(report.out_paths[0])
 
         assert len(df) == 4 * SPB
@@ -199,12 +202,101 @@ def test_ac_v3_multichunk_boundary_gap_reported(capsys):
         with open(os.path.join(src, "ac17000000000_1.bin"), "wb") as f:
             f.write(_w_acf3(1400, n_blocks=2))
 
-        report = extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
         assert "40 sample(s) dropped at the chunk 1 boundary" in capsys.readouterr().out
 
         df = pd.read_csv(report.out_paths[0])
         assert len(df) == 4 * 680            # chunks joined, nothing fabricated
         assert df["Counter"].tolist() == (list(range(0, 1360)) + list(range(1400, 2760)))
+
+
+def test_datetime_column_matches_vectorized_and_scalar_conversion():
+    """The vectorized pd.to_datetime path (replacing a per-row
+    datetime.fromtimestamp()/.strftime() loop) must produce the exact same
+    string format and values."""
+    from datetime import datetime, timezone
+    t0 = 1700000000
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        with open(os.path.join(src, f"ppg{t0}.bin"), "wb") as f:
+            f.write(_w_ppg_v2(50))
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+        df = pd.read_csv(report.out_paths[0])
+
+        expected_first = datetime.fromtimestamp(t0, timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+        assert df["Datetime"].iloc[0] == expected_first
+        # every row's Datetime matches a fresh scalar conversion of its own CDCT
+        for cdct, dt in zip(df["CDCT"].iloc[::7], df["Datetime"].iloc[::7]):
+            assert dt == datetime.fromtimestamp(int(cdct), timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+
+
+def test_multiple_sessions_under_one_prefix_are_chunk_written():
+    """Two distinct recordings (different filename t0, same sensor prefix) go
+    through generate_csv_for_pattern's per-session write loop — the combined
+    CSV must read back exactly as if it had been written in one shot."""
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        with open(os.path.join(src, "ppg1700000000.bin"), "wb") as f:
+            f.write(_w_ppg_v2(30))
+        with open(os.path.join(src, "ppg1800000000.bin"), "wb") as f:
+            f.write(_w_ppg_v2(40))
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+        df = pd.read_csv(report.out_paths[0])
+
+        assert len(df) == 30 + 40
+        # no stray header row leaked into the data from the second append —
+        # every row of a genuinely numeric column parsed as a number
+        assert pd.api.types.is_numeric_dtype(df["Counter"])
+        assert df["CDCT"].iloc[0] == 1700000000.0
+        # second session starts its own CDCT clock at its own t0, not
+        # continuing the first session's
+        assert df["CDCT"].iloc[30] == 1800000000.0
+
+
+def test_feather_is_the_default_save_format():
+    assert ExtractionOptions().save_format == "feather"
+
+
+def test_extract_dir_writes_feather_by_default():
+    """Same data as test_extract_dir_report_shape, but exercising the actual
+    default (no save_format override) — .feather files, read back correctly."""
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        with open(os.path.join(src, "ppg1700000000.bin"), "wb") as f:
+            f.write(_w_ppg_v2(500))
+        with open(os.path.join(src, "ac1700000000.bin"), "wb") as f:
+            f.write(_w_ac_v2(500))
+
+        report = extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
+
+        names = sorted(os.path.basename(p) for p in report.out_paths)
+        assert names == ["ac.feather", "ppg.feather"]
+        dfs = {os.path.basename(p): pd.read_feather(p) for p in report.out_paths}
+        assert len(dfs["ac.feather"]) == 500
+        assert len(dfs["ppg.feather"]) == 500
+
+
+def test_multiple_sessions_under_one_prefix_feather_matches_csv():
+    """The whole-frame feather path (concat once, write once) must produce the
+    same rows as the incremental CSV path for the same multi-session input."""
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out_csv, \
+         tempfile.TemporaryDirectory() as out_feather:
+        with open(os.path.join(src, "ppg1700000000.bin"), "wb") as f:
+            f.write(_w_ppg_v2(30))
+        with open(os.path.join(src, "ppg1800000000.bin"), "wb") as f:
+            f.write(_w_ppg_v2(40))
+
+        r_csv = extract_dir(src, out_csv,
+                            options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+        r_feather = extract_dir(src, out_feather,
+                                options=ExtractionOptions(ignore_id_parsing=True))
+
+        df_csv = pd.read_csv(r_csv.out_paths[0])
+        df_feather = pd.read_feather(r_feather.out_paths[0])
+        assert len(df_feather) == 30 + 40
+        assert df_feather["Counter"].tolist() == df_csv["Counter"].tolist()
+        assert df_feather["Datetime"].tolist() == df_csv["Datetime"].tolist()
+        assert np.allclose(df_feather["CDCT"], df_csv["CDCT"])
 
 
 def test_extract_dir_dry_run_writes_nothing():
