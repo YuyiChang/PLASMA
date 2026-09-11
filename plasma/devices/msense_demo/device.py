@@ -75,6 +75,10 @@ class MSenseDemo(MotionSenseHRV):
         # as its handle so fault_for() / _on_unexpected_disconnect() line up
         return FakePeripheral(self, key, addr)
 
+    def _bluez_release_peer(self, addr, reason=""):
+        # no real BlueZ stack behind the simulator
+        pass
+
     # ── collection state (seen by the fake's live generators) ───────────────
 
     def start(self):
@@ -179,7 +183,7 @@ class FakePeripheral:
         self._alive = False
         self._sqc_cancel.set()
         try:
-            self._driver._on_unexpected_disconnect(self._name)
+            self._driver._on_unexpected_disconnect(self._name, self)
         except Exception:
             pass
 

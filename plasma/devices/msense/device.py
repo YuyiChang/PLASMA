@@ -8,6 +8,8 @@ import json
 import os
 import logging
 import queue
+import subprocess
+import sys
 import gradio as gr
 import threading
 import time
@@ -102,6 +104,20 @@ SQC_AUTO_RECONNECT = True
 # bounds how long any caller waits for one.
 BLE_OP_TIMEOUT_S = 15.0
 
+# On BlueZ (Linux), a failed or aborted reconnect leaves stale D-Bus
+# disconnect subscriptions and half-open ACLs behind. Observed on a Jetson:
+# during a reconnect storm the disconnected_callback fired 20-40x per attempt
+# for one wristband, saturating the single BLE event loop so the next
+# connect() timed out — a self-reinforcing collapse that a PLASMA restart
+# could not clear. We now (a) keep exactly one "live" client per wristband and
+# ignore callbacks from any other, (b) collapse the callback to one log +
+# memo update per wristband per this window, and (c) on Linux tell BlueZ to
+# forget the peer before each reconnect. See docs/reference/msense-reconnect.md.
+DISC_LOG_DEBOUNCE_S = 5.0
+# bound the best-effort teardown of a client we're abandoning — shorter than a
+# real BLE op so a wedged D-Bus can't stall the watchdog thread
+CLIENT_RETIRE_TIMEOUT_S = 5.0
+
 # Quick-mode capture: a FINITE START sends 131,072 sensor bytes (32 KiB history
 # + 96 KiB live-acquired future). When the operator only wants the first N s
 # for a contact check, we let START run, then write STOP once enough bytes
@@ -175,6 +191,12 @@ class MotionSenseHRV(PlasmaDevice):
         self.caps = {}             # addr -> {"nus": bool, "imu": bool, "battery": bool}
         self.auto_reconnect = True
         self._last_reconnect_sweep = 0.0
+        # addr -> the one BleakClient we currently trust for this wristband.
+        # A disconnect callback from any other (retired) client is ignored.
+        self._live_client = {}
+        # addr -> time.monotonic() of the last "disconnected unexpectedly"
+        # log/memo update — debounced by DISC_LOG_DEBOUNCE_S
+        self._disc_log_at = {}
         # guards orientation_quat/gyro_calib/gyro_bias, mutated from both the
         # Gradio/main thread (start/stop/reset/calibrate) and the BLE notify
         # callback thread (imu_stream_handler)
@@ -236,11 +258,49 @@ class MotionSenseHRV(PlasmaDevice):
     def _make_client(self, addr, key):
         """The BLE client object for ``addr``. ``key`` is the per-wristband
         dict key (the address) the disconnect callback reports. A seam so
-        MSenseDemo can hand back a fake peripheral."""
+        MSenseDemo can hand back a fake peripheral.
+
+        The callback passes the client through so ``_on_unexpected_disconnect``
+        can drop callbacks fired by a client we've already retired."""
         return BleakClient(
             addr,
-            disconnected_callback=lambda c, nm=key: self._on_unexpected_disconnect(nm),
+            disconnected_callback=lambda c, nm=key: self._on_unexpected_disconnect(nm, c),
         )
+
+    def _retire_client(self, name, client):
+        """Neutralise a BleakClient we're abandoning (a superseded reconnect
+        attempt, a failed connect, teardown): drop its disconnect callback so
+        a late D-Bus signal can't re-enter us, and close the link so BlueZ
+        releases the peer. Best-effort and safe to call repeatedly."""
+        if client is None:
+            return
+        if self._live_client.get(name) is client:
+            self._live_client.pop(name, None)
+        try:
+            client._backend.set_disconnected_callback(None)
+        except Exception:
+            pass  # bleak internal; the identity guard is the real defence
+        try:
+            self._run_async(client.disconnect(), timeout_s=CLIENT_RETIRE_TIMEOUT_S)
+        except Exception as e:
+            self._sqc_debug(name, f"  retire client: {e}")
+
+    def _bluez_release_peer(self, addr, reason=""):
+        """Linux/BlueZ only: make bluetoothd forget the peer (``bluetoothctl
+        remove``) so a half-open ACL from a failed connect can't linger. On a
+        Jetson these accumulate into ``org.bluez.Error.Failed
+        br-connection-canceled`` that survives even a PLASMA restart, forcing a
+        Bluetooth-stack reset. Also clears BlueZ's stale device object + GATT
+        cache so the next connect re-discovers cleanly. No-op off Linux;
+        best-effort. See docs/reference/msense-reconnect.md."""
+        if not sys.platform.startswith("linux"):
+            return
+        try:
+            subprocess.run(["bluetoothctl", "remove", addr],
+                           timeout=6, capture_output=True, check=False)
+            self._sqc_debug(addr, f"  BlueZ RemoveDevice ({reason})")
+        except Exception as e:
+            self._sqc_debug(addr, f"  BlueZ RemoveDevice failed: {e}")
 
     def _shutdown_cleanup(self):
         for name, p in list(getattr(self, "active_devices", {}).items()):
@@ -335,9 +395,15 @@ class MotionSenseHRV(PlasmaDevice):
         self.ctl_state = "Device scanning completed"
 
     def connect_devices(self):
+        # retire any clients left over from a previous connect pass before we
+        # drop our references to them, so their disconnect callbacks and BlueZ
+        # links don't leak
+        for name, c in list(self._live_client.items()):
+            self._retire_client(name, c)
         self.active_devices = {}
         self.active_outlets = {}
         self._notify_state = {}
+        self._live_client = {}
         self.ctl_state = "Start device connection"
 
         # quick sanity check
@@ -359,6 +425,7 @@ class MotionSenseHRV(PlasmaDevice):
                     # over the loop variable and fires with whichever device
                     # happened to be last when the loop finished
                     p = self._make_client(addr, addr)
+                    self._live_client[addr] = p
                     # bounded: bleak's connect() actually respects this
                     # timeout (unlike simplepyble's, confirmed via a macOS
                     # thread dump to hold the GIL hostage indefinitely) —
@@ -395,11 +462,7 @@ class MotionSenseHRV(PlasmaDevice):
                     self.memo[addr].sts = "⛔ connect failed"
                     self.active_devices.pop(addr, None)
                     self.active_outlets.pop(addr, None)
-                    try:
-                        if p is not None and p.is_connected:
-                            self._run_async(p.disconnect())
-                    except Exception:
-                        pass
+                    self._retire_client(addr, p)
             else:
                 self.memo[addr].sts = "⛔ device not found"
 
@@ -486,10 +549,20 @@ class MotionSenseHRV(PlasmaDevice):
             for name in self.orientation_quat:
                 self.orientation_quat[name] = IDENTITY_QUAT
 
-    def _on_unexpected_disconnect(self, name):
+    def _on_unexpected_disconnect(self, name, client=None):
         """Fired by bleak when a wristband drops BLE on its own (out of
         range, battery) — without this the UI never reflected an in-session
-        disconnect until the next Stop press."""
+        disconnect until the next Stop press.
+
+        Two guards keep a BlueZ reconnect storm from flooding this (see
+        DISC_LOG_DEBOUNCE_S): ignore callbacks from a client we've already
+        retired, and collapse repeats to one per DISC_LOG_DEBOUNCE_S."""
+        if client is not None and self._live_client.get(name) not in (None, client):
+            return  # a retired / superseded client — not the live link
+        now = time.monotonic()
+        if now - self._disc_log_at.get(name, 0.0) < DISC_LOG_DEBOUNCE_S:
+            return
+        self._disc_log_at[name] = now
         self.info(f"{self.display_name(name)} disconnected unexpectedly")
         if name in self.memo:
             self.memo[name].sts = "🔌 disconnected"
@@ -501,15 +574,18 @@ class MotionSenseHRV(PlasmaDevice):
         except Exception:
             pass
         self._sqc_threads_stopped = True  # let the SQC watchdog loop exit
-        for name, p in list(self.active_devices.items()):
+        clients = dict(self.active_devices)
+        for name, c in self._live_client.items():
+            clients.setdefault(name, c)
+        for name, p in clients.items():
             try:
-                if p.is_connected:
-                    self._run_async(p.disconnect())
+                self._retire_client(name, p)
             except Exception as e:
                 self.info(f"Error disconnecting {name}: {e}")
         self.active_devices = {}
         self.active_outlets = {}
         self._notify_state = {}
+        self._live_client = {}
 
     # ── manual controls (surfaced in the MSense > Control sub-tab) ───────────
 
@@ -1562,33 +1638,39 @@ class MotionSenseHRV(PlasmaDevice):
         return True
 
     def _reconnect_peripheral(self, name, reason):
-        """disconnect → wait → connect (a fresh BleakClient, not the old one
-        — reusing a client across a disconnect isn't reliable on macOS's
-        CoreBluetooth backend) → re-subscribe NUS (+ ENMO/IMU if a recording
-        session is running). Runs on the watchdog thread. Both BLE calls are
-        bounded (BLE_OP_TIMEOUT_S, via _run_async) — this is the exact path
-        that used to hang forever with simplepyble (confirmed via a macOS
-        thread dump); bleak's connect() actually respects the timeout."""
+        """retire the old client → (Linux) make BlueZ forget the peer → wait →
+        connect a fresh BleakClient → re-subscribe NUS (+ ENMO/IMU if a
+        recording session is running). Runs on the watchdog thread. Both BLE
+        calls are bounded (BLE_OP_TIMEOUT_S, via _run_async) — this is the
+        exact path that used to hang forever with simplepyble (confirmed via a
+        macOS thread dump); bleak's connect() actually respects the timeout.
+
+        Reusing a client across a disconnect isn't reliable on CoreBluetooth,
+        and on BlueZ a stale client keeps a live D-Bus disconnect
+        subscription — _retire_client drops both. _bluez_release_peer then
+        clears BlueZ's half-open ACL / stale device object (Jetson: those
+        otherwise pile up into br-connection-canceled that outlives a
+        restart). See docs/reference/msense-reconnect.md."""
         if not SQC_AUTO_RECONNECT:
             return
-        old = self.active_devices.get(name)
+        old = self.active_devices.get(name) or self._live_client.get(name)
         if old is None:
             return
         addr = old.address
 
-        try:
-            self._run_async(old.disconnect())
-        except Exception as e:
-            self._sqc_debug(name, f"  disconnect failed/timed out: {e}")
+        self._retire_client(name, old)
+        self._bluez_release_peer(addr, reason)
 
         time.sleep(1.5)
 
         peripheral = self._make_client(addr, name)
+        self._live_client[name] = peripheral
         try:
             self._run_async(peripheral.connect())
         except Exception as e:
             self.info(f"SQC: {name} reconnect FAILED ({reason}): {e}")
             self._sqc_debug(name, f"  reconnect FAILED/timed out: {e}")
+            self._retire_client(name, peripheral)  # don't leak the failed attempt
             # keep "🔌 disconnected" — the watchdog retries every sweep and
             # never gives up. The row goes red on its own once the recorded
             # stream has been stale past STALE_LOST_AGE (see failure-levels.md).
@@ -1596,6 +1678,7 @@ class MotionSenseHRV(PlasmaDevice):
                 self.memo[name].sts = "🔌 disconnected"
             return
         self.active_devices[name] = peripheral
+        self._live_client[name] = peripheral
 
         try:
             self._ensure_mtu(peripheral, name)
