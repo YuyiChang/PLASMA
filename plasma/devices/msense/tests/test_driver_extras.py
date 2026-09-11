@@ -267,6 +267,48 @@ def test_stop_maps_outcome_to_memo_and_journal(monkeypatch, acq, sts_contains, m
     d.stop()
     assert sts_contains in d.memo["w1"].sts
     assert any(mark_contains in m for m in d.journal_marks)
+    # the transient "Stopping..." sub-line never gets stuck, confirmed or not
+    assert d.memo["w1"].transition is None
+
+
+def test_start_and_stop_show_transition_while_blocking(monkeypatch, tmp_path):
+    """memo.transition carries "Starting..."/"Stopping..." for exactly the
+    duration of the per-device collection_ctl() call (what the operator sees
+    while it's still in flight), then is always cleared — success or not."""
+    import types
+    monkeypatch.setattr("plasma.devices.msense.device.ACQ_STOP_READBACK_INTERVAL_S", 0.0)
+    d = _bare_driver()
+    p = _FakePeripheral()
+    p.acq_enabled = 0
+    d.active_devices = {"w1": p}
+    d.active_outlets = {"w1": types.SimpleNamespace(log_dir=None)}
+    d.caps = {"w1": {}}
+    d.memo = {"w1": PlasmaMemo("w1")}
+    d.orientation_quat = {}
+    d._state_lock = threading.Lock()
+    d.session_info = {"sub_id": "s1", "ses_id": "e1", "participant_enc": 1}
+    d.session_dir = str(tmp_path)
+    d.imu_stream_devices = set()
+    d.register_enmo = lambda *a: None
+    d.register_battery = lambda *a: None
+
+    seen = {}
+    orig_ctl = d.collection_ctl
+    def _spy(name, start=True):
+        seen[start] = d.memo[name].transition
+        return orig_ctl(name, start=start)
+    d.collection_ctl = _spy
+
+    d.start()
+    assert seen[True] == "Starting..."
+    assert d.memo["w1"].transition is None
+    assert d.memo["w1"].sts == "🟢"
+
+    d.active_outlets = {}       # stop() doesn't touch active_outlets
+    d.live_state = {}
+    d.stop()
+    assert seen[False] == "Stopping..."
+    assert d.memo["w1"].transition is None
 
 
 def test_stop_unverifiable_keeps_plain_glyph(monkeypatch):

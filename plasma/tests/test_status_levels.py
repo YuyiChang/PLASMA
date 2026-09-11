@@ -59,6 +59,14 @@ CASES = [
     # advisories / operational states — L1
     ("🎯 Calibrating...", COLLECTING, Level.L1, "info"),
     ("🧨 erased — re-Initialize", STOPPED, Level.L1, "advisory"),
+
+    # transient transitions (Initialize/Start/Stop still in flight) —
+    # guidance/purple, never a fault. "Stopping..." at COLLECTING in
+    # particular proves stop_like=False keeps it out of the phase gate that
+    # turns the "stopped" rule above red mid-collection.
+    ("Initializing...", SETUP, Level.NONE, "guidance"),
+    ("Starting...", SETUP, Level.NONE, "guidance"),
+    ("Stopping...", COLLECTING, Level.NONE, "guidance"),
 ]
 
 

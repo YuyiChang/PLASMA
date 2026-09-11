@@ -44,9 +44,35 @@ from plasma.status import COLLECTING, STOPPED, SETUP
     ("🟥", COLLECTING, "warning"),
     ("🟥", STOPPED, "info"),
     ("Collection stopped", STOPPED, "info"),
+    # transient transitions — guidance (purple)
+    ("Initializing...", SETUP, "guidance"),
+    ("Starting...", SETUP, "guidance"),
+    ("Stopping...", COLLECTING, "guidance"),
 ])
 def test_status_class(sts, phase, expected):
     assert _status_class(sts, phase) == expected
+
+
+def test_session_banner_shows_guidance_while_starting():
+    h = build_memo_html("Starting...", _SI, [], None)
+    assert f'color:{"#7c3aed"}">Starting...' in h
+
+
+def test_device_row_transition_replaces_latest_sub_line():
+    """While memo.transition is set it takes over the sub-line (purple,
+    'guidance') in place of the normal .latest text; once cleared, .latest
+    shows again."""
+    memo = _Memo("MSense", sts="🟢", latest="12:00:00 🔋 87%")
+    memo.transition = "Starting..."
+    dev = _Dev(memo)
+    h = build_memo_html("Starting...", _SI, [dev], None)
+    assert '<div class="m-sub guidance">Starting...</div>' in h
+    assert "🔋 87%" not in h
+
+    memo.transition = None
+    h2 = build_memo_html("Collection in progress", _SI, [dev], None)
+    assert "🔋 87%" in h2
+    assert "m-sub guidance" not in h2
 
 
 def test_device_row_escalates_on_silent_recorded_stream():

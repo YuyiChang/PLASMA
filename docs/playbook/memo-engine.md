@@ -31,7 +31,7 @@ classifier decides.
 | <span class="memo-key advisory">blue</span> | advisory | continue, but do one thing soon (re-Initialize, reconnect, low battery) |
 | <span class="memo-key caution">amber</span> | caution | interrupted but recovering, or a one-click operator fix |
 | <span class="memo-key warning">red</span> | warning | capture stopped mid-session, unrecoverable, or integrity compromised |
-| <span class="memo-key guidance">purple</span> | guidance | a recording-stats sub-line accent |
+| <span class="memo-key guidance">purple</span> | guidance | a recording-stats sub-line accent, or a brief "Initializing.../Starting.../Stopping..." while devices catch up |
 | <span class="memo-key external">grey</span> | external | an LSL stream on the network that isn't ours |
 
 Internally these map to a three-level severity model (advisory / caution /

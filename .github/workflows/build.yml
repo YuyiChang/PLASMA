@@ -6,6 +6,11 @@ on:
       - 'v*'
   pull_request:
   workflow_dispatch:
+  schedule:
+    # nightly build off the default branch's HEAD, published as a rolling
+    # "nightly" pre-release (tag moves to the new commit each run) rather
+    # than a versioned vX.Y.Z release — see the release steps below.
+    - cron: '0 7 * * *'   # 07:00 UTC daily
 
 permissions:
   contents: write
@@ -38,6 +43,10 @@ jobs:
           python-version: "3.12"
           activate-environment: plasma
 
+      - name: Stamp git commit hash
+        shell: bash -el {0}
+        run: python .github/stamp_commit.py ${{ github.sha }}
+
       - name: Install dependencies
         shell: bash -el {0}
         run: |
@@ -60,8 +69,11 @@ jobs:
           path: dist/PLASMA_MacOS_arm64
 
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
         with:
+          tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
+          name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
+          prerelease: ${{ github.event_name == 'schedule' }}
           files: dist/PLASMA_MacOS_arm64
 
   build-linux:
@@ -75,6 +87,10 @@ jobs:
         with:
           python-version: "3.12"
           activate-environment: plasma
+
+      - name: Stamp git commit hash
+        shell: bash -el {0}
+        run: python .github/stamp_commit.py ${{ github.sha }}
 
       - name: Install dependencies
         shell: bash -el {0}
@@ -98,8 +114,11 @@ jobs:
           path: dist/PLASMA_Linux_x64
 
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
         with:
+          tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
+          name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
+          prerelease: ${{ github.event_name == 'schedule' }}
           files: dist/PLASMA_Linux_x64
 
   build-linux-arm64:
@@ -138,6 +157,9 @@ jobs:
           cp "$(readlink -f "$SO")" "$RUNNER_TEMP/lsl/liblsl.so"
           echo "PYLSL_LIB=$RUNNER_TEMP/lsl/liblsl.so" >> "$GITHUB_ENV"
 
+      - name: Stamp git commit hash
+        run: python .github/stamp_commit.py ${{ github.sha }}
+
       - name: Install dependencies
         run: pip install -e ".[msense,pupil,shimmer,obs,build]"
 
@@ -155,8 +177,11 @@ jobs:
           path: dist/PLASMA_Linux_arm64
 
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
         with:
+          tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
+          name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
+          prerelease: ${{ github.event_name == 'schedule' }}
           files: dist/PLASMA_Linux_arm64
 
   build-windows:
@@ -169,6 +194,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Stamp git commit hash
+        run: python .github/stamp_commit.py ${{ github.sha }}
 
       - name: Install dependencies
         run: pip install -e ".[all,build]"
@@ -188,6 +216,9 @@ jobs:
           path: dist/PLASMA_Windows_x64.exe
 
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
         with:
+          tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
+          name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
+          prerelease: ${{ github.event_name == 'schedule' }}
           files: dist/PLASMA_Windows_x64.exe

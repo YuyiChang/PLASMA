@@ -420,49 +420,53 @@ class MotionSenseHRV(PlasmaDevice):
                 print(f'==== {n}')
                 print(f"=== {n} at {addr}")
                 p = None
+                self.memo[addr].set_transition("Initializing...")
                 try:
-                    # bind nm by default arg — otherwise the callback closes
-                    # over the loop variable and fires with whichever device
-                    # happened to be last when the loop finished
-                    p = self._make_client(addr, addr)
-                    self._live_client[addr] = p
-                    # bounded: bleak's connect() actually respects this
-                    # timeout (unlike simplepyble's, confirmed via a macOS
-                    # thread dump to hold the GIL hostage indefinitely) —
-                    # don't let one bad device freeze the whole connect loop
-                    self._run_async(p.connect())
-                    self.info(f"{n} connected")
-                    self.active_devices[addr] = p
-                    self.active_outlets[addr] = MsenseOutlet(n, addr)
-                    self._connect_rssi[addr] = dev.get("rssi")
-                    self.caps[addr]["product"] = dev.get("product")
                     try:
-                        self._ensure_mtu(p, addr)
+                        # bind nm by default arg — otherwise the callback closes
+                        # over the loop variable and fires with whichever device
+                        # happened to be last when the loop finished
+                        p = self._make_client(addr, addr)
+                        self._live_client[addr] = p
+                        # bounded: bleak's connect() actually respects this
+                        # timeout (unlike simplepyble's, confirmed via a macOS
+                        # thread dump to hold the GIL hostage indefinitely) —
+                        # don't let one bad device freeze the whole connect loop
+                        self._run_async(p.connect())
+                        self.info(f"{n} connected")
+                        self.active_devices[addr] = p
+                        self.active_outlets[addr] = MsenseOutlet(n, addr)
+                        self._connect_rssi[addr] = dev.get("rssi")
+                        self.caps[addr]["product"] = dev.get("product")
+                        try:
+                            self._ensure_mtu(p, addr)
+                        except Exception as e:
+                            self.info(f"{n}: MTU negotiation error: {e}")
+                        try:
+                            self.register_nus_notify(p, addr)
+                            self.caps[addr]["nus"] = True
+                        except Exception as e:
+                            self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
+                        # can we read the acquisition-enable char back? (used to
+                        # confirm a collection stop — see _confirm_acq_stopped)
+                        self.caps[addr]["acq_readback"] = (
+                            self._read_acq_enabled(addr, p) is not None)
+                        try:
+                            raw = self._run_async(p.read_gatt_char(BATTERY_CHAR_UUID))
+                            pct = raw[0]
+                            self.battery[addr] = pct
+                            self.caps[addr]["battery"] = True
+                            self.memo[addr].set_latest(f"🔋 {pct}%")
+                        except Exception as e:
+                            self.info(f"battery read unavailable on {n}: {e}")
                     except Exception as e:
-                        self.info(f"{n}: MTU negotiation error: {e}")
-                    try:
-                        self.register_nus_notify(p, addr)
-                        self.caps[addr]["nus"] = True
-                    except Exception as e:
-                        self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
-                    # can we read the acquisition-enable char back? (used to
-                    # confirm a collection stop — see _confirm_acq_stopped)
-                    self.caps[addr]["acq_readback"] = (
-                        self._read_acq_enabled(addr, p) is not None)
-                    try:
-                        raw = self._run_async(p.read_gatt_char(BATTERY_CHAR_UUID))
-                        pct = raw[0]
-                        self.battery[addr] = pct
-                        self.caps[addr]["battery"] = True
-                        self.memo[addr].set_latest(f"🔋 {pct}%")
-                    except Exception as e:
-                        self.info(f"battery read unavailable on {n}: {e}")
-                except Exception as e:
-                    self.info(f"Error connecting to {n}: {e}")
-                    self.memo[addr].sts = "⛔ connect failed"
-                    self.active_devices.pop(addr, None)
-                    self.active_outlets.pop(addr, None)
-                    self._retire_client(addr, p)
+                        self.info(f"Error connecting to {n}: {e}")
+                        self.memo[addr].sts = "⛔ connect failed"
+                        self.active_devices.pop(addr, None)
+                        self.active_outlets.pop(addr, None)
+                        self._retire_client(addr, p)
+                finally:
+                    self.memo[addr].clear_transition()
             else:
                 self.memo[addr].sts = "⛔ device not found"
 
@@ -507,13 +511,17 @@ class MotionSenseHRV(PlasmaDevice):
 
         for name, p in list(self.active_devices.items()):
             print(name, p.is_connected)
+            self.memo[name].set_transition("Starting...")
             try:
-                self.collection_ctl(name, True)
-                self.active_outlets[name].log_dir = self.log_dir
-                self.memo[name].sts = "🟢"
-            except Exception as e:
-                self.info(f"Error starting {name}: {e}")
-                self.memo[name].sts = "⚠️ start failed"
+                try:
+                    self.collection_ctl(name, True)
+                    self.active_outlets[name].log_dir = self.log_dir
+                    self.memo[name].sts = "🟢"
+                except Exception as e:
+                    self.info(f"Error starting {name}: {e}")
+                    self.memo[name].sts = "⚠️ start failed"
+            finally:
+                self.memo[name].clear_transition()
 
         self.ctl_state = "Collection in progress"
 
@@ -527,20 +535,24 @@ class MotionSenseHRV(PlasmaDevice):
         for name, p in list(self.active_devices.items()):
             disp = self.display_name(name)
             print(name, p.is_connected)
+            self.memo[name].set_transition("Stopping...")
             try:
-                self.collection_ctl(name, False)
-                confirmed = self._acq_stop_status.get(name, {}).get("status") == "confirmed"
-                self.memo[name].sts = "🛑 stopped" if confirmed else "🛑"
-                self.journal(f"[ACQ] {disp} stop "
-                             + ("confirmed" if confirmed
-                                else "not verifiable (da39c931 unreadable)"))
-            except AcquisitionStopNotConfirmed as e:
-                self.info(str(e))
-                self.memo[name].sts = "⚠️ still recording — stop unconfirmed"
-                self.journal(f"[ACQ] {disp} stop UNCONFIRMED (da39c931 still 1 after retry)")
-            except Exception as e:
-                self.info(f"Error stopping {disp}: {e}")
-                self.memo[name].sts = "⚠️ stop failed"
+                try:
+                    self.collection_ctl(name, False)
+                    confirmed = self._acq_stop_status.get(name, {}).get("status") == "confirmed"
+                    self.memo[name].sts = "🛑 stopped" if confirmed else "🛑"
+                    self.journal(f"[ACQ] {disp} stop "
+                                 + ("confirmed" if confirmed
+                                    else "not verifiable (da39c931 unreadable)"))
+                except AcquisitionStopNotConfirmed as e:
+                    self.info(str(e))
+                    self.memo[name].sts = "⚠️ still recording — stop unconfirmed"
+                    self.journal(f"[ACQ] {disp} stop UNCONFIRMED (da39c931 still 1 after retry)")
+                except Exception as e:
+                    self.info(f"Error stopping {disp}: {e}")
+                    self.memo[name].sts = "⚠️ stop failed"
+            finally:
+                self.memo[name].clear_transition()
 
         self.ctl_state = "Collection stopped"
 

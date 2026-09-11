@@ -15,6 +15,11 @@ class PlasmaMemo():
         self.label = label or name
         self.sts = "🟦" # status
         self.set_latest("initialized")
+        # transient purple sub-line ("Starting..." etc.) shown in place of
+        # `.latest` while a slow per-device operation is in flight; None the
+        # rest of the time. Never fed through status.classify() — purely a
+        # rendering hook (see plasma/status.py "guidance" category).
+        self.transition = None
         self.window_s = window_s
         # named rolling buffers of (t, value), t = seconds since the caller's
         # own time reference (e.g. session start) — pruned to the last window_s
@@ -36,6 +41,15 @@ class PlasmaMemo():
     def set_latest(self, msg):
         now = datetime.datetime.now().strftime("%H:%M:%S")
         self.latest = f"{now} {msg}"
+
+    def set_transition(self, msg):
+        """Show `msg` as a purple sub-line (replacing `.latest`) while a slow
+        operation — connect, start, stop — is in flight. Pair with
+        `clear_transition()` in a `finally` so it can't get stuck."""
+        self.transition = msg
+
+    def clear_transition(self):
+        self.transition = None
 
     def set_data(self, channel, value, t):
         buf = self.channels.get(channel)
