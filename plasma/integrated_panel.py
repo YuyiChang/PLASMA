@@ -2,6 +2,7 @@ import atexit
 import gradio as gr
 import struct
 import os
+import sys
 import html as _html
 import re
 from plasma.lsl_session import encode_participant, SessionInfo
@@ -661,10 +662,33 @@ def get_logger(log_dir="data"):
     # init logger
     logger = logging.getLogger(__name__)
     os.makedirs(log_dir, exist_ok=True)
+
+    # Status/journal messages are full of glyphs (🔌 🟢 🔴 ⚠️ …) and other
+    # non-ASCII characters (→). Without an explicit encoding, FileHandler's
+    # open() falls back to the OS default text encoding — on Windows that's
+    # a legacy ANSI codepage (e.g. cp1252), which can't represent most of
+    # them. logging swallows the resulting UnicodeEncodeError per record
+    # (handleError() dumps a traceback to stderr and drops the line), which
+    # on Windows silently deleted every "JOURNAL: [FAULT]/[RECOVER]" line —
+    # the whole fault-journal audit trail — from the log file. Forcing UTF-8
+    # matches macOS/Linux (already UTF-8 by default) and guarantees no
+    # record is ever dropped.
+    file_handler = logging.FileHandler(
+        os.path.join(log_dir, f"{date}_plasma_session.log"), encoding="utf-8")
+    try:
+        # StreamHandler() with no args defaults to stderr, in whatever
+        # encoding the console already uses (still a legacy codepage on
+        # Windows) — its codepage may still be unable to *render* a given
+        # glyph. Degrade to a backslash escape there instead of raising;
+        # this only changes error handling, not the stream's identity, so
+        # it's safe even when stderr is a test runner's capture object.
+        sys.stderr.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass  # no .reconfigure() (e.g. some capture/redirect objects) — skip
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s [%(levelname)s] %(message)s',
                         handlers=[
-                            logging.FileHandler(os.path.join(log_dir, f"{date}_plasma_session.log")),
-                            logging.StreamHandler()
+                            file_handler,
+                            logging.StreamHandler(),
                         ])
     return logger
