@@ -15,6 +15,10 @@ from faults.
 
 `pip install -r requirements.txt` still works — it's a shim for `-e .[all,build,test]`.
 
+Want a double-clickable icon instead of running `plasma` from a terminal?
+`pip install -e ".[desktop]"` then `plasma-install-shortcut` — see
+[Install & first launch](https://yuyichang.github.io/PLASMA/playbook/install/).
+
 Writable state (device config, gyro-bias calibration, `data/` recordings, session
 log) location, in order: `$PLASMA_HOME` if set → a per-user app-data dir when
 running as a packaged app (`~/Library/Application Support/PLASMA` on macOS,
