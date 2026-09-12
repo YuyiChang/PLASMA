@@ -21,12 +21,16 @@ Homepage = "https://github.com/YuyiChang/PLASMA"
 Repository = "https://github.com/YuyiChang/PLASMA"
 
 [project.optional-dependencies]
-msense = ["simplepyble", "bleak", "scipy", "matplotlib", "psutil", "Pillow", "pandas", "tqdm"]
+msense = ["simplepyble", "bleak", "scipy", "matplotlib", "psutil", "Pillow", "pandas", "pyarrow", "tqdm"]
 qb2 = ["blickfeld-qb2"]
 pupil = ["pupil-labs-realtime-api"]
 shimmer = ["pyshimmer", "pyserial"]
 obs = ["obsws-python"]
 all = ["plasma-app[msense,qb2,pupil,shimmer,obs]"]
+# `plasma-install-shortcut` — a Desktop/Start-Menu icon for a pip install,
+# separate from the standalone PyInstaller app (app_*.spec). Not part of
+# `all`: it's a host-machine convenience, not a device/data capability.
+desktop = ["pyshortcuts"]
 build = ["pyinstaller"]
 test = ["pytest", "pyxdf"]
 # playbook site (docs/) + the Playwright screenshot-capture tool
@@ -36,6 +40,7 @@ docs = ["mkdocs-material", "mkdocs-glightbox", "playwright"]
 [project.scripts]
 plasma = "plasma.__main__:main"
 plasma-ctl = "plasma.ctl:main"
+plasma-install-shortcut = "plasma.desktop_shortcut:main"
 
 [project.entry-points.pyinstaller40]
 hook-dirs = "plasma.__pyinstaller:get_hook_dirs"

@@ -26,7 +26,7 @@ def _add_extract_flags(p):
     p.add_argument('-o', '--out_dir', default="./", help="output directory")
     p.add_argument('--legacy_fs', action='store_true', default=False,
                    help="(no effect; kept for compatibility)")
-    p.add_argument('--save_format', choices=['csv', 'pickle'], default='csv')
+    p.add_argument('--save_format', choices=['feather', 'csv', 'pickle'], default='feather')
     p.add_argument('--ignore_id', action='store_true', default=False,
                    help="skip subject/session ID parsing for filenames")
     p.add_argument('--force_new_format', action='store_true', default=False,
@@ -57,7 +57,7 @@ def main(argv=None):
     p_batch = sub.add_parser("batch", help="extract a folder of *.zip archives")
     p_batch.add_argument('-i', '--in_dir', required=True)
     p_batch.add_argument('-o', '--out_dir', default=None)
-    for name, kw in (("save_format", dict(choices=['csv', 'pickle'], default='csv')),
+    for name, kw in (("save_format", dict(choices=['feather', 'csv', 'pickle'], default='feather')),
                      ("ppg_format", dict(choices=PPG_FORMAT_CHOICES, default='auto')),
                      ("ac_format", dict(choices=AC_FORMAT_CHOICES, default='auto')),
                      ("ecg_format", dict(choices=ECG_FORMAT_CHOICES, default='auto'))):

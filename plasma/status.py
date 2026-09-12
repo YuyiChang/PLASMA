@@ -23,7 +23,10 @@ The full model (an Airbus-ECAM-derived 3-level scheme) lives in
     - ``advisory`` blue    — L1 that needs an operator action, or a drift
     - ``caution``  amber   — L2 (and monitor-only L1)
     - ``warning``  red     — L3
-    - ``guidance`` purple  — a special operator instruction (sub-line accent)
+    - ``guidance`` purple  — a special operator instruction: a sub-line accent
+      (recorder stats), or a transient Initializing/Starting/Stopping message
+      on the session banner or a device row while a slow multi-second
+      operation (e.g. MSense BLE connect/start/stop) is still in flight
     - ``external`` grey    — an LSL stream on the network that isn't ours
 
 Alerts are **phase-gated** (the ECAM take-off/landing inhibition analog): a
@@ -92,6 +95,14 @@ _RULES = [
      Level.NONE, "healthy", False),
     ("bias saved", lambda o, l: "bias saved" in l,
      Level.NONE, "info", False),
+
+    # ── transient session/device transitions → guidance (purple), orthogonal
+    # to level — the operator is told to wait, not that anything is wrong.
+    # stop_like=False so the phase gate never escalates these to L3 the way
+    # it would a real "stopped" mid-collection.
+    ("initializing", lambda o, l: "initializing" in l, Level.NONE, "guidance", False),
+    ("starting", lambda o, l: "starting" in l, Level.NONE, "guidance", False),
+    ("stopping", lambda o, l: "stopping" in l, Level.NONE, "guidance", False),
 
     # ── construction / connection failures (SETUP-blocking) → L3 ───────
     ("connect failed", lambda o, l: "connect failed" in l, Level.L3, None, False),

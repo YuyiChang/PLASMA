@@ -4,7 +4,126 @@
 
 ---
 
-## 🚀 vNext (unreleased)
+## 🚀 v2.1.3
+
+### 🔌 MSense reconnect hardening
+
+- **Fixed a Linux/BlueZ reconnect storm that could wedge a wristband
+  permanently.** On BlueZ, a failed or aborted reconnect left stale D-Bus
+  disconnect subscriptions and half-open ACLs behind; on a Jetson this was
+  observed to make `disconnected_callback` fire 20-40x per attempt for one
+  wristband, saturating the single BLE event loop so the next `connect()`
+  timed out — a self-reinforcing collapse that a PLASMA restart could not
+  clear. Fixed by keeping exactly **one "live" client per wristband**
+  (callbacks from any retired client are now ignored), debouncing the
+  disconnect log/memo update to once per wristband per 5 s, and — on Linux
+  only — running `bluetoothctl remove` on the peer before each reconnect
+  attempt so BlueZ can't hand back a stale device object. See
+  `docs/reference/msense-reconnect.md` for the full reconnect timeline and
+  the entry points that trigger it.
+- New developer reference doc walks the complete BLE-drop → retry →
+  reconnect timeline, its governing constants (`RECONNECT_SWEEP_S`,
+  `BLE_OP_TIMEOUT_S`, `STALE_LOST_AGE`), and every caller of
+  `_reconnect_peripheral`.
+
+### 🚦 Session-memo status classification
+
+- **Transient `Initializing… / Starting… / Stopping…` status** now shows on
+  the session banner and per-device rows while a slow, multi-second
+  operation (MSense BLE connect, `collection_ctl` write, stop-confirm
+  readback) is still in flight — previously the banner showed nothing until
+  the whole device loop finished. Rendered in the existing **purple
+  "guidance"** colour, orthogonal to severity, and excluded from the phase
+  gate so it can never be mistaken for a fault or escalate `worst_level`.
+
+### 🗂️ Extraction pipeline
+
+- **Feather (Arrow IPC) is now the default extraction output format**,
+  replacing CSV — ~20-30x faster to write and ~2-4x smaller on disk for
+  these numeric-heavy AC/ECG tables. CSV is still available (pick it
+  explicitly if downstream tooling needs plain text — e.g. the YAMS
+  clock-sync tool only reads CSV).
+- The downloader **extracts directly from the copied `.bin` files** instead
+  of zipping them and immediately re-opening that same zip for extraction —
+  a raw zip is still built, but only as a fallback if extraction wasn't
+  requested or produced no output.
+
+### 🧾 Build identity & logging
+
+- Every session now logs a **launch banner** — `PLASMA v2.0.0 (a1b2c3d) on
+  macOS-14.5-arm64-arm-64bit, Python 3.12.4` — so a bug report or support log
+  unambiguously identifies the version, git commit, and host OS/Python that
+  produced it (`plasma/build_info.py`).
+- **Fixed session log corruption on Windows.** The log file was opened with
+  the OS default text encoding (a legacy codepage on Windows), which can't
+  represent the glyphs (🔌 🟢 🔴 ⚠️ …) used throughout status/journal
+  messages — `logging` silently dropped every record it couldn't encode,
+  including `[FAULT]` / `[RECOVER]` journal markers. The log file is now
+  always opened as **UTF-8**; the console stream degrades unencodable
+  glyphs to a backslash escape instead of raising.
+- CI's nightly build now stamps the git commit hash before freezing, same as
+  a tagged release build.
+
+### 🖱️ Desktop shortcut
+
+- New optional `desktop` extra + `plasma-install-shortcut` console script
+  drops a double-clickable PLASMA icon on the Desktop (and Start Menu / app
+  launcher) for a `pip install`-ed PLASMA — a lighter alternative to the
+  standalone PyInstaller bundle for anyone running from a Python
+  environment. `pip install -e ".[desktop]"` then `plasma-install-shortcut`;
+  see `plasma-install-shortcut --help` for `--no-terminal` / `--no-startmenu`.
+
+### 📦 Packaging & CI
+
+- CI's nightly scheduled build now publishes a rolling **"nightly"
+  pre-release** off the default branch's HEAD, in addition to the existing
+  tagged-release builds.
+- New `.github/workflows/publish.yml` builds the sdist/wheel and publishes
+  to PyPI on a version tag via **Trusted Publishing (OIDC)** — no stored API
+  token — gated on the test suite passing and the tag matching
+  `plasma.__version__`.
+
+---
+
+## 🚀 v2.1.2
+
+### 🐛 Bug fixes
+
+- **ACF3 (`ac:v3`) accelerometer extraction now reports firmware-dropped
+  samples.** A forward jump in `first_sample_sequence` between `ACB1` blocks is
+  decoded as the count of samples the firmware dropped (per the format spec):
+  it is logged and totalled (`Samples lost to firmware drops` in
+  `session_summary.txt`, `ExtractionReport.dropped`), but the missing rows are
+  not fabricated, so `Counter` keeps its true gap and clock-sync is unaffected.
+  A backwards / implausibly large jump now fails sequence validation like a bad
+  block CRC (`--strict` raises; otherwise the valid prefix is kept). Multi-chunk
+  sessions report a `first_sample_sequence` break at a chunk boundary and a
+  chunk `0000` that does not start at sequence 0. Files with no drops decode
+  byte-identically to before.
+- **Two MSense wristbands with the same BLE Name no longer collapse into one.**
+  The driver now keys every per-wristband structure (memo row, SQC/live state,
+  capabilities, LSL outlet, gyro bias) by the wristband's **address** instead of
+  its Name, so two unrenamed factory-default units both connect, both record and
+  both show a memo row. `"Name (Nickname)"` still labels every row and message
+  unchanged — give the two a Nickname each to tell them apart on screen. The
+  Configuration tab warns if the same address is listed on two enabled rows.
+
+### 📦 Packaging
+
+- **New release binary: `PLASMA_Linux_arm64`** — a PyInstaller build for
+  **NVIDIA Jetson Orin** (aarch64 Linux), alongside the existing x86-64 Linux,
+  macOS arm64 and Windows binaries. Built in CI on GitHub's `ubuntu-22.04-arm`
+  runner, so it targets **JetPack 6** (Ubuntu 22.04 / glibc 2.35); on JetPack 5
+  install from source. `liblsl` comes from the sccn/liblsl release `.deb`
+  (conda-forge has no aarch64 build). The **qb2 LiDAR plugin is not bundled**
+  (`blickfeld-qb2` is sdist-only on aarch64) — it still appears in the catalog
+  and only errors if a LiDAR is Initialized.
+- `app_linux.spec` now builds natively for whichever arch the runner is
+  (`PLASMA_Linux_x64` / `PLASMA_Linux_arm64`) from one spec file.
+
+---
+
+## 🚀 v2.1.1
 
 ### 🧠 Live-plot browser memory
 
@@ -27,6 +146,10 @@
   stream's rolling buffer is released when it ends; per-channel plot buffers
   gained a hard size cap.
 
+---
+
+## 🚀 v2.1.0
+
 ### 📡 MSense sensor stream v0 + ECB2 ECG blocks
 
 - **New shared sensor-stream protocol (v0)** replaces the protocol-v1 NUS path.
@@ -46,17 +169,6 @@
   CSV, with multi-chunk recordings stitched into one continuous timeline
   (ordered by `chunk_index`, split by `recording_id`; missing chunks / sample
   gaps reported). Old 12-byte `framed` `.ecg` / `.bin` files still decode.
-- **ACF3 (`ac:v3`) accelerometer extraction now reports firmware-dropped
-  samples.** A forward jump in `first_sample_sequence` between `ACB1` blocks is
-  decoded as the count of samples the firmware dropped (per the format spec):
-  it is logged and totalled (`Samples lost to firmware drops` in
-  `session_summary.txt`, `ExtractionReport.dropped`), but the missing rows are
-  not fabricated, so `Counter` keeps its true gap and clock-sync is unaffected.
-  A backwards / implausibly large jump now fails sequence validation like a bad
-  block CRC (`--strict` raises; otherwise the valid prefix is kept). Multi-chunk
-  sessions report a `first_sample_sequence` break at a chunk boundary and a
-  chunk `0000` that does not start at sequence 0. Files with no drops decode
-  byte-identically to before.
 - **Continuous live stream (`START_INFINITY`)** — a new "▶️ Start live stream"
   control in the YAMS → ECG/PPG Signal Quality tab opens a continuous ECG/PPG
   stream decoded into a rolling in-memory plot. **Not** recorded to disk or
@@ -74,13 +186,6 @@
   end boundary is uncertain is visible in the XDF). A per-device outcome list
   is on the YAMS → Control sub-tab. Older firmware whose `da39c931` isn't
   readable is reported as *not verifiable*, never as a failure.
-- **Two MSense wristbands with the same BLE Name no longer collapse into one.**
-  The driver now keys every per-wristband structure (memo row, SQC/live state,
-  capabilities, LSL outlet, gyro bias) by the wristband's **address** instead of
-  its Name, so two unrenamed factory-default units both connect, both record and
-  both show a memo row. `"Name (Nickname)"` still labels every row and message
-  unchanged — give the two a Nickname each to tell them apart on screen. The
-  Configuration tab warns if the same address is listed on two enabled rows.
 
 ### 🚦 Session-memo status classification
 
@@ -154,19 +259,6 @@
   watchdog / reconnect / journaler paths without a wristband.
 - Offline features (USB download, `.bin` extraction) are out of scope for the
   simulated device.
-
-### 📦 Packaging
-
-- **New release binary: `PLASMA_Linux_arm64`** — a PyInstaller build for
-  **NVIDIA Jetson Orin** (aarch64 Linux), alongside the existing x86-64 Linux,
-  macOS arm64 and Windows binaries. Built in CI on GitHub's `ubuntu-22.04-arm`
-  runner, so it targets **JetPack 6** (Ubuntu 22.04 / glibc 2.35); on JetPack 5
-  install from source. `liblsl` comes from the sccn/liblsl release `.deb`
-  (conda-forge has no aarch64 build). The **qb2 LiDAR plugin is not bundled**
-  (`blickfeld-qb2` is sdist-only on aarch64) — it still appears in the catalog
-  and only errors if a LiDAR is Initialized.
-- `app_linux.spec` now builds natively for whichever arch the runner is
-  (`PLASMA_Linux_x64` / `PLASMA_Linux_arm64`) from one spec file.
 
 ---
 

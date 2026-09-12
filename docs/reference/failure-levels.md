@@ -40,7 +40,7 @@ returns **`(Level, category)`**:
 | `advisory` | blue | `#2563eb` | L1 that implies an operator action (re-Initialize, reconnect, retry, low battery) |
 | `caution` | amber | `#a16207` | L2, and monitor-only L1 |
 | `warning` | red | `#b91c1c` | L3 |
-| `guidance` | purple | `#7c3aed` | a special operator instruction — a sub-line accent, orthogonal to level |
+| `guidance` | purple | `#7c3aed` | a special operator instruction, orthogonal to level: a sub-line accent (recorder stats), or a transient Initializing/Starting/Stopping message on the session banner or a device row while a slow multi-second operation is still in flight |
 | `external` | grey | `#6b7280` | an LSL stream on the network that isn't ours |
 
 `info` = "white" in the aviation sense of *uncoloured / default text*, rendered
@@ -118,6 +118,27 @@ per-stream `health`. `class` = the pre-model `_status_class` bucket.
 | `⛔ {exc}` / `❌ Fault {exc}` / `❌ Fault` / `FAULT: {exc}` / `🚫 FAULT` | qb2 / shimmer / pupil_labs / obs / `PlasmaDemoDevice` `__init__` | err → **L3 / warning** |
 | `⛔ connect failed` | `msense/device.py` `connect_devices` | err → **L3 / warning** |
 | `⛔ device not found` | `msense/device.py` `connect_devices` | err → **L3 / warning** |
+
+### Transient transitions (Initialize / Start / Stop)
+
+`init_devices()`, `start_collection()` and `stop_collection()`
+(`integrated_panel.py`) each loop over every device — for MSense a real,
+sequential multi-second BLE operation per wristband (connect, `collection_ctl`
+write, stop-confirm readback) — and previously only updated the session
+banner *after* the whole loop finished, with no interim text. These three
+statuses fill that gap; `stop_like=False` keeps them out of the phase gate
+(unlike the real `"stopped"` rule below).
+
+| Status string | Source | class → **level / colour** |
+|---|---|---|
+| `Initializing...` | `IntegratedPanel.init_devices` (banner); `msense/device.py` `connect_devices` (per-wristband `memo.transition`, cleared in a `finally`) | ok → NONE / **guidance** |
+| `Starting...` | `IntegratedPanel.start_collection` (banner); `msense/device.py` `start` (per-wristband `memo.transition`) | ok → NONE / **guidance** |
+| `Stopping...` | `IntegratedPanel.stop_collection` (banner); `msense/device.py` `stop` (per-wristband `memo.transition`) | ok → NONE / **guidance** |
+
+The per-wristband version renders as the row's purple sub-line
+(`.m-sub.guidance`), replacing `.latest` only while set — it never touches
+`.sts` and is never fed through `classify()`, so it can't affect
+`plasma-ctl events` / `worst_level`.
 
 ### Collection start / stop
 

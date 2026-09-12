@@ -49,6 +49,22 @@ PLASMA runs a local web server and opens in your browser at
         It is the step most source installs miss. Without it the built-in
         recorder reports *unavailable* and no XDF is written.
 
+    `pip install` only puts `plasma` on `$PATH` — it doesn't add a clickable
+    icon anywhere. For a Desktop (and Start Menu / app-launcher) icon that
+    launches this environment's PLASMA without a terminal command:
+
+    ```bash
+    pip install -e ".[desktop]"
+    plasma-install-shortcut
+    ```
+
+    This is separate from the prebuilt-binary tab above: it's a shortcut to
+    *this* pip install, not a standalone Python-free executable. Add
+    `--no-terminal` to hide the console window (macOS: uses an Automator
+    wrapper and may need a one-time Gatekeeper approval), or
+    `--no-startmenu` for a Desktop-only icon. See
+    `plasma-install-shortcut --help`.
+
 === "Into another project"
 
     The distribution is `plasma-app`; the import package is `plasma`.

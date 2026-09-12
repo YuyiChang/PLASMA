@@ -92,6 +92,8 @@ def _bare_driver():
     d.sqc_state = {}
     d.live_state = {}
     d._acq_stop_status = {}
+    d._live_client = {}
+    d._disc_log_at = {}
     d._start_ble_loop()
     return d
 
@@ -265,6 +267,48 @@ def test_stop_maps_outcome_to_memo_and_journal(monkeypatch, acq, sts_contains, m
     d.stop()
     assert sts_contains in d.memo["w1"].sts
     assert any(mark_contains in m for m in d.journal_marks)
+    # the transient "Stopping..." sub-line never gets stuck, confirmed or not
+    assert d.memo["w1"].transition is None
+
+
+def test_start_and_stop_show_transition_while_blocking(monkeypatch, tmp_path):
+    """memo.transition carries "Starting..."/"Stopping..." for exactly the
+    duration of the per-device collection_ctl() call (what the operator sees
+    while it's still in flight), then is always cleared — success or not."""
+    import types
+    monkeypatch.setattr("plasma.devices.msense.device.ACQ_STOP_READBACK_INTERVAL_S", 0.0)
+    d = _bare_driver()
+    p = _FakePeripheral()
+    p.acq_enabled = 0
+    d.active_devices = {"w1": p}
+    d.active_outlets = {"w1": types.SimpleNamespace(log_dir=None)}
+    d.caps = {"w1": {}}
+    d.memo = {"w1": PlasmaMemo("w1")}
+    d.orientation_quat = {}
+    d._state_lock = threading.Lock()
+    d.session_info = {"sub_id": "s1", "ses_id": "e1", "participant_enc": 1}
+    d.session_dir = str(tmp_path)
+    d.imu_stream_devices = set()
+    d.register_enmo = lambda *a: None
+    d.register_battery = lambda *a: None
+
+    seen = {}
+    orig_ctl = d.collection_ctl
+    def _spy(name, start=True):
+        seen[start] = d.memo[name].transition
+        return orig_ctl(name, start=start)
+    d.collection_ctl = _spy
+
+    d.start()
+    assert seen[True] == "Starting..."
+    assert d.memo["w1"].transition is None
+    assert d.memo["w1"].sts == "🟢"
+
+    d.active_outlets = {}       # stop() doesn't touch active_outlets
+    d.live_state = {}
+    d.stop()
+    assert seen[False] == "Stopping..."
+    assert d.memo["w1"].transition is None
 
 
 def test_stop_unverifiable_keeps_plain_glyph(monkeypatch):
@@ -579,6 +623,9 @@ def test_reconnect_peripheral_bounded_when_connect_hangs(monkeypatch):
     backend), so the hang is injected via a patched BleakClient constructor."""
     monkeypatch.setattr("plasma.devices.msense.device.BLE_OP_TIMEOUT_S", 0.2)
     monkeypatch.setattr(time, "sleep", lambda s: None)  # skip the real 1.5s pause
+    released = []
+    monkeypatch.setattr(MotionSenseHRV, "_bluez_release_peer",
+                        lambda self, addr, reason="": released.append(addr))
 
     class _HangingPeripheral(_FakePeripheral):
         async def connect(self):
@@ -590,6 +637,7 @@ def test_reconnect_peripheral_bounded_when_connect_hangs(monkeypatch):
     d = _bare_driver()
     p = _FakePeripheral()  # the "old" (already connected) client being replaced
     d.active_devices = {"w1": p}
+    d._live_client = {"w1": p}
     d.caps = {"w1": {}}
     d.memo = {"w1": PlasmaMemo("w1")}
     d.imu_stream_devices = set()
@@ -600,3 +648,42 @@ def test_reconnect_peripheral_bounded_when_connect_hangs(monkeypatch):
 
     assert elapsed < 1.0
     assert d.memo["w1"].sts == "🔌 disconnected"
+    assert released == ["AA:BB:CC:DD:EE:FF"]      # BlueZ peer forgotten before retry
+    assert d._live_client.get("w1") is None       # failed attempt not left as live
+
+
+def test_disconnect_callback_ignores_retired_client():
+    """A disconnect callback from a client that is no longer the live one for
+    that wristband is dropped — this is what stops a BlueZ reconnect storm
+    (dozens of stale clients all firing) from flooding the memo/log."""
+    d = _bare_driver()
+    d.memo = {"w1": PlasmaMemo("w1")}
+    live = _FakePeripheral()
+    stale = _FakePeripheral()
+    d._live_client = {"w1": live}
+
+    d._on_unexpected_disconnect("w1", stale)          # retired client → ignored
+    assert d.memo["w1"].sts == "🟦"
+
+    d._on_unexpected_disconnect("w1", live)           # the live client → registered
+    assert d.memo["w1"].sts == "🔌 disconnected"
+
+
+def test_disconnect_callback_debounced():
+    """Repeated callbacks for one wristband inside DISC_LOG_DEBOUNCE_S collapse
+    to a single memo update / log line."""
+    import plasma.devices.msense.device as dev
+    d = _bare_driver()
+    d.memo = {"w1": PlasmaMemo("w1")}
+    live = _FakePeripheral()
+    d._live_client = {"w1": live}
+
+    d._on_unexpected_disconnect("w1", live)
+    first = d._disc_log_at["w1"]
+    for _ in range(20):
+        d._on_unexpected_disconnect("w1", live)
+    assert d._disc_log_at["w1"] == first             # never re-stamped within the window
+
+    d._disc_log_at["w1"] -= dev.DISC_LOG_DEBOUNCE_S + 1
+    d._on_unexpected_disconnect("w1", live)
+    assert d._disc_log_at["w1"] != first             # window elapsed → processed again

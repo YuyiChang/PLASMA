@@ -22,7 +22,7 @@ import gradio as gr
 import psutil
 
 from ..extract.options import PANEL_FIELDS, ExtractionOptions
-from ..extract.pipeline import extract_zip, get_CDCT_init, get_device_name
+from ..extract.pipeline import extract_folder, get_CDCT_init, get_device_name
 from .extractor import ExtractionOptionsPanel
 
 logger = logging.getLogger(__name__)
@@ -261,43 +261,49 @@ def _download(enc_list, files_state, auto, progress=gr.Progress(), *opt_values):
         copied = sum(r["done"] for t, r in rows.items() if t in per_drive)
         done_bytes = sum(bytes_by_dev.values())
 
-        rows[arch] = {"phase": "zipping", "done": 0, "total": 0, "bytes": 0, "t0": time.time()}
-        note("zipping…")
-        progress(0.95, desc="Zipping…")
-        yield out(head(done_bytes, prefix="Copy complete — building archive…"))
-
-        zip_path = os.path.join(tempfile.gettempdir(),
-                                f"{time.strftime('%y%m%d%H%M')}_msense.zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for root, _, files in os.walk(dst):
-                for f in files:
-                    fp = os.path.join(root, f)
-                    zf.write(fp, os.path.relpath(fp, dst))
-        rows[arch].update(phase="zipped", bytes=os.path.getsize(zip_path))
-
-    result_path, label, extra = zip_path, "🎉 Download data", ""
-    if not auto:
-        rows[arch]["phase"] = "done"
-    if auto:
-        rows[arch].update(phase="extracting", t0=time.time())
-        note("extracting…")
-        progress(0.97, desc="Extracting…")
-        yield out(head(done_bytes, prefix="Archive built — extracting…"))
+        # Extract straight out of `dst` — the raw .bin files copied above —
+        # instead of zipping them and immediately unzipping that same zip for
+        # extraction. That round trip bought nothing (the data never left
+        # local disk) and raw sensor binaries don't compress well anyway; the
+        # extracted zip below is the only zip built on this path. A raw zip
+        # is still built, but only if extraction wasn't requested or produced
+        # nothing (see extract_folder's docstring).
+        result_path = label = extra = None
         extracted, crashed = None, False
-        try:
-            extracted = extract_zip(zip_path, out_dir=tempfile.gettempdir(), options=options)
-        except Exception as e:
-            crashed = True
-            logger.exception("downloader: extraction failed")
-            gr.Warning(f"Extraction failed ({e}) — the raw zip is still available.")
-            note(f"extraction failed: {e} — falling back to the raw zip")
-        if extracted:
-            rows[arch]["phase"] = "done"
-            result_path, label, extra = extracted, "🎉 Download extracted data", " · extracted"
-        else:
-            rows[arch]["phase"] = "failed" if crashed else "done"
-            if not crashed:
-                note("extraction produced no output — falling back to the raw zip")
+        if auto:
+            rows[arch] = {"phase": "extracting", "done": 0, "total": 0, "bytes": 0, "t0": time.time()}
+            note("extracting…")
+            progress(0.95, desc="Extracting…")
+            yield out(head(done_bytes, prefix="Copy complete — extracting…"))
+            try:
+                extracted = extract_folder(dst, out_dir=tempfile.gettempdir(), options=options)
+            except Exception as e:
+                crashed = True
+                logger.exception("downloader: extraction failed")
+                gr.Warning(f"Extraction failed ({e}) — falling back to a raw zip.")
+                note(f"extraction failed: {e} — falling back to a raw zip")
+            if extracted:
+                rows[arch].update(phase="done", bytes=os.path.getsize(extracted))
+                result_path, label, extra = extracted, "🎉 Download extracted data", " · extracted"
+            elif not crashed:
+                note("extraction produced no output — falling back to a raw zip")
+
+        if result_path is None:
+            rows[arch] = {"phase": "zipping", "done": 0, "total": 0, "bytes": 0, "t0": time.time()}
+            note("zipping…")
+            progress(0.97, desc="Zipping…")
+            yield out(head(done_bytes, prefix="Copy complete — building archive…"))
+
+            zip_path = os.path.join(tempfile.gettempdir(),
+                                    f"{time.strftime('%y%m%d%H%M')}_msense.zip")
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for root, _, files in os.walk(dst):
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        zf.write(fp, os.path.relpath(fp, dst))
+            rows[arch].update(phase="failed" if crashed else "done",
+                              bytes=os.path.getsize(zip_path))
+            result_path, label, extra = zip_path, "🎉 Download data", ""
 
     summary = (f"✅ Copied {copied}/{total} file(s) from "
                f"{len(per_drive) - len(failed)}/{len(per_drive)} device(s) "

@@ -2,13 +2,14 @@ import atexit
 import gradio as gr
 import struct
 import os
+import sys
 import html as _html
 import re
 from plasma.lsl_session import encode_participant, SessionInfo
 from plasma.journal import open_journal_outlet
 import logging, datetime, time
 from logging import Logger
-from plasma import plugins, __version__
+from plasma import plugins, __version__, build_info
 from plasma.config import device_config
 from plasma.app_context import app_context
 import plotly.graph_objects as go
@@ -71,6 +72,7 @@ _MEMO_CSS = (
     f"#{MEMO_PANEL_ELEM_ID} .m-tag{{opacity:.6;font-weight:400;margin-left:7px}}"
     f"#{MEMO_PANEL_ELEM_ID} .m-sub{{color:#555;padding-left:18px;font-size:12px}}"
     f"#{MEMO_PANEL_ELEM_ID} .m-sub.rec{{color:{_STATUS_HEX['guidance']}}}"
+    f"#{MEMO_PANEL_ELEM_ID} .m-sub.guidance{{color:{_STATUS_HEX['guidance']}}}"
     f"#{MEMO_PANEL_ELEM_ID} .m-dim{{opacity:.55}}"
     "</style>"
 )
@@ -129,7 +131,11 @@ def build_memo_html(session_sts, session_info, devices, snap, ext_streams=(),
             if detail:
                 row.append(f'<span class="m-tag">{esc(detail)}</span>')
             row.append('</div>')
-            row.append(f'<div class="m-sub">{esc(str(getattr(memo, "latest", "")))}</div>')
+            transition = getattr(memo, "transition", None)
+            if transition:
+                row.append(f'<div class="m-sub guidance">{esc(str(transition))}</div>')
+            else:
+                row.append(f'<div class="m-sub">{esc(str(getattr(memo, "latest", "")))}</div>')
             if s is not None:
                 row.append(f'<div class="m-sub rec">{esc(_rec_stats(s))}</div>')
             out.append("".join(row))
@@ -172,6 +178,10 @@ class IntegratedPanel():
 
         self.logger = get_logger(self.log_root)
         self.logger.info(f"Begin PLASMA v{__version__} session log")
+        # identify exactly what was running and where — the first thing a bug
+        # report / support log needs (see plasma/build_info.py)
+        self.logger.info(f"Build: commit {build_info.git_commit_hash()} "
+                         f"| OS: {build_info.os_info()}")
 
         # session task-marker LSL stream (None if liblsl is unavailable)
         self.journal_outlet = open_journal_outlet()
@@ -464,6 +474,7 @@ class IntegratedPanel():
         return gr.CheckboxGroup(choices=active, value=active)
 
     def init_devices(self, selected_devices):
+        self.sts = "Initializing..."
         for dev in self.available_devices:
             try:
                 dev.stop()
@@ -520,6 +531,7 @@ class IntegratedPanel():
             self.lsl_recorder = None
 
     def start_collection(self):
+        self.sts = "Starting..."
         self._collection_started = time.monotonic()
         self._collection_stopped = None
         self.session_dir = os.path.join(
@@ -544,6 +556,7 @@ class IntegratedPanel():
         self.sts = "Collection in progress"
 
     def stop_collection(self):
+        self.sts = "Stopping..."
         for dev in self.available_devices:
             try:
                 dev.stop()
@@ -661,10 +674,33 @@ def get_logger(log_dir="data"):
     # init logger
     logger = logging.getLogger(__name__)
     os.makedirs(log_dir, exist_ok=True)
+
+    # Status/journal messages are full of glyphs (🔌 🟢 🔴 ⚠️ …) and other
+    # non-ASCII characters (→). Without an explicit encoding, FileHandler's
+    # open() falls back to the OS default text encoding — on Windows that's
+    # a legacy ANSI codepage (e.g. cp1252), which can't represent most of
+    # them. logging swallows the resulting UnicodeEncodeError per record
+    # (handleError() dumps a traceback to stderr and drops the line), which
+    # on Windows silently deleted every "JOURNAL: [FAULT]/[RECOVER]" line —
+    # the whole fault-journal audit trail — from the log file. Forcing UTF-8
+    # matches macOS/Linux (already UTF-8 by default) and guarantees no
+    # record is ever dropped.
+    file_handler = logging.FileHandler(
+        os.path.join(log_dir, f"{date}_plasma_session.log"), encoding="utf-8")
+    try:
+        # StreamHandler() with no args defaults to stderr, in whatever
+        # encoding the console already uses (still a legacy codepage on
+        # Windows) — its codepage may still be unable to *render* a given
+        # glyph. Degrade to a backslash escape there instead of raising;
+        # this only changes error handling, not the stream's identity, so
+        # it's safe even when stderr is a test runner's capture object.
+        sys.stderr.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass  # no .reconfigure() (e.g. some capture/redirect objects) — skip
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s [%(levelname)s] %(message)s',
                         handlers=[
-                            logging.FileHandler(os.path.join(log_dir, f"{date}_plasma_session.log")),
-                            logging.StreamHandler()
+                            file_handler,
+                            logging.StreamHandler(),
                         ])
     return logger
