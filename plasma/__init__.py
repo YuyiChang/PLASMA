@@ -1,4 +1,4 @@
-__version__ = "2.0.0"
+__version__ = "2.1.3"
 
 # Short git commit hash baked in by CI (.github/workflows/build.yml) just
 # before a release build is frozen with PyInstaller — a frozen bundle ships no
