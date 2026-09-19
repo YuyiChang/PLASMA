@@ -7,9 +7,11 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    # nightly build off the default branch's HEAD, published as a rolling
-    # "nightly" pre-release (tag moves to the new commit each run) rather
-    # than a versioned vX.Y.Z release — see the release steps below.
+    # nightly build off `dev`'s HEAD (not the repo's default branch — a
+    # `schedule` trigger has no branch filter of its own, so every checkout
+    # step below pins `ref: dev` for this event explicitly), published as a
+    # rolling "nightly" pre-release (tag moves to the new commit each run)
+    # rather than a versioned vX.Y.Z release — see the release steps below.
     - cron: '0 7 * * *'   # 07:00 UTC daily
 
 permissions:
@@ -20,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -37,6 +41,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
 
       - uses: conda-incubator/setup-miniconda@v3
         with:
@@ -45,7 +51,7 @@ jobs:
 
       - name: Stamp git commit hash
         shell: bash -el {0}
-        run: python .github/stamp_commit.py ${{ github.sha }}
+        run: python .github/stamp_commit.py $(git rev-parse HEAD)
 
       - name: Install dependencies
         shell: bash -el {0}
@@ -117,6 +123,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
 
       - uses: conda-incubator/setup-miniconda@v3
         with:
@@ -125,7 +133,7 @@ jobs:
 
       - name: Stamp git commit hash
         shell: bash -el {0}
-        run: python .github/stamp_commit.py ${{ github.sha }}
+        run: python .github/stamp_commit.py $(git rev-parse HEAD)
 
       - name: Install dependencies
         shell: bash -el {0}
@@ -170,6 +178,8 @@ jobs:
       LIBLSL_VERSION: "1.17.7"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -193,7 +203,7 @@ jobs:
           echo "PYLSL_LIB=$RUNNER_TEMP/lsl/liblsl.so" >> "$GITHUB_ENV"
 
       - name: Stamp git commit hash
-        run: python .github/stamp_commit.py ${{ github.sha }}
+        run: python .github/stamp_commit.py $(git rev-parse HEAD)
 
       - name: Install dependencies
         run: pip install -e ".[msense,pupil,shimmer,obs,build]"
@@ -225,13 +235,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Stamp git commit hash
-        run: python .github/stamp_commit.py ${{ github.sha }}
+        shell: bash
+        run: python .github/stamp_commit.py $(git rev-parse HEAD)
 
       - name: Install dependencies
         run: pip install -e ".[all,build]"
