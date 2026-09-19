@@ -5,6 +5,35 @@ PLASMA runs a local web server and opens in your browser at
 
 ## Get PLASMA
 
+=== "Homebrew (macOS)"
+
+    **Recommended on macOS** — no Python, no `liblsl` install, and no manual
+    Gatekeeper dance.
+
+    ```bash
+    brew install --cask yuyichang/plasma/plasma
+    ```
+
+    Installs **PLASMA.app** into `/Applications` (launch it from
+    Spotlight, the Dock, or Finder) plus a `plasma` command on `$PATH`.
+    Apple silicon only — there is no Intel build.
+
+    ```bash
+    plasma
+    ```
+
+    PLASMA has no GUI window of its own — it's a local web server. Either
+    launch path opens a Terminal window running the real console app, then
+    your browser at `http://127.0.0.1:7860`. The binary isn't code-signed
+    or notarized, but the cask clears the quarantine attribute on install,
+    so Gatekeeper won't block the first run (unlike the raw prebuilt-binary
+    download in the next tab, which needs a manual right-click → Open).
+
+    ```bash
+    brew upgrade --cask plasma      # update to the latest release
+    brew uninstall --cask plasma    # remove
+    ```
+
 === "Prebuilt binary (no Python)"
 
     Download the asset for your platform from the
@@ -30,6 +59,11 @@ PLASMA runs a local web server and opens in your browser at
     chmod +x PLASMA_MacOS_arm64
     ./PLASMA_MacOS_arm64
     ```
+
+    !!! tip "macOS: use Homebrew instead"
+        The Homebrew tab above installs the same binary but handles the
+        Gatekeeper quarantine step for you, plus gives you a `/Applications`
+        icon and `brew upgrade`.
 
 === "From PyPI (pip)"
 
@@ -118,10 +152,10 @@ configuration. Where the home directory is depends on how you started it:
 | How you run PLASMA | Home directory |
 |---|---|
 | `$PLASMA_HOME` is set | that path (always wins) |
-| Prebuilt binary, macOS | `~/Library/Application Support/PLASMA` |
+| Prebuilt binary / Homebrew, macOS | `~/Library/Application Support/PLASMA` |
 | Prebuilt binary, Windows | `%LOCALAPPDATA%\PLASMA` |
 | Prebuilt binary, Linux | `~/.local/share/plasma` |
-| From source | the current working directory |
+| From source / PyPI | the current working directory |
 
 The path is resolved **once, at startup** — set `PLASMA_HOME` before launching
 if you want to override it.

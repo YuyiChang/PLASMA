@@ -4,6 +4,66 @@
 
 ---
 
+## 🚀 v2.2.2
+
+### 🍺 Homebrew cask fix
+
+- **Fixed `postflight` deprecation** in the `yuyichang/homebrew-plasma` cask
+  (introduced in v2.2.1) — Homebrew Cask moved to a declarative
+  `postflight_steps` mini-DSL, which has no `appdir` method of its own;
+  paths now go through its `{{appdir}}` template-token expansion instead of
+  Ruby string interpolation.
+- In-repo cask template (`packaging/homebrew/plasma.rb`) now seeds an
+  obviously-fake placeholder `sha256` (64 zeros) instead of
+  `"REPLACE_WITH_SHA256"` — the latter isn't valid hex, so `brew
+  bump-cask-pr` can't find-and-replace it on the very first real release
+  (`Checksum` always downcases internally, so it searches for the
+  lower-cased text, which never matched the literal placeholder).
+
+### 🐛 Frozen-build font cache churn
+
+- **Matplotlib no longer rebuilds its font cache on every single launch** of
+  a frozen (PyInstaller) build. Root cause: all three `app_*.spec` files
+  build in onefile mode, which re-extracts to a fresh temp directory on
+  every launch; Matplotlib's persistent font cache recorded the absolute
+  paths of its own bundled fonts, which lived inside that volatile
+  directory, so every launch saw those paths gone and rebuilt from scratch.
+  Fixed by excluding Matplotlib's bundled fonts from the frozen build
+  (`spec_common.strip_mpl_bundled_fonts`) so it only ever indexes stable
+  system fonts — at the cost of losing its bundled DejaVu Sans/STIX as a
+  font choice.
+
+---
+
+## 🚀 v2.2.1
+
+### 🍺 Homebrew distribution (macOS)
+
+- **`brew install --cask yuyichang/plasma/plasma`** installs PLASMA as a
+  proper `/Applications/PLASMA.app` (plus a `plasma` command on `$PATH`) —
+  no Python environment or `liblsl` install required. Apple silicon only.
+- The `.app` is a thin launcher, not a PyInstaller `BUNDLE()`: PyInstaller's
+  own bundler sets `LSBackgroundOnly=True` for a `console=True` build, which
+  would hide the app entirely (no Dock icon, no Terminal, no output) and
+  turn any startup failure silent. Instead `.github/build_macos_app.sh`
+  wraps the frozen console binary in an app whose launcher opens it inside a
+  visible Terminal window — built in CI (`build.yml`) alongside the existing
+  binary, published as `PLASMA_MacOS_arm64.app.zip`.
+- Since the binary isn't code-signed or notarized, the cask clears the
+  `com.apple.quarantine` attribute on install so Gatekeeper doesn't block
+  the first run.
+- The `pip install plasma-app[desktop]` Desktop-icon shortcut
+  (`plasma-install-shortcut`) now pins its working directory to the same
+  per-OS app-data dir a frozen build uses
+  (`~/Library/Application Support/PLASMA` on macOS), instead of whatever a
+  Desktop icon happens to default to — so config/data end up in the same
+  place regardless of how PLASMA was launched.
+- Playbook gained a "From PyPI (pip)" install tab
+  (`docs/playbook/install.md`) alongside the existing prebuilt-binary/
+  from-source paths.
+
+---
+
 ## 🚀 v2.2.0
 
 ### 🫀 ECG extraction rewrite (MSense4ECG-XXXXX)

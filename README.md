@@ -8,6 +8,13 @@ from faults.
 
 ## quickstart
 
+**macOS: `brew install --cask yuyichang/plasma/plasma`** is the recommended
+way to get PLASMA — no Python, no `liblsl`, no Gatekeeper dance. See
+[Install & first launch](https://yuyichang.github.io/PLASMA/playbook/install/)
+for that and every other install path (prebuilt binaries, PyPI, from source).
+
+To run from source instead:
+
 - `conda create -n plasma python=3.12`
 - `conda activate plasma`
 - `pip install -e ".[all]"` — or a lean subset, e.g. `".[msense]"` / `".[qb2,pupil]"`
