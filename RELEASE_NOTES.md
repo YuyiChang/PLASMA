@@ -4,6 +4,42 @@
 
 ---
 
+## 🚀 v2.2.0
+
+### 🫀 ECG extraction rewrite (MSense4ECG-XXXXX)
+
+- **ECG (`ecg:block_v2` / `ECF2`) extraction replaced with a clean-room,
+  CRC-validated decoder**, locked to that single on-disk format — the old
+  pre-v0 `framed` 12-byte ECG layout is retired along with its decoder.
+  Output columns are now exactly `SampleIndex`, `RtcTick`, `ECG`, `ETAG`,
+  `PTAG` (no `Counter`/`CDCT`/`init_CDCT`/`Datetime`). A reserved `ETAG`
+  (>3) is now logged as a warning rather than stopping decoding — the
+  block's own CRC already confirms byte-level integrity — which is
+  intentionally more lenient than the live sensor-stream's decoder.
+- **Accelerometer extraction (`ac:v3` / `ACF3`, the same chest device's IMU)
+  rewritten to match**: output columns locked to `SampleSequence`,
+  `RtcTickEstBlock`, `RtcTickEst`, `AccX`, `AccY`, `AccZ` (raw counts are now
+  converted to g directly in the decoder). `RtcTickEst` is a per-sample
+  piecewise-linear ramp between consecutive blocks' RTC anchors, computed
+  across the whole session — including across chunk boundaries.
+- Output filenames are unchanged (still `<sub>_<ses>_..._ecg.csv` /
+  `_ac.csv`, no version suffix). The wristband's own PPG/AC formats
+  (`ppg:*`, `ac:legacy`/`v2`) are unaffected by this rewrite.
+
+### 🗂️ Extraction pipeline
+
+- **`CDCT`/`init_CDCT`/`Datetime` are now off by default** for PPG-device
+  output (`ppg:legacy/v2/packed16`, `ac:legacy/v2`) — matching
+  `ecg:block_v2`/`ac:v3`, which never had them. A new **"Include
+  CDCT/Datetime"** checkbox (`--include_cdct` on the CLI) turns them back on
+  for anyone still feeding `clocksync.py` from these CSVs.
+- **New `README.txt` table** — "PPG-device file start times (UTC)" — always
+  records each PPG-device input file's (`ppg:*`, `ac:legacy`/`v2`) start
+  time (from its filename), regardless of the option above, so that
+  information survives even with the row-level columns dropped.
+
+---
+
 ## 🚀 v2.1.3
 
 ### 🔌 MSense reconnect hardening

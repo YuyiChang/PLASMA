@@ -145,15 +145,13 @@ def test_extract_ecf2_single_file():
 
         assert [os.path.basename(p) for p in report.out_paths] == ["ecg.csv"]
         df = pd.read_csv(report.out_paths[0])
-        assert list(df.columns[:4]) == ["ECG", "ETAG", "PTAG", "Counter"]
+        # output columns are locked to ECG_EXTRACTION_HANDOFF.md's schema —
+        # no CDCT/init_CDCT/Datetime/Counter
+        assert list(df.columns) == ["SampleIndex", "RtcTick", "ECG", "ETAG", "PTAG"]
         assert len(df) == 3 * SPB
-        assert df["Counter"].iloc[0] == 0 and df["Counter"].iloc[-1] == 3 * SPB - 1
+        assert df["SampleIndex"].iloc[0] == 0 and df["SampleIndex"].iloc[-1] == 3 * SPB - 1
+        assert df["RtcTick"].iloc[0] == 1000 and df["RtcTick"].iloc[-1] == 1000 + 3 * SPB - 1
         assert [r.spec.name for r in report.resolutions] == ["block_v2"]
-        # CDCT is the filename t0 + Counter/512: starts at t0, monotonic,
-        # spans ~n_samples/512 s
-        assert df["CDCT"].iloc[0] == 1700000000.0
-        assert (np.diff(df["CDCT"]) >= 0).all()
-        assert abs((df["CDCT"].iloc[-1] - df["CDCT"].iloc[0]) - (3 * SPB - 1) / 512) < 1e-3
 
 
 def test_extract_ecf2_multi_chunk_is_time_continuous():
@@ -169,16 +167,13 @@ def test_extract_ecf2_multi_chunk_is_time_continuous():
         df = pd.read_csv(report.out_paths[0])
 
         assert len(df) == 4 * SPB
-        # Counter runs 0..4*1358-1 with no restart at the chunk boundary
-        assert df["Counter"].tolist() == list(range(4 * SPB))
-        # CDCT is one continuous clock — monotonic across the chunk join, no
-        # jump back to t0, total span ~= 4*1358/512 s
-        cdct = df["CDCT"].to_numpy()
-        assert (np.diff(cdct) >= 0).all()
-        assert abs((cdct[-1] - cdct[0]) - (4 * SPB - 1) / 512) < 1e-3
-        # the boundary row (index 2*1358) is one sample-period after the row before
-        b = 2 * SPB
-        assert abs((cdct[b] - cdct[b - 1]) - 1 / 512) < 1e-4
+        # SampleIndex runs 0..4*1358-1 with no restart at the chunk boundary
+        assert df["SampleIndex"].tolist() == list(range(4 * SPB))
+        # RtcTick is one continuous clock — monotonic across the chunk join,
+        # exactly 1 tick/sample throughout (tick rate == sample rate)
+        tick = df["RtcTick"].to_numpy()
+        assert (np.diff(tick) == 1).all()
+        assert tick[0] == 1000 and tick[-1] == 1000 + 4 * SPB - 1
 
 
 def test_extract_ecf2_chunk_gap_is_reported(capsys):
@@ -190,6 +185,61 @@ def test_extract_ecf2_chunk_gap_is_reported(capsys):
 
         extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
         assert "missing chunk" in capsys.readouterr().out
+
+
+def test_extract_ac_v3_single_file():
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        blocks = [_acf3_block(680 * k, anchor_tick=1000 + 680 * k) for k in range(2)]
+        with open(os.path.join(src, "ac1700000000.bin"), "wb") as f:
+            region = b"".join(blocks) + bytes(AC_V3_REGION - sum(len(b) for b in blocks))
+            f.write(_acf3_header() + region + _acf3_terminal(sum(len(b) for b in blocks)))
+
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+        df = pd.read_csv(report.out_paths[0])
+        # output columns are locked to ECG_EXTRACTION_HANDOFF.md's schema —
+        # no CDCT/init_CDCT/Datetime/Counter
+        assert list(df.columns) == ["SampleSequence", "RtcTickEstBlock", "AccX", "AccY", "AccZ",
+                                    "RtcTickEst"]
+        assert len(df) == 2 * 680
+        assert df["SampleSequence"].iloc[0] == 0 and df["SampleSequence"].iloc[-1] == 2 * 680 - 1
+        # AccX/Y/Z are already in g (raw count / 16384)
+        assert abs(df["AccX"].iloc[0] - 0 / 16384.0) < 1e-12
+        assert abs(df["AccY"].iloc[0] - 1000 / 16384.0) < 1e-12
+        # RtcTickEstBlock is the block's own anchor, shared by every sample in it
+        assert (df["RtcTickEstBlock"].iloc[:680] == 1000).all()
+        assert (df["RtcTickEstBlock"].iloc[680:] == 1680).all()
+        # RtcTickEst ramps linearly from block 0's anchor to block 1's, at
+        # exactly (1680-1000)/680 = 1.0 ticks/sample, landing exactly on
+        # 1680.0 at the first sample of block 1
+        assert abs(df["RtcTickEst"].iloc[0] - 1000.0) < 1e-9
+        assert abs(df["RtcTickEst"].iloc[680] - 1680.0) < 1e-9
+        assert (np.diff(df["RtcTickEst"]) >= 0).all()
+
+
+def test_extract_ac_v3_multichunk_rtc_tick_est_spans_chunks():
+    """RtcTickEst must ramp across a chunk boundary — the last block of chunk
+    0 ramps toward the first block of chunk 1, not toward nothing."""
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        b0 = _acf3_block(0, anchor_tick=1000)
+        b1 = _acf3_block(680, anchor_tick=1680)          # last block of chunk 0
+        b2 = _acf3_block(1360, anchor_tick=2360)         # first block of chunk 1
+        region0 = b0 + b1 + bytes(AC_V3_REGION - len(b0) - len(b1))
+        region1 = b2 + bytes(AC_V3_REGION - len(b2))
+        with open(os.path.join(src, "ac17000000000_0.bin"), "wb") as f:
+            f.write(_acf3_header() + region0 + _acf3_terminal(len(b0) + len(b1)))
+        with open(os.path.join(src, "ac17000000000_1.bin"), "wb") as f:
+            f.write(_acf3_header() + region1 + _acf3_terminal(len(b2)))
+
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+        df = pd.read_csv(report.out_paths[0])
+
+        assert len(df) == 3 * 680
+        tick = df["RtcTickEst"].to_numpy()
+        assert abs(tick[680] - 1680.0) < 1e-9    # start of the last block of chunk 0
+        assert abs(tick[1360] - 2360.0) < 1e-9   # start of chunk 1's block — ramp continues
+        assert (np.diff(tick) >= 0).all()
 
 
 def test_ac_v3_multichunk_boundary_gap_reported(capsys):
@@ -208,7 +258,7 @@ def test_ac_v3_multichunk_boundary_gap_reported(capsys):
 
         df = pd.read_csv(report.out_paths[0])
         assert len(df) == 4 * 680            # chunks joined, nothing fabricated
-        assert df["Counter"].tolist() == (list(range(0, 1360)) + list(range(1400, 2760)))
+        assert df["SampleSequence"].tolist() == (list(range(0, 1360)) + list(range(1400, 2760)))
 
 
 def test_datetime_column_matches_vectorized_and_scalar_conversion():
@@ -221,7 +271,8 @@ def test_datetime_column_matches_vectorized_and_scalar_conversion():
         with open(os.path.join(src, f"ppg{t0}.bin"), "wb") as f:
             f.write(_w_ppg_v2(50))
         report = extract_dir(src, out,
-                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv",
+                                                       include_cdct=True))
         df = pd.read_csv(report.out_paths[0])
 
         expected_first = datetime.fromtimestamp(t0, timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
@@ -229,6 +280,51 @@ def test_datetime_column_matches_vectorized_and_scalar_conversion():
         # every row's Datetime matches a fresh scalar conversion of its own CDCT
         for cdct, dt in zip(df["CDCT"].iloc[::7], df["Datetime"].iloc[::7]):
             assert dt == datetime.fromtimestamp(int(cdct), timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+
+
+def test_ppg_ac_omit_cdct_by_default():
+    """`include_cdct` defaults to False: PPG/AC (legacy/v2, the wristband
+    formats) output no longer carries CDCT/init_CDCT/Datetime unless asked."""
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        with open(os.path.join(src, "ppg1700000000.bin"), "wb") as f:
+            f.write(_w_ppg_v2(50))
+        with open(os.path.join(src, "ac1700000000.bin"), "wb") as f:
+            f.write(_w_ac_v2(50))
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+
+        ppg_df = pd.read_csv([p for p in report.out_paths if p.endswith("ppg.csv")][0])
+        ac_df = pd.read_csv([p for p in report.out_paths if p.endswith("ac.csv")][0])
+        for df in (ppg_df, ac_df):
+            assert "CDCT" not in df.columns
+            assert "init_CDCT" not in df.columns
+            assert "Datetime" not in df.columns
+        # AC unit conversion still happens regardless of include_cdct
+        assert ac_df["AccX"].abs().max() < 8.0001
+
+
+def test_readme_records_ppg_device_file_start_times():
+    """A new README table records each PPG-device file's (ppg/ac legacy/v2)
+    start time in UTC, independent of `include_cdct` — it's the only place
+    that survives once CDCT/Datetime are dropped from the CSV by default.
+    ac:v3/ecg:block_v2 (the MSense4ECG chest device) are excluded."""
+    from datetime import datetime, timezone
+    t0 = 1700000000
+    expected_dt = datetime.fromtimestamp(t0, timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        with open(os.path.join(src, f"ppg{t0}.bin"), "wb") as f:
+            f.write(_w_ppg_v2(50))
+        with open(os.path.join(src, f"ac{t0}.bin"), "wb") as f:
+            f.write(_w_ac_v2(50))
+        with open(os.path.join(src, f"ecg{t0}.bin"), "wb") as f:
+            f.write(_w_ecf2(1))
+        report = extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
+
+        readme = open(report.readme_path).read()
+        assert "--- PPG-device file start times (UTC) ---" in readme
+        assert f"ppg{t0}.bin: {expected_dt}" in readme
+        assert f"ac{t0}.bin: {expected_dt}" in readme
+        assert f"ecg{t0}.bin" not in readme.split("--- PPG-device file start times (UTC) ---")[1]
 
 
 def test_multiple_sessions_under_one_prefix_are_chunk_written():
@@ -241,7 +337,8 @@ def test_multiple_sessions_under_one_prefix_are_chunk_written():
         with open(os.path.join(src, "ppg1800000000.bin"), "wb") as f:
             f.write(_w_ppg_v2(40))
         report = extract_dir(src, out,
-                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv",
+                                                       include_cdct=True))
         df = pd.read_csv(report.out_paths[0])
 
         assert len(df) == 30 + 40
@@ -287,9 +384,10 @@ def test_multiple_sessions_under_one_prefix_feather_matches_csv():
             f.write(_w_ppg_v2(40))
 
         r_csv = extract_dir(src, out_csv,
-                            options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+                            options=ExtractionOptions(ignore_id_parsing=True, save_format="csv",
+                                                      include_cdct=True))
         r_feather = extract_dir(src, out_feather,
-                                options=ExtractionOptions(ignore_id_parsing=True))
+                                options=ExtractionOptions(ignore_id_parsing=True, include_cdct=True))
 
         df_csv = pd.read_csv(r_csv.out_paths[0])
         df_feather = pd.read_feather(r_feather.out_paths[0])

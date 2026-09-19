@@ -31,13 +31,13 @@ needed, and where the two disagree the contents win.
 |---|---|
 | `auto` | Detect from content, per file. Falls back to the device version if inconclusive. **Default.** |
 | `version` | Follow `uuid.txt` only (v4.7.0+ → `v2`, otherwise `legacy`). The pre-1.6 behaviour. |
-| `legacy` / `v2` / `packed16` / `framed` / `v3` / `block_v2` | Force that layout. |
+| `legacy` / `v2` / `packed16` / `v3` / `block_v2` | Force that layout. |
 
 | Sensor | Layouts |
 |---|---|
 | PPG | `legacy` 24 B · `v2` 20 B · `packed16` 16 B (no version tie) |
-| IMU | `legacy` 30 B record · `v2` 26 B record · `v3` self-describing 4 MiB chunk (no version tie), 2 g / 16384 counts-per-g |
-| ECG | `framed` 12 B (pre-v0) · `block_v2` self-describing `ECF2` 4 MiB chunk of 4096 B `ECB2` blocks (no version tie) |
+| IMU | `legacy` 30 B record (wristband) · `v2` 26 B record (wristband) · `v3` self-describing `ACF3` 4 MiB chunk (no version tie; MSense4ECG-Z5G4A chest device) — output columns for `v3` are locked to `SampleSequence`/`RtcTickEstBlock`/`RtcTickEst`/`AccX`/`AccY`/`AccZ` |
+| ECG | `block_v2` self-describing `ECF2` 4 MiB chunk of 4096 B `ECB2` blocks (no version tie) — the only ECG layout; output columns are locked to `SampleIndex`/`RtcTick`/`ECG`/`ETAG`/`PTAG` |
 
 **Cross-check against uuid.txt** reports when detection and the version file
 disagree. It is off by default and does not override detection: use
@@ -46,6 +46,14 @@ disagree. It is off by default and does not override detection: use
 **Strict record validation**: raise on a record that fails its integrity check
 (packed16 reserved bits, ECG CRC, a partial trailing record) instead of dropping
 it and reporting a count.
+
+**Include CDCT/Datetime** (off by default): PPG/IMU `legacy`/`v2`/`packed16`
+output no longer carries `CDCT`/`init_CDCT`/`Datetime` unless this is ticked —
+`ecg:block_v2` and IMU `v3` never had these columns to begin with (see their
+locked schemas above). Every PPG-device file's start time (UTC, from its
+filename) is always recorded in `README.txt` regardless of this setting, so
+turn it on only if you need the per-row columns themselves (e.g. to feed
+`clocksync.py`, which is CSV/`Counter`+`CDCT`-based).
 """
 
 
@@ -71,6 +79,12 @@ class ExtractionOptions:
     on_format_conflict: str = "warn"
     strict_ppg: bool = False
     force_new_format: bool = False
+    # Off by default: PPG-device output (ppg:*, ac:legacy/v2) no longer carries
+    # CDCT/init_CDCT/Datetime. ecg:block_v2 and ac:v3 never had these columns
+    # regardless of this setting (see formats.py's locked schemas). Each
+    # PPG-device file's start time is always written to README.txt instead —
+    # see DataExtractor.write_provenance.
+    include_cdct: bool = False
     sniff_threshold: float = field(default=0.90, metadata={"panel": False})
     dry_run: bool = field(default=False, metadata={"panel": False})
 
@@ -96,6 +110,7 @@ class ExtractionOptions:
             on_format_conflict=args.on_format_conflict,
             strict_ppg=args.strict_ppg,
             force_new_format=args.force_new_format,
+            include_cdct=args.include_cdct,
             sniff_threshold=args.sniff_threshold,
             dry_run=args.dry_run,
         )

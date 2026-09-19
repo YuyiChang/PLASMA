@@ -16,11 +16,17 @@ policy beyond reading the file it is handed.
 
 Note: this is the **offline on-disk** decoder. The **live sensor-stream** payload
 decoders (`decode_ppg` / `decode_ecg`, and the ECB2 block validation) live in
-`plasma/devices/msense/records.py`; this module reuses its `crc32_iso_hdlc` and
-`decode_ecb2_block` for the `ecg:block_v2` (`ECF2`) container, and otherwise
-keeps its own per-record paths (a reassembled BLE stream vs a `.bin` file on a
-USB drive — different call sites, different erased-tail / continuity policy).
-The legacy `.bin` layouts (`ppg:legacy/v2`, `ac:*`, `ecg:framed`) are unchanged.
+`plasma/devices/msense/records.py`; this module reuses its `crc32_iso_hdlc` for
+the `ecg:block_v2` (`ECF2`) container's CRCs, but decodes ECB2 data blocks with
+its own lenient block decoder rather than `records.decode_ecb2_block` — the
+offline extractor treats a reserved ETAG (>3) as a warning, not a hard stop
+(see `_decode_ecb2_block_lenient` and `ECG_EXTRACTION_HANDOFF.md`), which
+differs from the live-stream decoder's stricter validation.
+The wristband's legacy `.bin` layouts (`ppg:legacy/v2/packed16`, `ac:legacy/v2`)
+are unchanged. The MSense4ECG-Z5G4A chest device's two streams are each locked
+to a single container format per ECG_EXTRACTION_HANDOFF.md — `ecg` to
+`block_v2` (`ECF2`), `ac`'s `v3` layout to `ACF3` — with output columns locked
+to that document's schema; no other on-disk layout is assumed for either.
 """
 from __future__ import annotations
 
@@ -36,8 +42,8 @@ import numpy as np
 import pandas as pd
 
 from plasma.devices.msense.records import (
-    crc32_iso_hdlc, decode_ecb2_block, EcbValidationError,
-    ECB2_BLOCK_SIZE, ECB2_SAMPLES_PER_BLOCK,
+    crc32_iso_hdlc,
+    ECB2_BLOCK_SIZE, ECB2_HEADER_SIZE, ECB2_RESERVED_OFFSET, ECB2_SAMPLES_PER_BLOCK,
 )
 
 # ECF2 ECG block-container file — see docs/ECG_BLOCK_FORMAT.md §5
@@ -88,43 +94,6 @@ def _le_uint(b, off, n):
     return out
 
 
-def _be_uint(b, off, n):
-    """Big-endian unsigned integer of `n` bytes (the ECG sample field)."""
-    out = np.zeros(b.shape[0], dtype=np.uint32)
-    for i in range(n):
-        out = (out << 8) | b[:, off + i].astype(np.uint32)
-    return out
-
-
-def _crc8_table():
-    table = np.zeros(256, dtype=np.uint8)
-    for i in range(256):
-        crc = i
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
-        table[i] = crc
-    return table
-
-
-_CRC8 = _crc8_table()
-
-
-def crc8(data: bytes) -> int:
-    """CRC-8, poly 0x07, init 0x00, no reflection (MAX30001 ECG frames)."""
-    crc = 0
-    for byte in data:
-        crc = int(_CRC8[crc ^ byte])
-    return crc
-
-
-def _crc8_vec(b, start, length):
-    """Same CRC over a byte range of every row, table-driven."""
-    crc = np.zeros(b.shape[0], dtype=np.uint8)
-    for i in range(length):
-        crc = _CRC8[crc ^ b[:, start + i]]
-    return crc
-
-
 # ---------------------------------------------------------------------------
 # decoders: (N, size) uint8 -> ({column: array}, malformed mask, info dict)
 # ---------------------------------------------------------------------------
@@ -151,28 +120,6 @@ def _decode_packed16(b):
     return cols, malformed, {"reserved_bits": int(malformed.sum())}
 
 
-def _decode_ecg(b):
-    """12-byte framed MAX30001 protocol: sync + type + flags + seq + raw24 + crc8."""
-    bad_sync = ~((b[:, 0] == 0xA5) & (b[:, 1] == 0xEC))
-    bad_type = (b[:, 2] != 0x01) & ~bad_sync
-    bad_crc = (_crc8_vec(b, 2, 9) != b[:, 11]) & ~bad_sync & ~bad_type
-
-    raw = _be_uint(b, 8, 3)
-    value = ((raw >> 6) & 0x3FFFF).astype(np.int32)
-    value = np.where(value & (1 << 17), value - (1 << 18), value).astype(np.int32)
-
-    cols = {
-        "ECG": value,
-        "ETAG": (b[:, 3] & 0x07).astype(np.uint8),
-        "PTAG": ((b[:, 3] >> 3) & 0x07).astype(np.uint8),
-        "Counter": _le_uint(b, 4, 4),
-    }
-    info = {"bad_sync": int(bad_sync.sum()),
-            "bad_type": int(bad_type.sum()),
-            "bad_crc": int(bad_crc.sum())}
-    return cols, bad_sync | bad_type | bad_crc, info
-
-
 def _ac_v3_crc32_ok(buf, crc_field_off, crc_field_len, expected):
     """CRC-32/ISO-HDLC (zlib's) over `buf` with the stored CRC field zeroed."""
     patched = bytearray(buf)
@@ -181,25 +128,47 @@ def _ac_v3_crc32_ok(buf, crc_field_off, crc_field_len, expected):
 
 
 def _sniff_ac_v3(data: bytes) -> float:
-    """Content score for the ACF3 container: it is entirely self-identifying."""
-    return 1.0 if data[:4] == AC_V3_MAGIC else 0.0
+    """Content score for the ac:v3 container.
+
+    Keyed off the `ACB1` block magic at the start of the data region, not the
+    header's own `magic` field: firmware is known to leave a stale header
+    (`ACF2`, format_version 1, sample_format 0, crc/odr/anchor fields zeroed)
+    on a session's first chunk even though the data region and terminal
+    record are the same v3 layout as every other chunk. Only v3 is ever
+    written in production/test, so this is the one ac container format.
+    """
+    return 1.0 if (len(data) >= AC_V3_HEADER_SIZE + 4
+                   and data[AC_V3_HEADER_SIZE:AC_V3_HEADER_SIZE + 4] == AC_V3_BLOCK_MAGIC) else 0.0
 
 
-def _ac_v3_chunk_index(basename):
+def _chunk_index_from_filename(basename):
     """Zero-based chunk index from a `<id><sensor><session_id>_<chunk>.bin`
     filename; 0 for a non-chunked name (`first_sample_sequence` starts at 0 for
-    chunk `0000` — the format doc, "Session filenames and chunking")."""
+    chunk `0000` — the format doc, "Session filenames and chunking"). Shared by
+    the ac:v3 (ACF3) and ecg:block_v2 (ECF2) container readers."""
     m = re.search(r"_(\d+)\.bin$", basename)
     return int(m.group(1)) if m else 0
 
 
 def _read_ac_v3(filepath, strict=False):
-    """Decode one ACF3 accelerometer chunk: 4 KiB header, ACB1 data blocks, ACT2 terminal.
+    """Decode one ac:v3 accelerometer chunk: 4 KiB header, ACB1 data blocks, ACT2 terminal.
 
     Unlike the flat per-record layouts this is a real container: block count is
     variable, the last block may be short, and per-sample timing is projected
     from one RTC anchor per block rather than stored per sample. None of that
     fits `whole_records`/`RecordSpec.decode`, so this owns the full file->df path.
+
+    The header's own magic/format_version/sample_format/odr/anchor fields are
+    read for logging only, never to decide *whether* or *how* to decode — see
+    `_sniff_ac_v3` and docs/ACCELEROMETER_BINARY_FORMAT.md, "Stale first-chunk
+    header".
+
+    Output columns are locked to ECG_EXTRACTION_HANDOFF.md's ``extract_ecg_ac_v3``
+    schema — ``SampleSequence``, ``RtcTickEstBlock``, ``AccX``, ``AccY``,
+    ``AccZ`` — and nothing else: no ``CDCT``/``init_CDCT``/``Datetime``/
+    ``Counter``, which that reference decoder never produces. ``RtcTickEst``
+    (the piecewise-linear per-sample tick ramp) is not built here since it can
+    span a chunk boundary — see ``pipeline._stitch_ac_v3_chunks``.
     """
     basename = os.path.basename(filepath)
     with open(filepath, "rb") as f:
@@ -210,14 +179,17 @@ def _read_ac_v3(filepath, strict=False):
 
     header = data[:AC_V3_HEADER_SIZE]
     magic, fmt_version, sample_format = struct.unpack_from("<4sHH", header, 0)
-    if magic != AC_V3_MAGIC:
-        raise ValueError(f"{basename}: not an ACF3 file (magic {magic!r})")
-    if fmt_version != 3 or sample_format != 2:
-        raise ValueError(f"{basename}: unsupported ACF3 format_version={fmt_version} "
-                         f"sample_format={sample_format}")
-    odr_num, odr_den = struct.unpack_from("<II", header, 8)
+    if magic != AC_V3_MAGIC or fmt_version != 3 or sample_format != 2:
+        # `_sniff_ac_v3` already routed this file here on the ACB1 block magic,
+        # not on these fields — a session's first chunk is known to carry a
+        # stale header (observed: magic=ACF2, format_version=1,
+        # sample_format=0) even though the data region and terminal record are
+        # ordinary v3. Only v3 is ever produced in production/test, so decode
+        # it as v3 regardless of what the header claims; just say so.
+        print(f"{basename}: header says magic={magic!r} format_version={fmt_version} "
+              f"sample_format={sample_format} (expected {AC_V3_MAGIC!r}/3/2) — "
+              f"decoding as ACF3 anyway (known stale-header quirk)")
     header_crc, = struct.unpack_from("<I", header, 20)
-    anchor_hz, = struct.unpack_from("<I", header, 24)
     if not _ac_v3_crc32_ok(header, 20, 4, header_crc):
         msg = f"{basename}: ACF3 header CRC mismatch"
         if strict:
@@ -238,15 +210,17 @@ def _read_ac_v3(filepath, strict=False):
         print(msg + " — clamping")
         valid_len = len(region)
 
-    x_parts, y_parts, z_parts, seq_parts, t_parts = [], [], [], [], []
+    x_parts, y_parts, z_parts, seq_parts, tick_col_parts = [], [], [], [], []
+    block_ticks, block_n_samples = [], []   # one entry per ok block, README + RtcTickEst input
     off = 0
     n_bad_blocks = 0
+    n_blocks_ok = 0
     n_bad_samples = 0
     first_seq_seen = None
     expected_seq = None      # seq the next block should open at, if nothing was dropped
     dropped_total = 0
     seq_gaps = []            # (prev_block_end_seq, this_block_first_seq, n_dropped)
-    sample_period = odr_den / odr_num       # seconds per accelerometer sample
+    anchor_first = anchor_last = None   # AnchorCounter (reserved_timer_output) range, README-only
     while off + AC_V3_BLOCK_HEADER_SIZE <= valid_len:
         remaining = valid_len - off
         block_len = AC_V3_BLOCK_SIZE if remaining >= AC_V3_BLOCK_SIZE else remaining
@@ -289,27 +263,41 @@ def _read_ac_v3(filepath, strict=False):
         y_parts.append(raw[:, 1].view(np.int16))
         z_parts.append(raw[:, 2].view(np.int16))
         seq_parts.append(first_seq + np.arange(n_samples, dtype=np.uint32))
-        t_parts.append(anchor_tick / anchor_hz + np.arange(n_samples) * sample_period)
+        # RtcTickEstBlock: this block's own RTC0 anchor tick, shared by every
+        # sample in it (the *estimate* — see RtcTickEst, computed once the
+        # whole session's blocks are known: `pipeline._stitch_ac_v3_chunks`).
+        tick_col_parts.append(np.full(n_samples, anchor_tick, dtype=np.int64))
+        block_ticks.append(int(anchor_tick))
+        block_n_samples.append(n_samples)
 
         if first_seq_seen is None:
             first_seq_seen = int(first_seq)
+            anchor_first = int(anchor_tick)
+        anchor_last = int(anchor_tick)
+        n_blocks_ok += 1
         expected_seq = (int(first_seq) + n_samples) & (_U32 - 1)
         off += block_len
 
     if not seq_parts:
         raise ValueError(f"{basename}: no valid ACF3 data blocks decoded")
 
-    counter = np.concatenate(seq_parts)
+    orig_counter = np.concatenate(seq_parts)
     df = pd.DataFrame({
-        "AccX": np.concatenate(x_parts),
-        "AccY": np.concatenate(y_parts),
-        "AccZ": np.concatenate(z_parts),
-        "Counter": counter,
+        # SampleSequence: first_sample_sequence + i, the device's own
+        # modulo-2^32 hardware sample sequence (session-continuous; a gap
+        # means firmware dropped samples, not missing time — see
+        # `dropped_samples`/`seq_gaps` below).
+        "SampleSequence": orig_counter,
+        "RtcTickEstBlock": np.concatenate(tick_col_parts),
+        # Acceleration in g (raw count / 16384), at the documented +/-2 g
+        # full scale. AccX's sampled-FSYNC marker bit is already cleared
+        # above, before this conversion.
+        "AccX": np.concatenate(x_parts) / AC_V3_COUNTS_PER_G,
+        "AccY": np.concatenate(y_parts) / AC_V3_COUNTS_PER_G,
+        "AccZ": np.concatenate(z_parts) / AC_V3_COUNTS_PER_G,
     })
 
-    t0, dt = get_CDCT_init(filepath)
-    df["CDCT"] = t0 + np.concatenate(t_parts)
-    df["init_CDCT"] = t0
+    _, dt = get_CDCT_init(filepath)
 
     if n_bad_blocks:
         msg = (f"AC {basename}: {n_bad_blocks} ACF3 block(s) failed validation "
@@ -318,7 +306,7 @@ def _read_ac_v3(filepath, strict=False):
             raise ValueError(msg)
         print(msg + " — dropped")
 
-    chunk_index = _ac_v3_chunk_index(basename)
+    chunk_index = _chunk_index_from_filename(basename)
     if dropped_total:
         msg = (f"AC {basename}: {dropped_total} sample(s) dropped by firmware "
                f"across {len(seq_gaps)} block boundary(ies)")
@@ -333,10 +321,24 @@ def _read_ac_v3(filepath, strict=False):
     df.attrs["dropped_samples"] = int(dropped_total)
     df.attrs["seq_gaps"] = seq_gaps
     df.attrs["first_seq"] = first_seq_seen
-    df.attrs["last_seq"] = int(counter[-1])
+    df.attrs["last_seq"] = int(orig_counter[-1])
     df.attrs["chunk_index"] = chunk_index
     df.attrs["trailing_bytes"] = 0
     df.attrs["spec"] = "ac:v3"
+    # AnchorCounter (block header offset 4, "reserved_timer_output" in the
+    # format doc): a per-block RTC0 tick, already a column (`RtcTickEstBlock`).
+    # Its first/last range per file also goes to the README (`write_provenance`).
+    df.attrs["anchor_counter_first"] = anchor_first
+    df.attrs["anchor_counter_last"] = anchor_last
+    df.attrs["n_blocks_ok"] = n_blocks_ok
+    df.attrs["n_blocks_bad"] = n_bad_blocks
+    # Per-block (tick, n_samples) pairs, in this chunk's block order — not a
+    # column: `pipeline._stitch_ac_v3_chunks` concatenates these across every
+    # chunk of a session (in `chunk_index` order) to build one session-wide
+    # `RtcTickEst` ramp, since the last block of this chunk may need to ramp
+    # toward the first block of the *next* chunk.
+    df.attrs["block_ticks"] = block_ticks
+    df.attrs["block_n_samples"] = block_n_samples
     return df, dt
 
 
@@ -349,10 +351,56 @@ def _sniff_ecf2(data: bytes) -> float:
     return 1.0 if data[:4] == ECF2_MAGIC else 0.0
 
 
+def _decode_ecb2_block_lenient(block, basename, page):
+    """One 4096-byte ``ECB2`` data block -> (first_rtc_tick, first_sample_index,
+    ecg, etag, ptag). MSB-first 24-bit MAX30001 FIFO words, CRC-32/ISO-HDLC
+    over the block with the stored CRC field zeroed (ECG_BLOCK_FORMAT.md secs
+    2-3) — the opposite sample byte order from the AC v3 format's
+    little-endian samples.
+
+    Deliberately more lenient than ``records.decode_ecb2_block`` (used by the
+    live sensor stream): the spec says a reserved ETAG (4-7) should have ended
+    the recording, but the block's own CRC already confirms byte-level
+    integrity, so a reserved tag is logged and kept rather than raised — per
+    the verified reference decoder in ECG_EXTRACTION_HANDOFF.md.
+    """
+    if block[0:4] != b"ECB2":
+        raise ValueError(f"bad block magic {bytes(block[0:4])!r} at page {page}")
+    if any(block[ECB2_RESERVED_OFFSET:ECB2_BLOCK_SIZE]):
+        raise ValueError(f"non-zero reserved tail bytes at page {page}")
+
+    first_rtc_tick = int.from_bytes(bytes(block[4:8]), "little")
+    first_sample_index = int.from_bytes(bytes(block[8:12]), "little")
+    stored_crc = int.from_bytes(bytes(block[12:16]), "little")
+    if crc32_iso_hdlc(block, 12, 16) != stored_crc:
+        raise ValueError(f"block CRC mismatch at page {page}")
+
+    raw = (np.frombuffer(bytes(block), dtype=np.uint8,
+                         count=ECB2_SAMPLES_PER_BLOCK * 3, offset=ECB2_HEADER_SIZE)
+           .reshape(-1, 3).astype(np.uint32))
+    raw24 = (raw[:, 0] << 16) | (raw[:, 1] << 8) | raw[:, 2]
+    etag = ((raw24 >> 3) & 0x7).astype(np.uint8)
+    ptag = (raw24 & 0x7).astype(np.uint8)
+    n_reserved = int((etag > 3).sum())
+    if n_reserved:
+        print(f"ECG {basename}: page {page}: {n_reserved} sample(s) with reserved ETAG "
+              f"(>3) — spec says this should end the recording, so treat this data with caution")
+    u18 = (raw24 >> 6).astype(np.int64)
+    ecg = np.where(u18 & 0x20000, u18 - 0x40000, u18).astype(np.int32)
+
+    return first_rtc_tick, first_sample_index, ecg, etag, ptag
+
+
 def _read_ecf2(filepath, strict=False):
     """Decode one ECF2 chunk: 4 KiB header page, then up to 1023 ECB2 data
     pages, then erased (all-``0xFF``) pages. Stops at the first erased page or
-    the first invalid block. Returns (DataFrame, datetime string)."""
+    the first invalid block. Returns (DataFrame, datetime string).
+
+    Output columns are locked to ECG_EXTRACTION_HANDOFF.md's ``extract_ecg_v2``
+    schema — ``SampleIndex``, ``RtcTick``, ``ECG``, ``ETAG``, ``PTAG`` — and
+    nothing else: no ``CDCT``/``init_CDCT``/``Datetime``/``Counter``, which
+    that reference decoder never produces.
+    """
     basename = os.path.basename(filepath)
     with open(filepath, "rb") as f:
         data = f.read()
@@ -360,47 +408,61 @@ def _read_ecf2(filepath, strict=False):
     if len(data) != ECF2_FILE_SIZE:
         raise ValueError(f"{basename}: {len(data)} bytes, expected {ECF2_FILE_SIZE} for an ECF2 chunk")
 
+    # A bad/unparseable file header is non-fatal — block offsets are fixed
+    # regardless of header content and every block is independently
+    # CRC-checked (same pattern as the AC v3 reader's stale-header handling).
     header = data[:ECB2_BLOCK_SIZE]
+    # chunk_index always falls back to the filename's own chunk suffix (like
+    # the AC v3 reader's `_chunk_index_from_filename`) since a bad header must
+    # not block stitching multi-chunk sessions in order.
+    chunk_index = _chunk_index_from_filename(basename)
+    recording_id = None
     if header[0:4] != ECF2_MAGIC:
-        raise ValueError(f"{basename}: not an ECF2 file (magic {header[0:4]!r})")
-    chunk_index = int.from_bytes(header[4:8], "little")
-    recording_id = int.from_bytes(header[8:16], "little")
-    stored_hdr_crc = int.from_bytes(header[16:20], "little")
-    if any(header[20:]):
-        msg = f"{basename}: ECF2 header reserved bytes nonzero"
+        msg = f"{basename}: not an ECF2 file (magic {bytes(header[0:4])!r})"
         if strict:
             raise ValueError(msg)
-        print(msg)
-    if crc32_iso_hdlc(header, 16, 20) != stored_hdr_crc:
-        msg = f"{basename}: ECF2 header CRC mismatch"
-        if strict:
-            raise ValueError(msg)
-        print(msg)
+        print(f"{msg} — ignoring header, decoding data pages directly (their own CRCs still apply)")
+    else:
+        header_chunk_index = int.from_bytes(header[4:8], "little")
+        if header_chunk_index != chunk_index:
+            print(f"{basename}: header chunk_index={header_chunk_index} != filename chunk {chunk_index}")
+        recording_id = int.from_bytes(header[8:16], "little")
+        stored_hdr_crc = int.from_bytes(header[16:20], "little")
+        if crc32_iso_hdlc(header, 16, 20) != stored_hdr_crc:
+            msg = f"{basename}: ECF2 header CRC mismatch"
+            if strict:
+                raise ValueError(msg)
+            print(f"{msg} — ignoring header, decoding data pages directly (their own CRCs still apply)")
 
-    ecg_parts, etag_parts, ptag_parts, idx_parts = [], [], [], []
+    ecg_parts, etag_parts, ptag_parts, idx_parts, tick_parts = [], [], [], [], []
     prev_index = prev_tick = None
     n_blocks = 0
+    anchor_first = anchor_last = None   # first_rtc_tick range, README-only
     error = None
     for page in range(1, ECF2_DATA_PAGES + 1):
         block = data[page * ECB2_BLOCK_SIZE:(page + 1) * ECB2_BLOCK_SIZE]
         if block[0:4] == b"\xff\xff\xff\xff":
             break  # erased sentinel — end of recorded data
         try:
-            dec = decode_ecb2_block(block)
-        except EcbValidationError as e:
+            first_rtc_tick, first_sample_index, ecg, etag, ptag = \
+                _decode_ecb2_block_lenient(block, basename, page)
+        except ValueError as e:
             error = f"page {page}: {e}"
             break
         if prev_index is not None and (
-                dec["first_sample_index"] != (prev_index + ECB2_SAMPLES_PER_BLOCK) % (1 << 32)
-                or dec["first_rtc_tick"] != (prev_tick + ECB2_SAMPLES_PER_BLOCK) % (1 << 32)):
+                first_sample_index != (prev_index + ECB2_SAMPLES_PER_BLOCK) % (1 << 32)
+                or first_rtc_tick != (prev_tick + ECB2_SAMPLES_PER_BLOCK) % (1 << 32)):
             error = f"page {page}: ECB2 continuity break"
             break
-        prev_index, prev_tick = dec["first_sample_index"], dec["first_rtc_tick"]
-        ecg_parts.append(dec["ecg"])
-        etag_parts.append(dec["etag"])
-        ptag_parts.append(dec["ptag"])
-        idx_parts.append(dec["first_sample_index"]
-                         + np.arange(ECB2_SAMPLES_PER_BLOCK, dtype=np.int64))
+        prev_index, prev_tick = first_sample_index, first_rtc_tick
+        ecg_parts.append(ecg)
+        etag_parts.append(etag)
+        ptag_parts.append(ptag)
+        idx_parts.append(first_sample_index + np.arange(ECB2_SAMPLES_PER_BLOCK, dtype=np.int64))
+        tick_parts.append(first_rtc_tick + np.arange(ECB2_SAMPLES_PER_BLOCK, dtype=np.int64))
+        if anchor_first is None:
+            anchor_first = int(first_rtc_tick)
+        anchor_last = int(first_rtc_tick)
         n_blocks += 1
 
     if not ecg_parts:
@@ -412,34 +474,38 @@ def _read_ecf2(filepath, strict=False):
             raise ValueError(msg)
         print(msg)
 
-    counter = np.concatenate(idx_parts).astype(np.int64)
+    sample_index = np.concatenate(idx_parts)
     df = pd.DataFrame({
+        # SampleIndex: first_sample_index + i, the recording-local sample
+        # ordinal (zero at the recording's first sample), monotonically
+        # advancing (+1358/block) through every chunk of the same
+        # recording_id (ECG_BLOCK_FORMAT.md §3/§5) — gap-free by construction,
+        # since only a complete, CRC-clean block is ever persisted.
+        "SampleIndex": sample_index,
+        # RtcTick: first_rtc_tick + i — an exact per-sample RTC0 tick (this
+        # format's sample rate equals the tick rate), not an estimate.
+        "RtcTick": np.concatenate(tick_parts),
         "ECG": np.concatenate(ecg_parts),
         "ETAG": np.concatenate(etag_parts),
         "PTAG": np.concatenate(ptag_parts),
-        "Counter": counter,
     })
-    t0, dt = get_CDCT_init(filepath)
-    # `Counter` is `first_sample_index + i` — the **recording-local** sample
-    # ordinal: zero at the first sample of the recording and monotonically
-    # advancing (+1358/block) through every chunk of the same recording_id
-    # (ECG_BLOCK_FORMAT.md §3/§5). So `t0 + Counter/512` is one continuous
-    # clock across all chunks — no per-chunk restart, and an isolated later
-    # chunk lands at its true offset into the recording.
-    df["CDCT"] = t0 + df["Counter"] / ECG_FS_ECB2
-    df["init_CDCT"] = t0
+    _, dt = get_CDCT_init(filepath)
     df.attrs["malformed_records"] = 0
     df.attrs["trailing_bytes"] = 0
     df.attrs["spec"] = "ecg:block_v2"
     df.attrs["recording_id"] = recording_id
     df.attrs["chunk_index"] = chunk_index
-    df.attrs["first_sample_index"] = int(counter[0])
-    df.attrs["last_sample_index"] = int(counter[-1])
+    df.attrs["first_sample_index"] = int(sample_index[0])
+    df.attrs["last_sample_index"] = int(sample_index[-1])
     df.attrs["decode_error"] = error
+    # first_rtc_tick range per file, README-only (write_provenance) — not a
+    # global counter, since SampleIndex/RtcTick are already session-continuous
+    # by construction and need no per-session offset added.
+    df.attrs["anchor_counter_first"] = anchor_first
+    df.attrs["anchor_counter_last"] = anchor_last
+    df.attrs["n_blocks_ok"] = n_blocks
+    df.attrs["n_blocks_bad"] = 0
     return df, dt
-
-
-ECG_FS_ECB2 = 512.0
 
 
 _PPG_LEGACY_DT = np.dtype([(n, "<i4") for n in
@@ -526,19 +592,21 @@ REGISTRY = (
     # generic per-record code path (whole_records, decode, the tick-diff CDCT
     # cumsum, and the tick-diff content scorer), so decode/tick_offset/tick_rate
     # are never consulted. tick_step/tick_bits ARE used by the generic
-    # counter_validity_check on the 'Counter' column read_file produces, so they
-    # describe that column's real semantics (a modulo-2^32 sample sequence).
+    # counter_validity_check on the 'SampleSequence' column read_file produces,
+    # so they describe that column's real semantics (a modulo-2^32 sample
+    # sequence) — output is otherwise locked to ECG_EXTRACTION_HANDOFF.md's
+    # schema: no other on-disk AC format is assumed for this device.
     RecordSpec("v3", "ac", AC_V3_BLOCK_SIZE, lambda b: (_ for _ in ()).throw(
                    NotImplementedError("ac:v3 is a container format; see read_file")),
                tick_offset=0, tick_rate=1125 / 2, tick_step=1,
                read_file=_read_ac_v3, sniff=_sniff_ac_v3),
 
-    RecordSpec("framed", "ecg", 12, _decode_ecg,
-               tick_offset=4, tick_rate=512, tick_step=1,
-               validated=True, since=V2_VERSION, trim_erased_tail=True),
-
-    # ECF2 block-container (v0 firmware). read_file/sniff bypass every generic
-    # per-record path; the placeholder per-record fields are never consulted.
+    # ECF2 block-container (v0 firmware) — the only ecg layout: no other
+    # on-disk ECG format is assumed (ECG_EXTRACTION_HANDOFF.md). read_file/
+    # sniff bypass every generic per-record path; the placeholder per-record
+    # fields below are never consulted, except tick_step/tick_bits, which
+    # describe the 'SampleIndex' column's real semantics (a recording-local,
+    # modulo-2^32 sample ordinal) for the generic counter_validity_check.
     RecordSpec("block_v2", "ecg", ECB2_BLOCK_SIZE, lambda b: (_ for _ in ()).throw(
                    NotImplementedError("ecg:block_v2 is a container format; see read_file")),
                tick_offset=0, tick_rate=512, tick_step=1,
@@ -639,10 +707,17 @@ def whole_records(data, spec):
     return b[: written[-1] + 1]
 
 
-def read_bin(filepath, spec, strict=False):
+def read_bin(filepath, spec, strict=False, include_cdct=True):
     """Decode one binary file with `spec`. Returns (DataFrame, datetime string).
 
     Malformed records are dropped and counted; `strict` raises instead.
+
+    `include_cdct` (flat per-record formats only — container formats never
+    had CDCT and ignore this): when `False`, skip `recompute_cdct` and don't
+    attach `CDCT`/`init_CDCT` at all. The pipeline defaults this to `False`
+    for actual extraction (see `ExtractionOptions.include_cdct`); this
+    function's own default stays `True` so direct callers (tests, notebooks)
+    keep seeing the historical columns unless they ask otherwise.
     """
     if spec.read_file is not None:
         return spec.read_file(filepath, strict)
@@ -694,7 +769,8 @@ def read_bin(filepath, spec, strict=False):
             f"Is this file really in the {spec.sensor}/{spec.name} format?")
 
     t0, dt = get_CDCT_init(filepath)
-    df = recompute_cdct(df, spec, t0)
+    if include_cdct:
+        df = recompute_cdct(df, spec, t0)
 
     df.attrs['malformed_records'] = n_bad
     df.attrs['trailing_bytes'] = remainder

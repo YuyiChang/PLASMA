@@ -39,6 +39,9 @@ def _add_extract_flags(p):
     p.add_argument('--sniff_threshold', type=float, default=0.90)
     p.add_argument('--dry_run', action='store_true', default=False)
     p.add_argument('--strict_ppg', action='store_true', default=False)
+    p.add_argument('--include_cdct', action='store_true', default=False,
+                   help="PPG-device output (ppg/ac legacy/v2) keeps CDCT/init_CDCT/Datetime; "
+                        "off by default (start time is always in README.txt)")
     p.add_argument('--note', default="", help="note recorded in the output README")
 
 
@@ -68,6 +71,7 @@ def main(argv=None):
     p_batch.add_argument('--on_format_conflict', choices=CONFLICT_CHOICES, default='warn')
     p_batch.add_argument('--sniff_threshold', type=float, default=0.90)
     p_batch.add_argument('--strict_ppg', action='store_true', default=False)
+    p_batch.add_argument('--include_cdct', action='store_true', default=False)
     p_batch.add_argument('--legacy_fs', action='store_true', default=False)
     p_batch.add_argument('--dry_run', action='store_true', default=False)
     p_batch.add_argument('--note', default="")

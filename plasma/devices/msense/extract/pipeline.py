@@ -177,6 +177,8 @@ class DataExtractor():
         self.malformed = 0
         self.dropped = 0
         self.out_paths = []
+        self.anchor_block_summaries = []    # (basename, first, last, n_ok, n_bad) — README-only
+        self.ppg_file_start_times = []      # (basename, UTC datetime str) — README-only, PPG-device files only
 
         self.encoding_alias = self.get_encoding_alias() if self.df is not None else {}
 
@@ -197,6 +199,7 @@ class DataExtractor():
             file.write(f"Cross-check against uuid.txt = {options.validate_with_uuid}"
                        f" (on conflict: {options.on_format_conflict})\n")
             file.write(f"Strict record validation = {options.strict_ppg}\n")
+            file.write(f"Include CDCT/init_CDCT/Datetime (PPG-device output) = {options.include_cdct}\n")
             file.write(f"Detection threshold = {options.sniff_threshold}\n")
             file.write("I m-sense with YAMS at https://github.com/SenSE-Lab-OSU/YAMS\n")
             uuid_path = os.path.join(self.in_dir, "uuid.txt")
@@ -259,6 +262,22 @@ class DataExtractor():
             if conflicts:
                 file.write(f"uuid.txt conflicts = {len(conflicts)} "
                            f"(content used unless on_format_conflict=trust_uuid)\n")
+            if self.anchor_block_summaries:
+                file.write("\n--- AC/ECG block metadata (per ACB1/ECB2 block header, "
+                            'BLOCK_META_FMT = "<4sIII": magic, AnchorCounter '
+                            "(reserved_timer_output / first_rtc_tick), "
+                            "OrigCounter base (first_sample_sequence / first_sample_index), "
+                            "block_crc32) ---\n")
+                for basename, first, last, n_ok, n_bad in self.anchor_block_summaries:
+                    file.write(f"{basename}: AnchorCounter {first}..{last} "
+                               f"({n_ok} block(s) ok, {n_bad} bad)\n")
+            if self.ppg_file_start_times:
+                # Recorded regardless of `include_cdct`: once that option is off
+                # (the default), this is the only place a PPG-device file's
+                # start time (its filename-derived t0) still shows up.
+                file.write("\n--- PPG-device file start times (UTC) ---\n")
+                for basename, dt in sorted(self.ppg_file_start_times):
+                    file.write(f"{basename}: {dt}\n")
 
     def resolve(self, full_path, sensor):
         res = detect.resolve(
@@ -273,9 +292,23 @@ class DataExtractor():
 
     def read_file(self, full_path, sensor):
         res = self.resolve(full_path, sensor)
-        df, dt = formats.read_bin(full_path, res.spec, strict=self.strict)
+        df, dt = formats.read_bin(full_path, res.spec, strict=self.strict,
+                                  include_cdct=self.options.include_cdct)
         self.malformed += df.attrs.get('malformed_records', 0)
         self.dropped += df.attrs.get('dropped_samples', 0)
+        if res.spec.key in ("ac:v3", "ecg:block_v2"):
+            self.anchor_block_summaries.append((
+                os.path.basename(full_path),
+                df.attrs.get("anchor_counter_first"),
+                df.attrs.get("anchor_counter_last"),
+                df.attrs.get("n_blocks_ok", 0),
+                df.attrs.get("n_blocks_bad", 0),
+            ))
+        else:
+            # A flat PPG-device format (ppg:*, ac:legacy/v2) — the two
+            # container formats (ac:v3, ecg:block_v2) belong to the
+            # MSense4ECG chest device and are excluded here.
+            self.ppg_file_start_times.append((os.path.basename(full_path), dt))
         return df, res
 
     def extract_csv(self, search_prefix, file_name, id=-1):
@@ -326,7 +359,8 @@ class DataExtractor():
             # several distinct recordings, so a legitimate gap *between*
             # recordings is never mistaken for a dropped-sample run within one.
             counter_validity_check(chunk, spec)
-            chunk = _finish_chunk(chunk, is_ac=is_ac, spec=spec)
+            chunk = _finish_chunk(chunk, is_ac=is_ac, spec=spec,
+                                  include_cdct=self.options.include_cdct)
             if whole_frame:
                 pieces.append(chunk)
             else:
@@ -353,16 +387,21 @@ class DataExtractor():
         one-chunk "session") and, for any session spanning more than one chunk,
         restitch CDCT as one continuous clock anchored at that session's t0.
 
-        Container formats need no CDCT recompute:
-        - `ac:v3` (ACF3) anchors every sample to a session-continuous RTC tick
-          per block internally. Chunks are re-ordered by `chunk_index` and a
-          `first_sample_sequence` discontinuity at a chunk boundary (firmware
-          drop, or a missing chunk) is reported.
-        - `ecg:block_v2` (ECF2) makes `CDCT = t0 + Counter/512` where `Counter`
-          is the recording-local sample ordinal that already advances across
-          chunks — so plain concatenation is continuous. ECF2 chunks are
-          re-ordered by `chunk_index` and split by `recording_id`, and a gap
-          in `chunk_index` or `Counter` is reported (not silently joined).
+        Container formats need no CDCT recompute — both are locked to
+        ECG_EXTRACTION_HANDOFF.md's schemas and have no CDCT column at all:
+        - `ac:v3` (ACF3) columns are `SampleSequence`, `RtcTickEstBlock`,
+          `RtcTickEst`, `AccX`, `AccY`, `AccZ`. Chunks are re-ordered by
+          `chunk_index`; a `first_sample_sequence` discontinuity at a chunk
+          boundary (firmware drop, or a missing chunk) is reported, and
+          `RtcTickEst` (the piecewise-linear per-sample tick ramp) is built
+          across the whole session's blocks — see `_stitch_ac_v3_chunks`.
+        - `ecg:block_v2` (ECF2) has no CDCT at all: its output is locked to
+          ECG_EXTRACTION_HANDOFF.md's schema (`SampleIndex`, `RtcTick`, `ECG`,
+          `ETAG`, `PTAG`). `SampleIndex` is the recording-local sample ordinal
+          that already advances across chunks, so plain concatenation is
+          continuous. ECF2 chunks are re-ordered by `chunk_index` and split by
+          `recording_id`, and a gap in `chunk_index` or `SampleIndex` is
+          reported (not silently joined).
         """
         session_dfs, spec = self._collect_session_frames(path, prefix)
         if not session_dfs:
@@ -405,7 +444,10 @@ class DataExtractor():
                 session_dfs.append(dfs[0])
             else:
                 combined = pd.concat(dfs, ignore_index=True)
-                if spec.read_file is None:     # flat per-record formats only
+                # flat per-record formats only, and only when CDCT is wanted —
+                # `read_bin` already omitted it per-chunk when include_cdct is
+                # off (the default), so re-stitching it here would put it back.
+                if spec.read_file is None and self.options.include_cdct:
                     combined = formats.recompute_cdct(combined, spec, t0)
                 session_dfs.append(combined)
 
@@ -442,11 +484,44 @@ def gather_files_by_prefix(prefix: str, path):
     return all_files
 
 
+def _piecewise_linear_ac_tick(block_ticks, block_n_samples):
+    """Per-sample `RtcTickEst`: within each block, ramp linearly from that
+    block's own `RtcTickEstBlock` anchor toward the *next* block's anchor,
+    dividing the actual elapsed ticks by that block's actual sample count (not
+    the nominal 680) — so real per-block rate variation is preserved, and the
+    ramp is exactly continuous at block boundaries (block i+1 starts exactly
+    at its own anchor). `block_ticks`/`block_n_samples` must already span the
+    whole session (every chunk's blocks, in `chunk_index` order — see
+    `_stitch_ac_v3_chunks`), since the last block of one chunk ramps toward
+    the first block of the next. The session's last block has no next anchor
+    to ramp toward; it extrapolates using the previous block's local rate.
+    Ported from ECG_EXTRACTION_HANDOFF.md's `extract_ecg_ac_v3.py`.
+    """
+    n_blocks = len(block_ticks)
+    segments = []
+    prev_rate = 0.0
+    for i in range(n_blocks):
+        n = block_n_samples[i]
+        if i < n_blocks - 1:
+            rate = (block_ticks[i + 1] - block_ticks[i]) / n
+        else:
+            rate = prev_rate
+        segments.append(block_ticks[i] + rate * np.arange(n, dtype=np.float64))
+        prev_rate = rate
+    return np.concatenate(segments) if segments else np.array([], dtype=np.float64)
+
+
 def _stitch_ecb2_chunks(dfs):
     """Order ECF2 chunk DataFrames by `recording_id` then `chunk_index`,
-    report any `chunk_index` or `Counter` discontinuity, and return one
-    concatenated DataFrame per recording (CDCT is already continuous — see
-    `formats._read_ecf2`)."""
+    report any `chunk_index` or `SampleIndex` discontinuity, and return one
+    concatenated DataFrame per recording.
+
+    Unlike `_stitch_ac_v3_chunks`, no global `Counter` offset is added:
+    `SampleIndex` is already the recording-local sample ordinal, continuous by
+    construction across every chunk of one `recording_id` (see
+    `formats._read_ecf2`), so plain concatenation is the whole job — the
+    output column set stays locked to ECG_EXTRACTION_HANDOFF.md's schema.
+    """
     by_recording = {}
     for df in dfs:
         by_recording.setdefault(df.attrs.get("recording_id"), []).append(df)
@@ -471,13 +546,23 @@ def _stitch_ecb2_chunks(dfs):
 
 
 def _stitch_ac_v3_chunks(dfs):
-    """Order ACF3 chunk DataFrames by `chunk_index` and report a
+    """Order ACF3 chunk DataFrames by `chunk_index`, report a
     `first_sample_sequence` discontinuity at a chunk boundary — a firmware drop
     ("a larger difference records the number of missing samples", per the
-    format doc) or a missing chunk. CDCT is already absolute per chunk (each
-    ACB1 block carries its own RTC anchor), so this only concatenates."""
+    format doc) or a missing chunk — and return one concatenated DataFrame for
+    the session with `RtcTickEst` added.
+
+    `RtcTickEst` (the piecewise-linear per-sample tick ramp) is computed here,
+    not per-chunk in `formats._read_ac_v3`, because it can span a chunk
+    boundary: the last block of one chunk ramps toward the first block of the
+    next, so the full session's `(block_tick, n_samples)` list — gathered from
+    every chunk's `block_ticks`/`block_n_samples` attrs, in `chunk_index`
+    order — must be known first. Output columns otherwise stay locked to
+    ECG_EXTRACTION_HANDOFF.md's schema: no global `Counter` offset is added.
+    """
     group = sorted(dfs, key=lambda d: d.attrs.get("chunk_index", 0))
     prev = None
+    session_block_ticks, session_block_n = [], []
     for d in group:
         ci = d.attrs.get("chunk_index", 0)
         if ci == 0 and d.attrs.get("first_seq") not in (None, 0):
@@ -494,7 +579,11 @@ def _stitch_ac_v3_chunks(dfs):
                     print(f"AC session: {gap} sample(s) dropped at the chunk "
                           f"{ci} boundary")
         prev = d
-    return pd.concat(group, ignore_index=True)
+        session_block_ticks.extend(d.attrs.get("block_ticks", []))
+        session_block_n.extend(d.attrs.get("block_n_samples", []))
+    combined = pd.concat(group, ignore_index=True)
+    combined["RtcTickEst"] = _piecewise_linear_ac_tick(session_block_ticks, session_block_n)
+    return combined
 
 
 def counter_validity_check(df: pd.DataFrame, spec=None):
@@ -506,8 +595,19 @@ def counter_validity_check(df: pd.DataFrame, spec=None):
     if spec is None:
         print("pass counter check: N/A (no format resolved)")
         return
-    # The readers append CDCT/init_CDCT, so the last column is not the counter.
-    counter_columns = df[['Counter']] if 'Counter' in df.columns else df.iloc[:, -1:]
+    # Flat ppg/ac layouts (legacy/v2/packed16) use 'Counter'. The two
+    # container formats are locked to ECG_EXTRACTION_HANDOFF.md's schema and
+    # have their own analogous column instead: ecg:block_v2's 'SampleIndex'
+    # and ac:v3's 'SampleSequence'. Absent all three the last column is not
+    # the counter either.
+    if 'Counter' in df.columns:
+        counter_columns = df[['Counter']]
+    elif 'SampleIndex' in df.columns:
+        counter_columns = df[['SampleIndex']]
+    elif 'SampleSequence' in df.columns:
+        counter_columns = df[['SampleSequence']]
+    else:
+        counter_columns = df.iloc[:, -1:]
     counter_arr = numpy.array(counter_columns).flatten()
     diff_arr = numpy.diff(counter_arr)
     step = spec.tick_step
@@ -520,12 +620,12 @@ def counter_validity_check(df: pd.DataFrame, spec=None):
     print("and number of non matching samples: " + str(numpy.count_nonzero(check_array == 0)))
 
 
-def _finish_chunk(data_set, *, is_ac, spec):
-    """Add the human-readable Datetime column and (for AC) convert counts to
-    g — replacing a Python `datetime.fromtimestamp()` + `.strftime()` call per
-    row, the dominant cost of the old single-shot extraction (millions of
-    interpreted calls for a long high-rate recording), not the CSV write it
-    was blamed for.
+def _finish_chunk(data_set, *, is_ac, spec, include_cdct):
+    """Add the human-readable Datetime column (when `include_cdct`) and (for
+    AC) convert counts to g — replacing a Python `datetime.fromtimestamp()` +
+    `.strftime()` call per row, the dominant cost of the old single-shot
+    extraction (millions of interpreted calls for a long high-rate
+    recording), not the CSV write it was blamed for.
 
     Deliberately NOT `pd.to_datetime(...).dt.strftime(...)`: benchmarked at
     ~2.9s for 2M rows vs. ~2.9s for the original per-row loop — pandas'
@@ -536,16 +636,31 @@ def _finish_chunk(data_set, *, is_ac, spec):
     (`numpy.datetime_as_string`), then two vectorized character replaces to
     turn ISO-8601 into this project's on-disk format — ~0.6s for the same 2M
     rows, ~5x the original loop, verified to produce byte-identical strings.
+
+    ecg:block_v2 and ac:v3 output have no `CDCT` column at all — both are
+    locked to ECG_EXTRACTION_HANDOFF.md's schemas (`SampleIndex`/`RtcTick`/
+    `ECG`/`ETAG`/`PTAG` and `SampleSequence`/`RtcTickEstBlock`/`RtcTickEst`/
+    `AccX`/`AccY`/`AccZ` respectively — `AccX/Y/Z` are already in g, converted
+    in `formats._read_ac_v3`), so this is a no-op for both regardless of
+    `include_cdct` rather than fabricating a Datetime column or re-converting
+    units. For the flat ppg/ac formats, `include_cdct=False` (the default)
+    means `read_bin` already omitted `CDCT`/`init_CDCT` (see
+    `ExtractionOptions.include_cdct`), so this skips Datetime too — unit
+    conversion for AC still runs either way, since it has nothing to do with
+    CDCT.
     """
-    try:
-        secs = data_set['CDCT'].to_numpy()
-        if not np.isfinite(secs).all():
-            raise ValueError("non-finite CDCT value(s) — can't convert to a timestamp")
-        iso = np.datetime_as_string(secs.astype(np.int64).astype('datetime64[s]'), unit='s')
-        data_set['Datetime'] = np.char.replace(np.char.replace(iso, '-', '/'), 'T', ' ')
-    except Exception as e:
-        print(str(e))
-        data_set['Datetime'] = -1
+    if spec is not None and spec.key in ("ecg:block_v2", "ac:v3"):
+        return data_set
+    if include_cdct:
+        try:
+            secs = data_set['CDCT'].to_numpy()
+            if not np.isfinite(secs).all():
+                raise ValueError("non-finite CDCT value(s) — can't convert to a timestamp")
+            iso = np.datetime_as_string(secs.astype(np.int64).astype('datetime64[s]'), unit='s')
+            data_set['Datetime'] = np.char.replace(np.char.replace(iso, '-', '/'), 'T', ' ')
+        except Exception as e:
+            print(str(e))
+            data_set['Datetime'] = -1
     if is_ac:
         print("perform unit conversion for IMU")
         data_set = unit_conversion_ac(data_set, spec)
@@ -553,15 +668,12 @@ def _finish_chunk(data_set, *, is_ac, spec):
 
 
 def unit_conversion_ac(data_set, spec=None):
-    """Raw counts -> g. The v3 (ACF3) layout documents its own scale; legacy/v2
-    (the wristband) keep the original conversion so their output is unchanged.
+    """Raw counts -> g, for the legacy/v2 (wristband) IMU layouts — kept
+    unchanged. ac:v3's own scale is applied in `formats._read_ac_v3` instead
+    (its output is already in g), since `_finish_chunk` skips this call for it.
     """
-    if spec is not None and spec.key == "ac:v3":
-        for c in ['AccX', 'AccY', 'AccZ']:
-            data_set[c] = data_set[c] / formats.AC_V3_COUNTS_PER_G
-    else:
-        for c in ['AccX', 'AccY', 'AccZ']:
-            data_set[c] = data_set[c] / (2**16 - 1) * 8
+    for c in ['AccX', 'AccY', 'AccZ']:
+        data_set[c] = data_set[c] / (2**16 - 1) * 8
     return data_set
 
 
