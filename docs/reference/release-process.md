@@ -34,6 +34,14 @@ itself and computes the sha256 — you don't need to copy it from the
 `.sha256` file GitHub Actions attaches (that file exists for manual
 verification, e.g. by someone auditing the cask before merging).
 
+**Gotcha:** `bump-cask-pr` finds the *old* sha256 by searching the file for
+its literal (lowercased) text and replacing it — it only works when the
+cask already carries a real, valid sha256. It cannot fill in a placeholder
+like `"REPLACE_WITH_SHA256"` (fails with `Could not find 'sha256' stanza
+with value ...`, since the placeholder isn't valid lowercase hex to begin
+with). Only relevant the very first time the tap gets a real release —
+after that there's always a real value to bump from.
+
 This is a deliberate manual step, not wired into CI: it would need a
 cross-repo write credential (a PAT stored as a secret in this repo, since the
 default `GITHUB_TOKEN` can't push to `homebrew-plasma`) for a single command
