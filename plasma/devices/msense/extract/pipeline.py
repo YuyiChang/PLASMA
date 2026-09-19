@@ -178,6 +178,7 @@ class DataExtractor():
         self.dropped = 0
         self.out_paths = []
         self.anchor_block_summaries = []    # (basename, first, last, n_ok, n_bad) — README-only
+        self.ppg_file_start_times = []      # (basename, UTC datetime str) — README-only, PPG-device files only
 
         self.encoding_alias = self.get_encoding_alias() if self.df is not None else {}
 
@@ -198,6 +199,7 @@ class DataExtractor():
             file.write(f"Cross-check against uuid.txt = {options.validate_with_uuid}"
                        f" (on conflict: {options.on_format_conflict})\n")
             file.write(f"Strict record validation = {options.strict_ppg}\n")
+            file.write(f"Include CDCT/init_CDCT/Datetime (PPG-device output) = {options.include_cdct}\n")
             file.write(f"Detection threshold = {options.sniff_threshold}\n")
             file.write("I m-sense with YAMS at https://github.com/SenSE-Lab-OSU/YAMS\n")
             uuid_path = os.path.join(self.in_dir, "uuid.txt")
@@ -269,6 +271,13 @@ class DataExtractor():
                 for basename, first, last, n_ok, n_bad in self.anchor_block_summaries:
                     file.write(f"{basename}: AnchorCounter {first}..{last} "
                                f"({n_ok} block(s) ok, {n_bad} bad)\n")
+            if self.ppg_file_start_times:
+                # Recorded regardless of `include_cdct`: once that option is off
+                # (the default), this is the only place a PPG-device file's
+                # start time (its filename-derived t0) still shows up.
+                file.write("\n--- PPG-device file start times (UTC) ---\n")
+                for basename, dt in sorted(self.ppg_file_start_times):
+                    file.write(f"{basename}: {dt}\n")
 
     def resolve(self, full_path, sensor):
         res = detect.resolve(
@@ -283,7 +292,8 @@ class DataExtractor():
 
     def read_file(self, full_path, sensor):
         res = self.resolve(full_path, sensor)
-        df, dt = formats.read_bin(full_path, res.spec, strict=self.strict)
+        df, dt = formats.read_bin(full_path, res.spec, strict=self.strict,
+                                  include_cdct=self.options.include_cdct)
         self.malformed += df.attrs.get('malformed_records', 0)
         self.dropped += df.attrs.get('dropped_samples', 0)
         if res.spec.key in ("ac:v3", "ecg:block_v2"):
@@ -294,6 +304,11 @@ class DataExtractor():
                 df.attrs.get("n_blocks_ok", 0),
                 df.attrs.get("n_blocks_bad", 0),
             ))
+        else:
+            # A flat PPG-device format (ppg:*, ac:legacy/v2) — the two
+            # container formats (ac:v3, ecg:block_v2) belong to the
+            # MSense4ECG chest device and are excluded here.
+            self.ppg_file_start_times.append((os.path.basename(full_path), dt))
         return df, res
 
     def extract_csv(self, search_prefix, file_name, id=-1):
@@ -344,7 +359,8 @@ class DataExtractor():
             # several distinct recordings, so a legitimate gap *between*
             # recordings is never mistaken for a dropped-sample run within one.
             counter_validity_check(chunk, spec)
-            chunk = _finish_chunk(chunk, is_ac=is_ac, spec=spec)
+            chunk = _finish_chunk(chunk, is_ac=is_ac, spec=spec,
+                                  include_cdct=self.options.include_cdct)
             if whole_frame:
                 pieces.append(chunk)
             else:
@@ -428,7 +444,10 @@ class DataExtractor():
                 session_dfs.append(dfs[0])
             else:
                 combined = pd.concat(dfs, ignore_index=True)
-                if spec.read_file is None:     # flat per-record formats only
+                # flat per-record formats only, and only when CDCT is wanted —
+                # `read_bin` already omitted it per-chunk when include_cdct is
+                # off (the default), so re-stitching it here would put it back.
+                if spec.read_file is None and self.options.include_cdct:
                     combined = formats.recompute_cdct(combined, spec, t0)
                 session_dfs.append(combined)
 
@@ -601,12 +620,12 @@ def counter_validity_check(df: pd.DataFrame, spec=None):
     print("and number of non matching samples: " + str(numpy.count_nonzero(check_array == 0)))
 
 
-def _finish_chunk(data_set, *, is_ac, spec):
-    """Add the human-readable Datetime column and (for AC) convert counts to
-    g — replacing a Python `datetime.fromtimestamp()` + `.strftime()` call per
-    row, the dominant cost of the old single-shot extraction (millions of
-    interpreted calls for a long high-rate recording), not the CSV write it
-    was blamed for.
+def _finish_chunk(data_set, *, is_ac, spec, include_cdct):
+    """Add the human-readable Datetime column (when `include_cdct`) and (for
+    AC) convert counts to g — replacing a Python `datetime.fromtimestamp()` +
+    `.strftime()` call per row, the dominant cost of the old single-shot
+    extraction (millions of interpreted calls for a long high-rate
+    recording), not the CSV write it was blamed for.
 
     Deliberately NOT `pd.to_datetime(...).dt.strftime(...)`: benchmarked at
     ~2.9s for 2M rows vs. ~2.9s for the original per-row loop — pandas'
@@ -622,20 +641,26 @@ def _finish_chunk(data_set, *, is_ac, spec):
     locked to ECG_EXTRACTION_HANDOFF.md's schemas (`SampleIndex`/`RtcTick`/
     `ECG`/`ETAG`/`PTAG` and `SampleSequence`/`RtcTickEstBlock`/`RtcTickEst`/
     `AccX`/`AccY`/`AccZ` respectively — `AccX/Y/Z` are already in g, converted
-    in `formats._read_ac_v3`), so this is a no-op for both rather than
-    fabricating a Datetime column or re-converting units.
+    in `formats._read_ac_v3`), so this is a no-op for both regardless of
+    `include_cdct` rather than fabricating a Datetime column or re-converting
+    units. For the flat ppg/ac formats, `include_cdct=False` (the default)
+    means `read_bin` already omitted `CDCT`/`init_CDCT` (see
+    `ExtractionOptions.include_cdct`), so this skips Datetime too — unit
+    conversion for AC still runs either way, since it has nothing to do with
+    CDCT.
     """
     if spec is not None and spec.key in ("ecg:block_v2", "ac:v3"):
         return data_set
-    try:
-        secs = data_set['CDCT'].to_numpy()
-        if not np.isfinite(secs).all():
-            raise ValueError("non-finite CDCT value(s) — can't convert to a timestamp")
-        iso = np.datetime_as_string(secs.astype(np.int64).astype('datetime64[s]'), unit='s')
-        data_set['Datetime'] = np.char.replace(np.char.replace(iso, '-', '/'), 'T', ' ')
-    except Exception as e:
-        print(str(e))
-        data_set['Datetime'] = -1
+    if include_cdct:
+        try:
+            secs = data_set['CDCT'].to_numpy()
+            if not np.isfinite(secs).all():
+                raise ValueError("non-finite CDCT value(s) — can't convert to a timestamp")
+            iso = np.datetime_as_string(secs.astype(np.int64).astype('datetime64[s]'), unit='s')
+            data_set['Datetime'] = np.char.replace(np.char.replace(iso, '-', '/'), 'T', ' ')
+        except Exception as e:
+            print(str(e))
+            data_set['Datetime'] = -1
     if is_ac:
         print("perform unit conversion for IMU")
         data_set = unit_conversion_ac(data_set, spec)

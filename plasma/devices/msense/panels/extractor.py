@@ -48,6 +48,9 @@ class ExtractionOptionsPanel:
                                                    info="Content wins unless trust_uuid")
                 self.strict_ppg = gr.Checkbox(False, label="Strict record validation")
                 self.force_new_format = gr.Checkbox(False, label="Assume v4.7.0+ (fallback only)")
+                self.include_cdct = gr.Checkbox(
+                    False, label="Include CDCT/Datetime",
+                    info="PPG-device files only — start time is always in README.txt regardless")
             with gr.Accordion("Help", open=False):
                 gr.Markdown(FORMAT_HELP)
 

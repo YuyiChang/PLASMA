@@ -707,10 +707,17 @@ def whole_records(data, spec):
     return b[: written[-1] + 1]
 
 
-def read_bin(filepath, spec, strict=False):
+def read_bin(filepath, spec, strict=False, include_cdct=True):
     """Decode one binary file with `spec`. Returns (DataFrame, datetime string).
 
     Malformed records are dropped and counted; `strict` raises instead.
+
+    `include_cdct` (flat per-record formats only — container formats never
+    had CDCT and ignore this): when `False`, skip `recompute_cdct` and don't
+    attach `CDCT`/`init_CDCT` at all. The pipeline defaults this to `False`
+    for actual extraction (see `ExtractionOptions.include_cdct`); this
+    function's own default stays `True` so direct callers (tests, notebooks)
+    keep seeing the historical columns unless they ask otherwise.
     """
     if spec.read_file is not None:
         return spec.read_file(filepath, strict)
@@ -762,7 +769,8 @@ def read_bin(filepath, spec, strict=False):
             f"Is this file really in the {spec.sensor}/{spec.name} format?")
 
     t0, dt = get_CDCT_init(filepath)
-    df = recompute_cdct(df, spec, t0)
+    if include_cdct:
+        df = recompute_cdct(df, spec, t0)
 
     df.attrs['malformed_records'] = n_bad
     df.attrs['trailing_bytes'] = remainder

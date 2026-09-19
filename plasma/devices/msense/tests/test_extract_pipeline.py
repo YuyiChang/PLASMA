@@ -271,7 +271,8 @@ def test_datetime_column_matches_vectorized_and_scalar_conversion():
         with open(os.path.join(src, f"ppg{t0}.bin"), "wb") as f:
             f.write(_w_ppg_v2(50))
         report = extract_dir(src, out,
-                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv",
+                                                       include_cdct=True))
         df = pd.read_csv(report.out_paths[0])
 
         expected_first = datetime.fromtimestamp(t0, timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
@@ -279,6 +280,51 @@ def test_datetime_column_matches_vectorized_and_scalar_conversion():
         # every row's Datetime matches a fresh scalar conversion of its own CDCT
         for cdct, dt in zip(df["CDCT"].iloc[::7], df["Datetime"].iloc[::7]):
             assert dt == datetime.fromtimestamp(int(cdct), timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+
+
+def test_ppg_ac_omit_cdct_by_default():
+    """`include_cdct` defaults to False: PPG/AC (legacy/v2, the wristband
+    formats) output no longer carries CDCT/init_CDCT/Datetime unless asked."""
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        with open(os.path.join(src, "ppg1700000000.bin"), "wb") as f:
+            f.write(_w_ppg_v2(50))
+        with open(os.path.join(src, "ac1700000000.bin"), "wb") as f:
+            f.write(_w_ac_v2(50))
+        report = extract_dir(src, out,
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+
+        ppg_df = pd.read_csv([p for p in report.out_paths if p.endswith("ppg.csv")][0])
+        ac_df = pd.read_csv([p for p in report.out_paths if p.endswith("ac.csv")][0])
+        for df in (ppg_df, ac_df):
+            assert "CDCT" not in df.columns
+            assert "init_CDCT" not in df.columns
+            assert "Datetime" not in df.columns
+        # AC unit conversion still happens regardless of include_cdct
+        assert ac_df["AccX"].abs().max() < 8.0001
+
+
+def test_readme_records_ppg_device_file_start_times():
+    """A new README table records each PPG-device file's (ppg/ac legacy/v2)
+    start time in UTC, independent of `include_cdct` — it's the only place
+    that survives once CDCT/Datetime are dropped from the CSV by default.
+    ac:v3/ecg:block_v2 (the MSense4ECG chest device) are excluded."""
+    from datetime import datetime, timezone
+    t0 = 1700000000
+    expected_dt = datetime.fromtimestamp(t0, timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        with open(os.path.join(src, f"ppg{t0}.bin"), "wb") as f:
+            f.write(_w_ppg_v2(50))
+        with open(os.path.join(src, f"ac{t0}.bin"), "wb") as f:
+            f.write(_w_ac_v2(50))
+        with open(os.path.join(src, f"ecg{t0}.bin"), "wb") as f:
+            f.write(_w_ecf2(1))
+        report = extract_dir(src, out, options=ExtractionOptions(ignore_id_parsing=True))
+
+        readme = open(report.readme_path).read()
+        assert "--- PPG-device file start times (UTC) ---" in readme
+        assert f"ppg{t0}.bin: {expected_dt}" in readme
+        assert f"ac{t0}.bin: {expected_dt}" in readme
+        assert f"ecg{t0}.bin" not in readme.split("--- PPG-device file start times (UTC) ---")[1]
 
 
 def test_multiple_sessions_under_one_prefix_are_chunk_written():
@@ -291,7 +337,8 @@ def test_multiple_sessions_under_one_prefix_are_chunk_written():
         with open(os.path.join(src, "ppg1800000000.bin"), "wb") as f:
             f.write(_w_ppg_v2(40))
         report = extract_dir(src, out,
-                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+                             options=ExtractionOptions(ignore_id_parsing=True, save_format="csv",
+                                                       include_cdct=True))
         df = pd.read_csv(report.out_paths[0])
 
         assert len(df) == 30 + 40
@@ -337,9 +384,10 @@ def test_multiple_sessions_under_one_prefix_feather_matches_csv():
             f.write(_w_ppg_v2(40))
 
         r_csv = extract_dir(src, out_csv,
-                            options=ExtractionOptions(ignore_id_parsing=True, save_format="csv"))
+                            options=ExtractionOptions(ignore_id_parsing=True, save_format="csv",
+                                                      include_cdct=True))
         r_feather = extract_dir(src, out_feather,
-                                options=ExtractionOptions(ignore_id_parsing=True))
+                                options=ExtractionOptions(ignore_id_parsing=True, include_cdct=True))
 
         df_csv = pd.read_csv(r_csv.out_paths[0])
         df_feather = pd.read_feather(r_feather.out_paths[0])

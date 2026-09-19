@@ -46,6 +46,14 @@ disagree. It is off by default and does not override detection: use
 **Strict record validation**: raise on a record that fails its integrity check
 (packed16 reserved bits, ECG CRC, a partial trailing record) instead of dropping
 it and reporting a count.
+
+**Include CDCT/Datetime** (off by default): PPG/IMU `legacy`/`v2`/`packed16`
+output no longer carries `CDCT`/`init_CDCT`/`Datetime` unless this is ticked —
+`ecg:block_v2` and IMU `v3` never had these columns to begin with (see their
+locked schemas above). Every PPG-device file's start time (UTC, from its
+filename) is always recorded in `README.txt` regardless of this setting, so
+turn it on only if you need the per-row columns themselves (e.g. to feed
+`clocksync.py`, which is CSV/`Counter`+`CDCT`-based).
 """
 
 
@@ -71,6 +79,12 @@ class ExtractionOptions:
     on_format_conflict: str = "warn"
     strict_ppg: bool = False
     force_new_format: bool = False
+    # Off by default: PPG-device output (ppg:*, ac:legacy/v2) no longer carries
+    # CDCT/init_CDCT/Datetime. ecg:block_v2 and ac:v3 never had these columns
+    # regardless of this setting (see formats.py's locked schemas). Each
+    # PPG-device file's start time is always written to README.txt instead —
+    # see DataExtractor.write_provenance.
+    include_cdct: bool = False
     sniff_threshold: float = field(default=0.90, metadata={"panel": False})
     dry_run: bool = field(default=False, metadata={"panel": False})
 
@@ -96,6 +110,7 @@ class ExtractionOptions:
             on_format_conflict=args.on_format_conflict,
             strict_ppg=args.strict_ppg,
             force_new_format=args.force_new_format,
+            include_cdct=args.include_cdct,
             sniff_threshold=args.sniff_threshold,
             dry_run=args.dry_run,
         )
