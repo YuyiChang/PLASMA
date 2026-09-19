@@ -98,3 +98,23 @@ def common_datas():
     for pkg in ("gradio_client", "gradio", "safehttpx", "groovy"):
         d += collect_data_files(pkg)
     return d
+
+
+def strip_mpl_bundled_fonts(a):
+    """Drop matplotlib's own bundled fonts (``mpl-data/fonts/...``) from an
+    already-built ``Analysis``, in place. Call after ``Analysis(...)``, before
+    ``PYZ``/``EXE``.
+
+    All three app_*.spec files build in PyInstaller's onefile mode
+    (``runtime_tmpdir=None``, no ``COLLECT()``), which re-extracts the whole
+    bundle to a fresh random temp directory on every launch. Matplotlib's
+    font cache (persistent, under the user's real home/cache dir) records the
+    absolute paths of every font it indexed, including its own bundled ones —
+    which live inside that volatile temp dir. Next launch, those paths are
+    gone, so matplotlib decides the fonts changed and rebuilds its *entire*
+    font cache from scratch, every single time, not just on first run.
+    Excluding the bundled fonts means matplotlib only ever indexes genuinely
+    stable system fonts, at the cost of losing its bundled DejaVu Sans/STIX
+    as a font choice (falls back to a system sans-serif instead).
+    """
+    a.datas = [t for t in a.datas if "mpl-data/fonts" not in t[0].replace(os.sep, "/")]

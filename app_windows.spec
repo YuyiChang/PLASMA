@@ -9,7 +9,7 @@ import os, sys, pylsl
 _SPEC_DIR = globals().get('SPECPATH') or os.path.dirname(os.path.abspath(SPEC))
 if _SPEC_DIR not in sys.path:
     sys.path.insert(0, _SPEC_DIR)
-from spec_common import common_datas, plasma_datas, plasma_hiddenimports
+from spec_common import common_datas, plasma_datas, plasma_hiddenimports, strip_mpl_bundled_fonts
 
 datas = common_datas() + plasma_datas()
 
@@ -30,6 +30,7 @@ a = Analysis(
         'gradio': 'py',  # Collect gradio package as source .py files
     },
 )
+strip_mpl_bundled_fonts(a)
 pyz = PYZ(a.pure)
 
 exe = EXE(
