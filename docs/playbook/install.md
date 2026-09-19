@@ -31,6 +31,43 @@ PLASMA runs a local web server and opens in your browser at
     ./PLASMA_MacOS_arm64
     ```
 
+=== "From PyPI (pip)"
+
+    Installs the latest published release, no clone needed. You still need
+    [`liblsl`](https://github.com/sccn/liblsl) — a native library pip cannot
+    supply everywhere; conda-forge is the reliable source.
+
+    ```bash
+    conda create -n plasma python=3.12
+    conda activate plasma
+    conda install -c conda-forge liblsl
+    pip install "plasma-app[all]"    # or a lean subset: "plasma-app[msense]", "plasma-app[qb2,pupil]"
+    plasma
+    ```
+
+    !!! warning "Don't skip `liblsl`"
+        It is the step most installs miss. Without it the built-in recorder
+        reports *unavailable* and no XDF is written.
+
+    !!! tip "zsh users: quote the extras"
+        `pip install plasma-app[desktop]` fails in zsh with "no matches
+        found" — `[...]` is glob syntax there. Quote the whole spec:
+        `pip install "plasma-app[desktop]"`.
+
+    `pip install` only puts `plasma` on `$PATH` — it doesn't add a clickable
+    icon anywhere. For a Desktop (and Start Menu / app-launcher) icon that
+    launches this environment's PLASMA without a terminal command:
+
+    ```bash
+    pip install "plasma-app[desktop]"
+    plasma-install-shortcut
+    ```
+
+    Add `--no-terminal` to hide the console window (macOS: uses an Automator
+    wrapper and may need a one-time Gatekeeper approval), or
+    `--no-startmenu` for a Desktop-only icon. See
+    `plasma-install-shortcut --help`.
+
 === "From source"
 
     For development or to run unreleased changes. You need

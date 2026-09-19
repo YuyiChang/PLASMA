@@ -16,7 +16,9 @@ notes in the packaging discussion for why.
 
     plasma-install-shortcut [--name NAME] [--no-terminal] [--no-startmenu]
 
-Requires the ``desktop`` extra (``pip install plasma-app[desktop]``).
+Requires the ``desktop`` extra (``pip install "plasma-app[desktop]"`` —
+quote it, or zsh's glob expansion on ``[...]`` will fail with "no matches
+found").
 """
 from __future__ import annotations
 
@@ -76,7 +78,7 @@ def install_shortcut(name="PLASMA", terminal=True, startmenu=True, folder=None):
     except ImportError as e:
         raise ImportError(
             "pyshortcuts is required to create a desktop shortcut — install "
-            "it with `pip install plasma-app[desktop]`."
+            'it with `pip install "plasma-app[desktop]"`.'
         ) from e
 
     return make_shortcut(
