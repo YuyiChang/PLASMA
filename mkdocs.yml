@@ -95,3 +95,4 @@ nav:
       - Failure levels (internal): reference/failure-levels.md
       - MSense reconnect behaviour (internal): reference/msense-reconnect.md
       - LSL lifecycle & scoping (internal): reference/lsl-lifecycle-and-scoping.md
+      - Cutting a release (internal): reference/release-process.md

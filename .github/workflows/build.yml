@@ -63,10 +63,18 @@ jobs:
           PLASMA_BIN: dist/PLASMA_MacOS_arm64
         run: bash .github/smoke_test.sh
 
+      # sha256 for the Homebrew cask (Casks/plasma.rb) — pin the download to
+      # a known-good checksum rather than trusting the tarball at bump time.
+      - name: Checksum
+        shell: bash -el {0}
+        run: shasum -a 256 dist/PLASMA_MacOS_arm64 > dist/PLASMA_MacOS_arm64.sha256
+
       - uses: actions/upload-artifact@v4
         with:
           name: PLASMA-MacOS-arm64
-          path: dist/PLASMA_MacOS_arm64
+          path: |
+            dist/PLASMA_MacOS_arm64
+            dist/PLASMA_MacOS_arm64.sha256
 
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
@@ -74,7 +82,9 @@ jobs:
           tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
           name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
           prerelease: ${{ github.event_name == 'schedule' }}
-          files: dist/PLASMA_MacOS_arm64
+          files: |
+            dist/PLASMA_MacOS_arm64
+            dist/PLASMA_MacOS_arm64.sha256
 
   build-linux:
     needs: test
