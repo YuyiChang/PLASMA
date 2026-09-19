@@ -36,7 +36,7 @@ import os
 import sys
 from dataclasses import dataclass, replace
 
-__all__ = ["AppContext", "app_context", "configure", "reset"]
+__all__ = ["AppContext", "app_context", "configure", "reset", "user_data_dir"]
 
 
 @dataclass(frozen=True)
@@ -71,8 +71,13 @@ _ctx: AppContext | None = None
 _DEFAULT_APP_DIR = "PLASMA"
 
 
-def _user_data_dir(app: str = _DEFAULT_APP_DIR) -> str:
-    """Per-user, per-OS application-data directory (stdlib, no platformdirs)."""
+def user_data_dir(app: str = _DEFAULT_APP_DIR) -> str:
+    """Per-user, per-OS application-data directory (stdlib, no platformdirs).
+
+    Public so other entry points (e.g. ``plasma.desktop_shortcut``) can target
+    the same directory a frozen build would resolve to, without themselves
+    running frozen.
+    """
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or os.path.join(
             os.path.expanduser("~"), "AppData", "Local")
@@ -95,7 +100,7 @@ def _from_env() -> AppContext:
     if env:
         return AppContext(home=env)
     if _is_frozen():
-        return AppContext(home=_user_data_dir())
+        return AppContext(home=user_data_dir())
     return AppContext(home=os.getcwd())
 
 

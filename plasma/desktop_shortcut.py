@@ -14,6 +14,14 @@ Points the shortcut directly at *this* environment's ``plasma`` console-script
 than re-deriving a `python -m ...` invocation — see the pyshortcuts prototype
 notes in the packaging discussion for why.
 
+The shortcut's working directory is pinned to the same per-OS app-data dir a
+frozen PyInstaller build resolves to (``plasma.app_context.user_data_dir``),
+not left to whatever the OS defaults a new shortcut to (``$HOME`` on
+Windows/Linux; an unspecified Terminal default on macOS). Since
+``plasma.app_context`` falls back to the working directory for a non-frozen
+process, this keeps the Desktop-icon launch and a downloaded prebuilt binary
+reading/writing config from the same place.
+
     plasma-install-shortcut [--name NAME] [--no-terminal] [--no-startmenu]
 
 Requires the ``desktop`` extra (``pip install "plasma-app[desktop]"`` —
@@ -27,6 +35,8 @@ import os
 import shutil
 import sys
 from pathlib import Path
+
+from plasma.app_context import user_data_dir
 
 _ICON_DIR = Path(__file__).parent / "resources" / "icons"
 
@@ -62,6 +72,35 @@ def _plasma_executable() -> str:
     )
 
 
+def _target_home() -> str:
+    """Where the shortcut should run PLASMA from — the same per-OS app-data
+    dir a frozen build resolves to (``$PLASMA_HOME`` still wins if set,
+    matching ``app_context``'s own precedence)."""
+    return os.environ.get("PLASMA_HOME") or user_data_dir()
+
+
+def _launch_script(target_home: str) -> str:
+    """Path handed to pyshortcuts as the thing to run.
+
+    On Windows/Linux, pyshortcuts writes ``target_home`` into the shortcut
+    itself (the ``.lnk`` ``WorkingDirectory`` / the ``.desktop`` ``Path=``
+    key), so the plain console-script is enough. On macOS, pyshortcuts'
+    Terminal/Automator launcher never applies ``working_dir`` at all — so we
+    wrap the console-script in a tiny shell script that ``cd``s first.
+    """
+    exe = _plasma_executable()
+    if sys.platform != "darwin":
+        return exe
+    wrapper = Path(target_home) / "plasma-launch.sh"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'cd "{target_home}" || exit 1\n'
+        f'exec "{exe}"\n'
+    )
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
 def install_shortcut(name="PLASMA", terminal=True, startmenu=True, folder=None):
     """Create the Desktop (+ Start Menu, if requested) shortcut. Returns the
     ``pyshortcuts.Shortcut`` namedtuple describing what was written.
@@ -81,16 +120,20 @@ def install_shortcut(name="PLASMA", terminal=True, startmenu=True, folder=None):
             'it with `pip install "plasma-app[desktop]"`.'
         ) from e
 
+    target_home = _target_home()
+    os.makedirs(target_home, exist_ok=True)
+
     return make_shortcut(
-        script=_plasma_executable(),
+        script=_launch_script(target_home),
         name=name,
         description="PLASMA sensor acquisition dashboard",
         icon=_icon_path(),
         terminal=terminal,
         desktop=True,
         startmenu=startmenu,  # pyshortcuts itself no-ops this on macOS
+        working_dir=target_home,
         folder=folder,
-        noexe=True,  # script is already a standalone console-script binary
+        noexe=True,  # script is already a standalone console-script/wrapper
     )
 
 
@@ -116,7 +159,13 @@ def main(argv=None):
         startmenu=not args.no_startmenu,
     )
     print(f"Created shortcut: {scut.target}")
-    print(f"  runs:    {scut.script}")
+    # NOTE: not scut.script/scut.full_script — pyshortcuts splits `script` on
+    # its first space to separate a script from trailing arguments, which
+    # mangles this when the path itself contains a space (e.g. macOS's
+    # "Application Support"). The shortcut it writes is still correct; only
+    # the returned namedtuple's script fields are truncated for display.
+    print(f"  runs:    {_plasma_executable()}")
+    print(f"  in:      {scut.working_dir}")
     print(f"  desktop: {scut.desktop_dir}")
     if scut.startmenu_dir:
         print(f"  menu:    {scut.startmenu_dir}")

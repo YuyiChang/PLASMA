@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from plasma import app_context
-from plasma.app_context import AppContext, configure, _user_data_dir
+from plasma.app_context import AppContext, configure, user_data_dir
 
 
 def test_defaults_derive_from_plasma_home(tmp_path, monkeypatch):
@@ -35,7 +35,7 @@ def test_frozen_bundle_uses_per_os_user_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.chdir(tmp_path)   # cwd must be ignored
     app_context.reset()
-    assert app_context.app_context().home == _user_data_dir("PLASMA")
+    assert app_context.app_context().home == user_data_dir("PLASMA")
     assert str(tmp_path) not in app_context.app_context().home
 
 
@@ -59,7 +59,7 @@ def test_user_data_dir_per_platform(plat, env, expected_tail, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    assert _user_data_dir("PLASMA").endswith(expected_tail)
+    assert user_data_dir("PLASMA").endswith(expected_tail)
 
 
 def test_configure_overrides_and_is_sticky(tmp_path, monkeypatch):
