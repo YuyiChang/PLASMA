@@ -63,11 +63,32 @@ jobs:
           PLASMA_BIN: dist/PLASMA_MacOS_arm64
         run: bash .github/smoke_test.sh
 
+      # .app bundle for the Homebrew cask / a double-clickable Applications
+      # icon — see build_macos_app.sh for why this isn't PyInstaller's own
+      # BUNDLE() (console=True there implies LSBackgroundOnly=True, which
+      # hides the app and any startup failure along with it).
+      - name: Build .app bundle
+        shell: bash -el {0}
+        run: |
+          VERSION="$(python3 -c 'import re,pathlib; print(re.search(r"__version__ = \"(.*)\"", pathlib.Path("plasma/__init__.py").read_text())[1])')"
+          bash .github/build_macos_app.sh dist/PLASMA_MacOS_arm64 "$VERSION"
+
+      - name: Verify .app structure
+        shell: bash -el {0}
+        run: |
+          rm -rf /tmp/plasma_app_check
+          ditto -x -k dist/PLASMA_MacOS_arm64.app.zip /tmp/plasma_app_check
+          test -x /tmp/plasma_app_check/PLASMA.app/Contents/MacOS/PLASMA
+          test -x /tmp/plasma_app_check/PLASMA.app/Contents/Resources/plasma-bin
+          plutil -lint /tmp/plasma_app_check/PLASMA.app/Contents/Info.plist
+
       # sha256 for the Homebrew cask (Casks/plasma.rb) — pin the download to
       # a known-good checksum rather than trusting the tarball at bump time.
       - name: Checksum
         shell: bash -el {0}
-        run: shasum -a 256 dist/PLASMA_MacOS_arm64 > dist/PLASMA_MacOS_arm64.sha256
+        run: |
+          shasum -a 256 dist/PLASMA_MacOS_arm64 > dist/PLASMA_MacOS_arm64.sha256
+          shasum -a 256 dist/PLASMA_MacOS_arm64.app.zip > dist/PLASMA_MacOS_arm64.app.zip.sha256
 
       - uses: actions/upload-artifact@v4
         with:
@@ -75,6 +96,8 @@ jobs:
           path: |
             dist/PLASMA_MacOS_arm64
             dist/PLASMA_MacOS_arm64.sha256
+            dist/PLASMA_MacOS_arm64.app.zip
+            dist/PLASMA_MacOS_arm64.app.zip.sha256
 
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
@@ -85,6 +108,8 @@ jobs:
           files: |
             dist/PLASMA_MacOS_arm64
             dist/PLASMA_MacOS_arm64.sha256
+            dist/PLASMA_MacOS_arm64.app.zip
+            dist/PLASMA_MacOS_arm64.app.zip.sha256
 
   build-linux:
     needs: test

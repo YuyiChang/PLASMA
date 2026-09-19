@@ -9,7 +9,11 @@ Pushing a `vX.Y.Z` tag (matching `plasma.__version__`, enforced by
 
 - `build.yml` — builds `PLASMA_MacOS_arm64` / `PLASMA_Linux_x64` /
   `PLASMA_Linux_arm64` / `PLASMA_Windows_x64.exe`, smoke-tests each, and
-  attaches them (plus `PLASMA_MacOS_arm64.sha256`) to the GitHub Release.
+  attaches them to the GitHub Release. The macOS job also wraps the binary
+  in `PLASMA_MacOS_arm64.app.zip` (`.github/build_macos_app.sh` — the
+  Homebrew cask's install target; see the "why not PyInstaller's own
+  `BUNDLE()`" comment at the top of that script). Both macOS assets get a
+  companion `.sha256` file.
 - `publish.yml` — builds the sdist/wheel and publishes `plasma-app` to PyPI.
 
 Both are source-of-truth downstream of the tag; nothing else needs to run to
@@ -25,10 +29,10 @@ brew bump-cask-pr --version <new-version> --write-only yuyichang/plasma/plasma
 git -C "$(brew --repo yuyichang/plasma)" diff   # review, then commit + push
 ```
 
-`brew bump-cask-pr` downloads the new release's `PLASMA_MacOS_arm64` itself
-and computes the sha256 — you don't need to copy it from the `.sha256` file
-GitHub Actions attaches (that file exists for manual verification, e.g. by
-someone auditing the cask before merging).
+`brew bump-cask-pr` downloads the new release's `PLASMA_MacOS_arm64.app.zip`
+itself and computes the sha256 — you don't need to copy it from the
+`.sha256` file GitHub Actions attaches (that file exists for manual
+verification, e.g. by someone auditing the cask before merging).
 
 This is a deliberate manual step, not wired into CI: it would need a
 cross-repo write credential (a PAT stored as a secret in this repo, since the

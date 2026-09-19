@@ -1,8 +1,8 @@
 cask "plasma" do
   version "2.2.0"
-  sha256 "REPLACE_WITH_SHA256" # from PLASMA_MacOS_arm64.sha256 on the v#{version} release
+  sha256 "REPLACE_WITH_SHA256" # from PLASMA_MacOS_arm64.app.zip.sha256 on the v#{version} release
 
-  url "https://github.com/YuyiChang/PLASMA/releases/download/v#{version}/PLASMA_MacOS_arm64"
+  url "https://github.com/YuyiChang/PLASMA/releases/download/v#{version}/PLASMA_MacOS_arm64.app.zip"
   name "PLASMA"
   desc "Platform for LSL-based Acquisition of Sensor Metrics and Analytics"
   homepage "https://github.com/YuyiChang/PLASMA"
@@ -10,14 +10,17 @@ cask "plasma" do
   # only the Apple-silicon binary is built (see .github/workflows/build.yml)
   depends_on arch: :arm64
 
-  binary "PLASMA_MacOS_arm64", target: "plasma"
+  app "PLASMA.app"
+  # Also expose the console binary directly as `plasma`, for anyone who'd
+  # rather skip PLASMA.app's Terminal-launcher indirection (see
+  # .github/build_macos_app.sh — the .app has no window of its own; it opens
+  # this same binary in a visible Terminal window so startup failures stay
+  # visible instead of failing silently in the background).
+  binary "#{appdir}/PLASMA.app/Contents/Resources/plasma-bin", target: "plasma"
 
-  # The binary ships unsigned (codesign_identity=None in app_macos.spec), so
-  # Gatekeeper quarantines it on download like any other unsigned executable.
-  # Clear it the same way the install docs tell a manual downloader to.
   postflight do
     system_command "/usr/bin/xattr",
-                    args: ["-dr", "com.apple.quarantine", "#{staged_path}/PLASMA_MacOS_arm64"]
+                    args: ["-dr", "com.apple.quarantine", "#{appdir}/PLASMA.app"]
   end
 
   livecheck do
@@ -29,7 +32,8 @@ cask "plasma" do
     PLASMA is not code-signed or notarized; this cask clears the
     com.apple.quarantine attribute so Gatekeeper won't block the first run.
 
-    Run `plasma`, then open http://127.0.0.1:7860 in a browser.
+    Launching PLASMA.app opens a Terminal window running the real console
+    app. Prefer a plain terminal instead? Run `plasma` directly.
 
     Config, gyro-bias calibration and recordings are written to
     ~/Library/Application Support/PLASMA — not the working directory or a
