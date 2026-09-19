@@ -119,14 +119,23 @@ def w_ac_v3_terminal(valid_len, bad_crc=False, bad_magic=False):
     return bytes(t)
 
 
-def w_ac_v3_file(blocks, terminal=True, valid_len=None):
+def w_ac_v3_file(blocks, terminal=True, valid_len=None, header=None):
     """Assemble a full 4 MiB ACF3 file. `blocks` are already-built block byte strings."""
     region = b"".join(blocks)
     region += bytes(AC_V3_REGION_SIZE - len(region))     # preallocated tail
     if valid_len is None:
         valid_len = sum(len(b) for b in blocks)
     trailer = w_ac_v3_terminal(valid_len) if terminal else bytes(4096)
-    return w_ac_v3_header() + region + trailer
+    return (header if header is not None else w_ac_v3_header()) + region + trailer
+
+
+def w_ac_v3_stale_header():
+    """The observed firmware quirk on a session's first chunk: magic `ACF2`,
+    format_version 1, sample_format 0, and crc/odr/anchor left zero — see
+    docs/ACCELEROMETER_BINARY_FORMAT.md, "Stale first-chunk header"."""
+    h = bytearray(4096)
+    struct.pack_into("<4sHH", h, 0, b"ACF2", 1, 0)
+    return bytes(h)
 
 
 def straight_samples(n, start=0):
@@ -263,8 +272,13 @@ def test_ecf2_detects_and_decodes():
     df, _ = read_bin(p, get_spec("ecg", "block_v2"))
     os.unlink(p)
     assert len(df) == 4 * 1358
-    assert list(df.columns[:4]) == ["ECG", "ETAG", "PTAG", "Counter"]
-    assert df["Counter"].iloc[0] == 0 and df["Counter"].iloc[-1] == 4 * 1358 - 1
+    # `Counter` (OrigCounter + a session-wide AnchorCounter offset) is added by
+    # the pipeline's chunk-stitching step, not by this raw per-file decode —
+    # see test_extract_ecf2_single_file for that.
+    assert list(df.columns[:4]) == ["ECG", "ETAG", "PTAG", "OrigCounter"]
+    assert df["OrigCounter"].iloc[0] == 0 and df["OrigCounter"].iloc[-1] == 4 * 1358 - 1
+    assert df.attrs["anchor_counter_first"] == 1000
+    assert df.attrs["anchor_counter_last"] == 1000 + 1358 * 3
     assert df.attrs["recording_id"] == 0x0123456789ABCDEF
 
 
@@ -511,10 +525,40 @@ def test_ac_v3_round_trip_full_and_short_block():
     short = w_ac_v3_block(680, straight_samples(50, 680), anchor_tick=1619)
     p = write_tmp(w_ac_v3_file([full, short]), "ac")
     df, _ = read_bin(p, spec)
-    assert list(df.columns) == ["AccX", "AccY", "AccZ", "Counter", "CDCT", "init_CDCT"]
+    # `Counter` (OrigCounter + a session-wide AnchorCounter offset) is added by
+    # the pipeline's chunk-stitching step, not by this raw per-file decode.
+    assert list(df.columns) == ["AccX", "AccY", "AccZ", "OrigCounter", "CDCT", "init_CDCT"]
     assert len(df) == 730
-    assert list(df["Counter"]) == list(range(730))
+    assert list(df["OrigCounter"]) == list(range(730))
+    assert df.attrs["anchor_counter_first"] == 1000
+    assert df.attrs["anchor_counter_last"] == 1619
     assert df.attrs["malformed_records"] == 0
+
+
+def test_ac_v3_decodes_despite_stale_first_chunk_header(capsys):
+    """A session's first chunk can carry a stale `ACF2`/1/0 header with the
+    crc/odr/anchor fields left zero. Detection and decoding must key off the
+    `ACB1`/`ACT2` structure, not the header's self-description, and must not
+    raise — only v3 is ever produced in production/test."""
+    b0 = w_ac_v3_block(0, straight_samples(680, 0), anchor_tick=1000)
+    b1 = w_ac_v3_block(680, straight_samples(680, 680), anchor_tick=1619)
+    data = w_ac_v3_file([b0, b1], header=w_ac_v3_stale_header())
+
+    found, scores, best, runner_up = detect_spec(data, "ac")
+    assert found is not None and found.name == "v3", scores
+    assert best == 1.0 and runner_up < 0.1
+
+    p = write_tmp(data, "ac")
+    df, _ = read_bin(p, get_spec("ac", "v3"))
+    assert len(df) == 1360
+    assert list(df["OrigCounter"]) == list(range(1360))
+    assert df.attrs["malformed_records"] == 0
+    assert "decoding as ACF3 anyway" in capsys.readouterr().out
+
+    # Same block bytes through a normal header must decode identically.
+    p_good = write_tmp(w_ac_v3_file([b0, b1]), "ac")
+    df_good, _ = read_bin(p_good, get_spec("ac", "v3"))
+    pd.testing.assert_frame_equal(df, df_good)
 
 
 def test_ac_v3_fsync_bit_masked():
@@ -537,7 +581,7 @@ def test_ac_v3_bad_block_crc_dropped_scan_continues():
     p = write_tmp(w_ac_v3_file([b0, b1, b2]), "ac")
     df, _ = read_bin(p, spec)
     assert len(df) == 680 * 2
-    assert list(df["Counter"]) == list(range(680)) + list(range(1360, 2040))
+    assert list(df["OrigCounter"]) == list(range(680)) + list(range(1360, 2040))
     assert df.attrs["malformed_records"] == AC_V3_SAMPLES_PER_BLOCK
 
 
@@ -589,8 +633,8 @@ def test_ac_v3_reports_firmware_dropped_samples(capsys):
     df, _ = read_bin(p, spec)
 
     assert len(df) == 3 * 680                                  # nothing fabricated
-    assert list(df["Counter"]) == (list(range(0, 680)) + list(range(680, 1360))
-                                   + list(range(1385, 2065)))
+    assert list(df["OrigCounter"]) == (list(range(0, 680)) + list(range(680, 1360))
+                                       + list(range(1385, 2065)))
     assert df.attrs["dropped_samples"] == 25
     assert df.attrs["seq_gaps"] == [(1360, 1385, 25)]
     assert df.attrs["first_seq"] == 0
@@ -616,7 +660,7 @@ def test_ac_v3_backwards_sequence_rejected(capsys):
 
     df, _ = read_bin(p, spec)
     assert len(df) == 2 * 680                                  # b2 dropped
-    assert list(df["Counter"]) == list(range(0, 1360))
+    assert list(df["OrigCounter"]) == list(range(0, 1360))
     assert df.attrs["malformed_records"] == AC_V3_SAMPLES_PER_BLOCK
     assert df.attrs["dropped_samples"] == 0
 

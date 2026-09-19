@@ -145,11 +145,11 @@ def test_extract_ecf2_single_file():
 
         assert [os.path.basename(p) for p in report.out_paths] == ["ecg.csv"]
         df = pd.read_csv(report.out_paths[0])
-        assert list(df.columns[:4]) == ["ECG", "ETAG", "PTAG", "Counter"]
+        assert list(df.columns[:5]) == ["ECG", "ETAG", "PTAG", "OrigCounter", "Counter"]
         assert len(df) == 3 * SPB
-        assert df["Counter"].iloc[0] == 0 and df["Counter"].iloc[-1] == 3 * SPB - 1
+        assert df["OrigCounter"].iloc[0] == 0 and df["OrigCounter"].iloc[-1] == 3 * SPB - 1
         assert [r.spec.name for r in report.resolutions] == ["block_v2"]
-        # CDCT is the filename t0 + Counter/512: starts at t0, monotonic,
+        # CDCT is the filename t0 + OrigCounter/512: starts at t0, monotonic,
         # spans ~n_samples/512 s
         assert df["CDCT"].iloc[0] == 1700000000.0
         assert (np.diff(df["CDCT"]) >= 0).all()
@@ -169,8 +169,8 @@ def test_extract_ecf2_multi_chunk_is_time_continuous():
         df = pd.read_csv(report.out_paths[0])
 
         assert len(df) == 4 * SPB
-        # Counter runs 0..4*1358-1 with no restart at the chunk boundary
-        assert df["Counter"].tolist() == list(range(4 * SPB))
+        # OrigCounter runs 0..4*1358-1 with no restart at the chunk boundary
+        assert df["OrigCounter"].tolist() == list(range(4 * SPB))
         # CDCT is one continuous clock — monotonic across the chunk join, no
         # jump back to t0, total span ~= 4*1358/512 s
         cdct = df["CDCT"].to_numpy()
@@ -208,7 +208,7 @@ def test_ac_v3_multichunk_boundary_gap_reported(capsys):
 
         df = pd.read_csv(report.out_paths[0])
         assert len(df) == 4 * 680            # chunks joined, nothing fabricated
-        assert df["Counter"].tolist() == (list(range(0, 1360)) + list(range(1400, 2760)))
+        assert df["OrigCounter"].tolist() == (list(range(0, 1360)) + list(range(1400, 2760)))
 
 
 def test_datetime_column_matches_vectorized_and_scalar_conversion():

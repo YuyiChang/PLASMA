@@ -181,8 +181,17 @@ def _ac_v3_crc32_ok(buf, crc_field_off, crc_field_len, expected):
 
 
 def _sniff_ac_v3(data: bytes) -> float:
-    """Content score for the ACF3 container: it is entirely self-identifying."""
-    return 1.0 if data[:4] == AC_V3_MAGIC else 0.0
+    """Content score for the ac:v3 container.
+
+    Keyed off the `ACB1` block magic at the start of the data region, not the
+    header's own `magic` field: firmware is known to leave a stale header
+    (`ACF2`, format_version 1, sample_format 0, crc/odr/anchor fields zeroed)
+    on a session's first chunk even though the data region and terminal
+    record are the same v3 layout as every other chunk. Only v3 is ever
+    written in production/test, so this is the one ac container format.
+    """
+    return 1.0 if (len(data) >= AC_V3_HEADER_SIZE + 4
+                   and data[AC_V3_HEADER_SIZE:AC_V3_HEADER_SIZE + 4] == AC_V3_BLOCK_MAGIC) else 0.0
 
 
 def _ac_v3_chunk_index(basename):
@@ -194,12 +203,17 @@ def _ac_v3_chunk_index(basename):
 
 
 def _read_ac_v3(filepath, strict=False):
-    """Decode one ACF3 accelerometer chunk: 4 KiB header, ACB1 data blocks, ACT2 terminal.
+    """Decode one ac:v3 accelerometer chunk: 4 KiB header, ACB1 data blocks, ACT2 terminal.
 
     Unlike the flat per-record layouts this is a real container: block count is
     variable, the last block may be short, and per-sample timing is projected
     from one RTC anchor per block rather than stored per sample. None of that
     fits `whole_records`/`RecordSpec.decode`, so this owns the full file->df path.
+
+    The header's own magic/format_version/sample_format/odr/anchor fields are
+    read for logging only, never to decide *whether* or *how* to decode — see
+    `_sniff_ac_v3` and docs/ACCELEROMETER_BINARY_FORMAT.md, "Stale first-chunk
+    header".
     """
     basename = os.path.basename(filepath)
     with open(filepath, "rb") as f:
@@ -210,14 +224,22 @@ def _read_ac_v3(filepath, strict=False):
 
     header = data[:AC_V3_HEADER_SIZE]
     magic, fmt_version, sample_format = struct.unpack_from("<4sHH", header, 0)
-    if magic != AC_V3_MAGIC:
-        raise ValueError(f"{basename}: not an ACF3 file (magic {magic!r})")
-    if fmt_version != 3 or sample_format != 2:
-        raise ValueError(f"{basename}: unsupported ACF3 format_version={fmt_version} "
-                         f"sample_format={sample_format}")
-    odr_num, odr_den = struct.unpack_from("<II", header, 8)
+    if magic != AC_V3_MAGIC or fmt_version != 3 or sample_format != 2:
+        # `_sniff_ac_v3` already routed this file here on the ACB1 block magic,
+        # not on these fields — a session's first chunk is known to carry a
+        # stale header (observed: magic=ACF2, format_version=1,
+        # sample_format=0) even though the data region and terminal record are
+        # ordinary v3. Only v3 is ever produced in production/test, so decode
+        # it as v3 regardless of what the header claims; just say so.
+        print(f"{basename}: header says magic={magic!r} format_version={fmt_version} "
+              f"sample_format={sample_format} (expected {AC_V3_MAGIC!r}/3/2) — "
+              f"decoding as ACF3 anyway (known stale-header quirk)")
+    # odr/anchor are fixed hardware constants (format doc, "Recording
+    # configuration" / header's "Required value" column), not real per-file
+    # configuration — hardcode them rather than trust header fields that are
+    # left zero on the stale-header chunks above.
+    odr_num, odr_den, anchor_hz = 1125, 2, 512
     header_crc, = struct.unpack_from("<I", header, 20)
-    anchor_hz, = struct.unpack_from("<I", header, 24)
     if not _ac_v3_crc32_ok(header, 20, 4, header_crc):
         msg = f"{basename}: ACF3 header CRC mismatch"
         if strict:
@@ -241,11 +263,13 @@ def _read_ac_v3(filepath, strict=False):
     x_parts, y_parts, z_parts, seq_parts, t_parts = [], [], [], [], []
     off = 0
     n_bad_blocks = 0
+    n_blocks_ok = 0
     n_bad_samples = 0
     first_seq_seen = None
     expected_seq = None      # seq the next block should open at, if nothing was dropped
     dropped_total = 0
     seq_gaps = []            # (prev_block_end_seq, this_block_first_seq, n_dropped)
+    anchor_first = anchor_last = None   # AnchorCounter (reserved_timer_output) range, README-only
     sample_period = odr_den / odr_num       # seconds per accelerometer sample
     while off + AC_V3_BLOCK_HEADER_SIZE <= valid_len:
         remaining = valid_len - off
@@ -293,18 +317,29 @@ def _read_ac_v3(filepath, strict=False):
 
         if first_seq_seen is None:
             first_seq_seen = int(first_seq)
+            anchor_first = int(anchor_tick)
+        anchor_last = int(anchor_tick)
+        n_blocks_ok += 1
         expected_seq = (int(first_seq) + n_samples) & (_U32 - 1)
         off += block_len
 
     if not seq_parts:
         raise ValueError(f"{basename}: no valid ACF3 data blocks decoded")
 
-    counter = np.concatenate(seq_parts)
+    orig_counter = np.concatenate(seq_parts)
     df = pd.DataFrame({
         "AccX": np.concatenate(x_parts),
         "AccY": np.concatenate(y_parts),
         "AccZ": np.concatenate(z_parts),
-        "Counter": counter,
+        # OrigCounter: first_sample_sequence + i, the pure sample-sequence
+        # count (modulo-2^32, step 1) that firmware writes into each block.
+        # A global `Counter` (OrigCounter + one constant AnchorCounter offset
+        # for the whole session) is added by the pipeline once chunks are
+        # stitched — see `_stitch_ac_v3_chunks` in extract/pipeline.py — since
+        # only at that point is the session's first AnchorCounter known. Per
+        # block or per file, that constant isn't knowable, so it's not built
+        # here.
+        "OrigCounter": orig_counter,
     })
 
     t0, dt = get_CDCT_init(filepath)
@@ -333,10 +368,18 @@ def _read_ac_v3(filepath, strict=False):
     df.attrs["dropped_samples"] = int(dropped_total)
     df.attrs["seq_gaps"] = seq_gaps
     df.attrs["first_seq"] = first_seq_seen
-    df.attrs["last_seq"] = int(counter[-1])
+    df.attrs["last_seq"] = int(orig_counter[-1])
     df.attrs["chunk_index"] = chunk_index
     df.attrs["trailing_bytes"] = 0
     df.attrs["spec"] = "ac:v3"
+    # AnchorCounter (block header offset 4, "reserved_timer_output" in the
+    # format doc): a per-block RTC0 tick. Folded into the output `Counter`
+    # column (OrigCounter + AnchorCounter); its own first/last range per file
+    # goes to the README (`write_provenance`), not a column of its own.
+    df.attrs["anchor_counter_first"] = anchor_first
+    df.attrs["anchor_counter_last"] = anchor_last
+    df.attrs["n_blocks_ok"] = n_blocks_ok
+    df.attrs["n_blocks_bad"] = n_bad_blocks
     return df, dt
 
 
@@ -380,6 +423,7 @@ def _read_ecf2(filepath, strict=False):
     ecg_parts, etag_parts, ptag_parts, idx_parts = [], [], [], []
     prev_index = prev_tick = None
     n_blocks = 0
+    anchor_first = anchor_last = None   # AnchorCounter (first_rtc_tick) range, README-only
     error = None
     for page in range(1, ECF2_DATA_PAGES + 1):
         block = data[page * ECB2_BLOCK_SIZE:(page + 1) * ECB2_BLOCK_SIZE]
@@ -401,6 +445,9 @@ def _read_ecf2(filepath, strict=False):
         ptag_parts.append(dec["ptag"])
         idx_parts.append(dec["first_sample_index"]
                          + np.arange(ECB2_SAMPLES_PER_BLOCK, dtype=np.int64))
+        if anchor_first is None:
+            anchor_first = int(dec["first_rtc_tick"])
+        anchor_last = int(dec["first_rtc_tick"])
         n_blocks += 1
 
     if not ecg_parts:
@@ -412,30 +459,44 @@ def _read_ecf2(filepath, strict=False):
             raise ValueError(msg)
         print(msg)
 
-    counter = np.concatenate(idx_parts).astype(np.int64)
+    orig_counter = np.concatenate(idx_parts).astype(np.int64)
     df = pd.DataFrame({
         "ECG": np.concatenate(ecg_parts),
         "ETAG": np.concatenate(etag_parts),
         "PTAG": np.concatenate(ptag_parts),
-        "Counter": counter,
+        # OrigCounter: first_sample_index + i, the recording-local sample
+        # ordinal (zero at the recording's first sample). A global `Counter`
+        # (OrigCounter + one constant AnchorCounter offset for the whole
+        # session) is added by the pipeline once chunks are stitched — see
+        # `_stitch_ecb2_chunks` in extract/pipeline.py — since only at that
+        # point is the session's first AnchorCounter known.
+        "OrigCounter": orig_counter,
     })
     t0, dt = get_CDCT_init(filepath)
-    # `Counter` is `first_sample_index + i` — the **recording-local** sample
-    # ordinal: zero at the first sample of the recording and monotonically
-    # advancing (+1358/block) through every chunk of the same recording_id
-    # (ECG_BLOCK_FORMAT.md §3/§5). So `t0 + Counter/512` is one continuous
-    # clock across all chunks — no per-chunk restart, and an isolated later
-    # chunk lands at its true offset into the recording.
-    df["CDCT"] = t0 + df["Counter"] / ECG_FS_ECB2
+    # `OrigCounter` is `first_sample_index + i` — the **recording-local**
+    # sample ordinal: zero at the first sample of the recording and
+    # monotonically advancing (+1358/block) through every chunk of the same
+    # recording_id (ECG_BLOCK_FORMAT.md §3/§5). So `t0 + OrigCounter/512` is
+    # one continuous clock across all chunks — no per-chunk restart, and an
+    # isolated later chunk lands at its true offset into the recording.
+    df["CDCT"] = t0 + df["OrigCounter"] / ECG_FS_ECB2
     df["init_CDCT"] = t0
     df.attrs["malformed_records"] = 0
     df.attrs["trailing_bytes"] = 0
     df.attrs["spec"] = "ecg:block_v2"
     df.attrs["recording_id"] = recording_id
     df.attrs["chunk_index"] = chunk_index
-    df.attrs["first_sample_index"] = int(counter[0])
-    df.attrs["last_sample_index"] = int(counter[-1])
+    df.attrs["first_sample_index"] = int(orig_counter[0])
+    df.attrs["last_sample_index"] = int(orig_counter[-1])
     df.attrs["decode_error"] = error
+    # AnchorCounter (block header offset 4, "first_rtc_tick" in the format
+    # doc): a per-block RTC0 tick. Folded into the output `Counter` column
+    # (OrigCounter + AnchorCounter); its own first/last range per file goes to
+    # the README (`write_provenance`), not a column of its own.
+    df.attrs["anchor_counter_first"] = anchor_first
+    df.attrs["anchor_counter_last"] = anchor_last
+    df.attrs["n_blocks_ok"] = n_blocks
+    df.attrs["n_blocks_bad"] = 0
     return df, dt
 
 

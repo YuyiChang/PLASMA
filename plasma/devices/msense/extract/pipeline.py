@@ -177,6 +177,7 @@ class DataExtractor():
         self.malformed = 0
         self.dropped = 0
         self.out_paths = []
+        self.anchor_block_summaries = []    # (basename, first, last, n_ok, n_bad) — README-only
 
         self.encoding_alias = self.get_encoding_alias() if self.df is not None else {}
 
@@ -259,6 +260,15 @@ class DataExtractor():
             if conflicts:
                 file.write(f"uuid.txt conflicts = {len(conflicts)} "
                            f"(content used unless on_format_conflict=trust_uuid)\n")
+            if self.anchor_block_summaries:
+                file.write("\n--- AC/ECG block metadata (per ACB1/ECB2 block header, "
+                            'BLOCK_META_FMT = "<4sIII": magic, AnchorCounter '
+                            "(reserved_timer_output / first_rtc_tick), "
+                            "OrigCounter base (first_sample_sequence / first_sample_index), "
+                            "block_crc32) ---\n")
+                for basename, first, last, n_ok, n_bad in self.anchor_block_summaries:
+                    file.write(f"{basename}: AnchorCounter {first}..{last} "
+                               f"({n_ok} block(s) ok, {n_bad} bad)\n")
 
     def resolve(self, full_path, sensor):
         res = detect.resolve(
@@ -276,6 +286,14 @@ class DataExtractor():
         df, dt = formats.read_bin(full_path, res.spec, strict=self.strict)
         self.malformed += df.attrs.get('malformed_records', 0)
         self.dropped += df.attrs.get('dropped_samples', 0)
+        if res.spec.key in ("ac:v3", "ecg:block_v2"):
+            self.anchor_block_summaries.append((
+                os.path.basename(full_path),
+                df.attrs.get("anchor_counter_first"),
+                df.attrs.get("anchor_counter_last"),
+                df.attrs.get("n_blocks_ok", 0),
+                df.attrs.get("n_blocks_bad", 0),
+            ))
         return df, res
 
     def extract_csv(self, search_prefix, file_name, id=-1):
@@ -442,6 +460,24 @@ def gather_files_by_prefix(prefix: str, path):
     return all_files
 
 
+def _add_global_counter(combined, group):
+    """`Counter` = `OrigCounter` + one constant AnchorCounter offset for the
+    whole session — the AnchorCounter at the *earliest available* chunk's
+    first sample, applied to every row. Unlike adding each block's own
+    AnchorCounter (see `formats._read_ac_v3`/`_read_ecf2`), a single session
+    constant keeps `Counter` linear (no per-block sawtooth): it is exactly
+    `OrigCounter` shifted, so it steps by 1 exactly where `OrigCounter` does.
+    `group` is the chunk list already sorted by `chunk_index`; if chunk 0
+    itself is missing, this falls back to whatever chunk is earliest and the
+    existing "chunk 0 does not start at ..." print already flags that."""
+    offset = group[0].attrs.get("anchor_counter_first")
+    if offset is None:
+        return combined
+    loc = combined.columns.get_loc("OrigCounter") + 1
+    combined.insert(loc, "Counter", combined["OrigCounter"].astype(np.int64) + int(offset))
+    return combined
+
+
 def _stitch_ecb2_chunks(dfs):
     """Order ECF2 chunk DataFrames by `recording_id` then `chunk_index`,
     report any `chunk_index` or `Counter` discontinuity, and return one
@@ -466,7 +502,8 @@ def _stitch_ecb2_chunks(dfs):
                     print(f"ECG recording {rec_id}: {gap - 1} sample gap at the "
                           f"chunk {ci} boundary")
             prev = d
-        out.append(pd.concat(group, ignore_index=True))
+        combined = pd.concat(group, ignore_index=True)
+        out.append(_add_global_counter(combined, group))
     return out
 
 
@@ -494,7 +531,8 @@ def _stitch_ac_v3_chunks(dfs):
                     print(f"AC session: {gap} sample(s) dropped at the chunk "
                           f"{ci} boundary")
         prev = d
-    return pd.concat(group, ignore_index=True)
+    combined = pd.concat(group, ignore_index=True)
+    return _add_global_counter(combined, group)
 
 
 def counter_validity_check(df: pd.DataFrame, spec=None):
@@ -506,8 +544,17 @@ def counter_validity_check(df: pd.DataFrame, spec=None):
     if spec is None:
         print("pass counter check: N/A (no format resolved)")
         return
-    # The readers append CDCT/init_CDCT, so the last column is not the counter.
-    counter_columns = df[['Counter']] if 'Counter' in df.columns else df.iloc[:, -1:]
+    # ac:v3's 'Counter' has AnchorCounter added on top (see `_read_ac_v3`) and
+    # is not expected to step uniformly; 'OrigCounter' is the plain
+    # modulo-2^32 sample sequence this check's step/wrap logic assumes, so
+    # prefer it when present. The readers append CDCT/init_CDCT, so absent
+    # both of those the last column is not the counter either.
+    if 'OrigCounter' in df.columns:
+        counter_columns = df[['OrigCounter']]
+    elif 'Counter' in df.columns:
+        counter_columns = df[['Counter']]
+    else:
+        counter_columns = df.iloc[:, -1:]
     counter_arr = numpy.array(counter_columns).flatten()
     diff_arr = numpy.diff(counter_arr)
     step = spec.tick_step
