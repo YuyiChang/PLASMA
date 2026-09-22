@@ -109,45 +109,52 @@ up once a signed release has actually shipped.
 
 ## Homebrew tap (yuyichang/homebrew-plasma)
 
-Separate repo, **not automated** — bump it by hand after the release build
-finishes:
+Separate repo. **Self-automated** via
+`.github/workflows/bump-plasma.yml` *in that repo* (not this one): a daily
+scheduled job (plus `workflow_dispatch` for an immediate manual run right
+after cutting a release) checks PLASMA's `/releases/latest` — which already
+excludes prereleases, so it naturally skips the rolling `nightly` tag — and,
+if the version differs from what `Casks/plasma.rb` currently has, downloads
+that release's `PLASMA_MacOS_arm64.app.zip`, computes its sha256, and opens
+a PR bumping both. Merge (or close) that PR by hand; nothing pushes to
+`main` automatically.
+
+This intentionally runs as a job *inside* `homebrew-plasma`, using that
+repo's own default `GITHUB_TOKEN` (scoped to itself, via `permissions:
+contents: write` / `pull-requests: write`) — not a job in *this* repo's CI
+reaching across to bump the tap. The latter would need a cross-repo PAT
+stored as a secret here with write access to a different public repo, a
+meaningfully bigger credential blast radius for no real benefit; running the
+poll the other direction avoids needing any extra credential at all.
+
+If you ever need to bump it by hand instead (e.g. the scheduled job is
+broken, or you don't want to wait for it):
 
 ```bash
 brew bump-cask-pr --version <new-version> --write-only yuyichang/plasma/plasma
 git -C "$(brew --repo yuyichang/plasma)" diff   # review, then commit + push
 ```
 
-`brew bump-cask-pr` downloads the new release's `PLASMA_MacOS_arm64.app.zip`
+`brew bump-cask-pr` downloads the release's `PLASMA_MacOS_arm64.app.zip`
 itself and computes the sha256 — you don't need to copy it from the
 `.sha256` file GitHub Actions attaches (that file exists for manual
-verification, e.g. by someone auditing the cask before merging).
+verification, e.g. by someone auditing the cask before merging). **Gotcha:**
+it finds the *old* sha256 by searching for its literal (lowercased) text and
+replacing it — only works once the cask already carries a real, valid
+sha256; it can't fill in a non-hex placeholder like `"REPLACE_WITH_SHA256"`.
+Only relevant the very first time the tap gets a real release.
 
-**One-time note for the first release built with onedir:** the cask's
-`binary` stanza changed from `.../Contents/Resources/plasma-bin` to
+**One-time note, already resolved:** the first onedir-based release (v2.2.3)
+needed a manual fix to the cask's `binary` stanza — changed from
+`.../Contents/Resources/plasma-bin` to
 `.../Contents/Resources/PLASMA_MacOS_arm64/PLASMA_MacOS_arm64` (the onedir
 folder is copied into `Contents/Resources/` keeping its own name now,
-instead of being flattened to a single `plasma-bin` file). `bump-cask-pr`
-only bumps `version`/`sha256`, so this path fix needs a manual edit
-alongside the first onedir-based version bump — already applied in
-`packaging/homebrew/plasma.rb`'s in-repo template; carry it into the tap's
-`Casks/plasma.rb` by hand when bumping. (Considered switching the cask to
-consume the `.dmg` directly via Homebrew Cask's native `.dmg` handling
-instead of the hand-rolled `.app.zip` — deferred; `.app.zip` stays the
-cask's source for now.)
-
-**Gotcha:** `bump-cask-pr` finds the *old* sha256 by searching the file for
-its literal (lowercased) text and replacing it — it only works when the
-cask already carries a real, valid sha256. It cannot fill in a placeholder
-like `"REPLACE_WITH_SHA256"` (fails with `Could not find 'sha256' stanza
-with value ...`, since the placeholder isn't valid lowercase hex to begin
-with). Only relevant the very first time the tap gets a real release —
-after that there's always a real value to bump from.
-
-This is a deliberate manual step, not wired into CI: it would need a
-cross-repo write credential (a PAT stored as a secret in this repo, since the
-default `GITHUB_TOKEN` can't push to `homebrew-plasma`) for a single command
-that already takes seconds to run by hand. Revisit if releases become
-frequent enough for that to be worth the added credential surface.
+instead of being flattened to a single `plasma-bin` file) — since neither
+`bump-cask-pr` nor the scheduled-bump workflow touch anything but
+`version`/`sha256`. That path is stable going forward, so this shouldn't
+recur. (Considered switching the cask to consume the `.dmg` directly via
+Homebrew Cask's native `.dmg` handling instead of the hand-rolled
+`.app.zip` — deferred; `.app.zip` stays the cask's source for now.)
 
 ### `plasma@nightly` — no bump needed, ever
 

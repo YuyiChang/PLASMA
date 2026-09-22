@@ -6,6 +6,24 @@ PLASMA: Platform for LSL-based Acquisition of Sensor Metrics and Analytics
 configure, pair MSense wristbands, run a session, read the memo panel, recover
 from faults.
 
+[![PyPI version](https://img.shields.io/pypi/v/plasma-app.svg)](https://pypi.org/project/plasma-app/)
+[![Python](https://img.shields.io/pypi/pyversions/plasma-app.svg)](https://pypi.org/project/plasma-app/)
+[![License](https://img.shields.io/github/license/yuyichang/PLASMA.svg)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/yuyichang/PLASMA)](https://github.com/yuyichang/PLASMA/releases/latest)
+
+
+## Download
+
+| Platform | Architecture | Download |
+|---|---|---|
+| macOS | Apple Silicon (arm64) | [Download `.dmg`](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_MacOS_arm64.dmg) |
+| Windows | x64 | [Download Installer `.exe`](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_Windows_x64_Setup.exe) |
+| Linux | x64 | [Download `.tar.gz`](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_Linux_x64.tar.gz) |
+| Linux | ARM64 | [Download `.tar.gz`](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_Linux_arm64.tar.gz) |
+
+> For other packages and previous versions, see [GitHub Releases](https://github.com/YuyiChang/PLASMA/releases).
+
+
 ## quickstart
 
 **macOS: `brew install --cask yuyichang/plasma/plasma`** is the recommended
