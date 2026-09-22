@@ -34,6 +34,17 @@
   the stamped commit hash from the checked-out tree (`git rev-parse HEAD`)
   rather than `github.sha`, which was wrong for the same reason.
 
+### 🍺 Nightly Homebrew cask
+
+- **`brew install --cask yuyichang/plasma/plasma@nightly`** installs the
+  rolling nightly build off `dev`, for anyone who wants fixes before the
+  next versioned release (expect it to be less stable). It conflicts with
+  the tagged `plasma` cask — only one can be installed at a time. Points at
+  the fixed `nightly` release tag `build.yml` republishes daily, so —
+  unlike `plasma` — this cask needs no per-release version/sha256 bump;
+  since Homebrew has no version number to detect a new nightly on its own,
+  `brew reinstall --cask plasma@nightly` is how you pull the latest build.
+
 ---
 
 ## 🚀 v2.2.2

@@ -34,6 +34,19 @@ PLASMA runs a local web server and opens in your browser at
     brew uninstall --cask plasma    # remove
     ```
 
+    Want tomorrow's fixes today instead of the last tagged release? Install
+    `plasma@nightly` instead — built automatically off `dev` every day at
+    07:00 UTC, so expect it to be less stable:
+
+    ```bash
+    brew install --cask yuyichang/plasma/plasma@nightly
+    ```
+
+    Conflicts with `plasma` (both install `PLASMA.app`) — only one can be
+    installed at a time. Homebrew has no version number to compare a nightly
+    build against, so `brew upgrade` won't fetch a new one on its own; run
+    `brew reinstall --cask plasma@nightly` to grab the latest build.
+
 === "Prebuilt binary (no Python)"
 
     Download the asset for your platform from the

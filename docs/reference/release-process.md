@@ -47,3 +47,16 @@ cross-repo write credential (a PAT stored as a secret in this repo, since the
 default `GITHUB_TOKEN` can't push to `homebrew-plasma`) for a single command
 that already takes seconds to run by hand. Revisit if releases become
 frequent enough for that to be worth the added credential surface.
+
+### `plasma@nightly` — no bump needed, ever
+
+`packaging/homebrew/plasma@nightly.rb` (copy verbatim into the tap's
+`Casks/plasma@nightly.rb` once, then leave it alone) tracks the rolling
+`nightly` pre-release tag `build.yml`'s `schedule` job republishes daily.
+Unlike `plasma.rb`, its `url` points at the fixed `nightly` tag rather than a
+version-substituted one, and it uses `version :latest` / `sha256 :no_check`
+instead of a pinned checksum — so there is no per-release bump step for this
+cask at all. The tradeoff is the one `brew bump-cask-pr` normally buys you:
+Homebrew can't tell when a new nightly has landed, so users have to
+`brew reinstall --cask plasma@nightly` themselves to pick one up (documented
+in the cask's own `caveats`).
