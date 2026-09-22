@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the Hardened Runtime notarization requires
+  (codesign --options runtime). Without these, PLASMA's frozen onedir
+  bundle fails at launch under Hardened Runtime, not at signing/notarization
+  time — Apple's notary service happily accepts it, it just won't run:
+
+  - disable-library-validation: PyInstaller's onedir folder bundles
+    third-party dylibs (numpy, scipy, liblsl, ...) that aren't signed by
+    our own Team ID. Hardened Runtime's default library validation refuses
+    to load anything not signed by the same team, which would break the
+    app the moment it imports numpy.
+  - allow-dyld-environment-variables: PyInstaller's bootloader sets
+    DYLD_LIBRARY_PATH internally to find its own bundled libs at runtime.
+    Hardened Runtime strips DYLD_* environment variables by default unless
+    this is set.
+  - allow-unsigned-executable-memory: some bundled C-extension dependencies
+    (e.g. anything using a JIT or self-modifying code path) need to
+    allocate executable memory that isn't backed by a code signature.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

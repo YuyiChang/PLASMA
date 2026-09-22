@@ -16,8 +16,13 @@ Pushing a `vX.Y.Z` tag (matching `plasma.__version__`, enforced by
       (`.github/build_macos_app.sh` — the Homebrew cask's install target;
       see the "why not PyInstaller's own `BUNDLE()`" comment at the top of
       that script), and `.dmg` (`.github/build_macos_dmg.sh`, drag-to-
-      Applications, unsigned/unnotarized). All three get a companion
-      `.sha256` file.
+      Applications). All three get a companion `.sha256` file. The `.app`
+      gets codesigned + notarized + stapled by
+      `.github/codesign_notarize_macos.sh` between those two steps — unless
+      the signing secrets aren't configured, in which case it's a no-op and
+      the build stays unsigned (see "Codesigning & notarization" below).
+      The raw `.zip` is never signed either way (only the `.app` inside the
+      `.app.zip`/`.dmg` is).
     - Windows: `PLASMA_Windows_x64.zip` (raw onedir folder) and
       `PLASMA_Windows_x64_Setup.exe` (Inno Setup,
       `packaging/windows/plasma_installer.iss` — unsigned, so SmartScreen
@@ -28,6 +33,79 @@ Pushing a `vX.Y.Z` tag (matching `plasma.__version__`, enforced by
 
 Both are source-of-truth downstream of the tag; nothing else needs to run to
 make a release "live" on PyPI or GitHub Releases.
+
+## Codesigning & notarization (macOS)
+
+`build-macos`'s "Codesign + notarize .app" step (`.github/codesign_notarize_macos.sh`)
+signs `dist/PLASMA.app` with a "Developer ID Application" certificate, submits
+it to Apple's notary service, and staples the resulting ticket — but only if
+five repo secrets are set. **Until they are, this step no-ops and every macOS
+asset ships unsigned/unnotarized exactly as before** (first launch blocked by
+Gatekeeper, right-click → Open) — nothing else needs to change to turn this
+on later.
+
+**One-time setup, on the Apple side (requires an Apple Developer Program
+membership, $99/yr):**
+
+1. Create a **Developer ID Application** certificate: Xcode → Settings →
+   Accounts → Manage Certificates → **+** → *Developer ID Application* (or
+   via the [Certificates page](https://developer.apple.com/account/resources/certificates)
+   using a CSR generated in Keychain Access). This is the certificate for
+   distributing outside the App Store — not "Apple Development" or "Apple
+   Distribution".
+2. In Keychain Access, find that certificate, expand it, select **both** the
+   certificate and its private key, right-click → **Export 2 items…** → save
+   as a `.p12`, set an export password.
+3. Base64-encode it: `base64 -i DeveloperIDApplication.p12 | pbcopy` (macOS
+   `base64` auto-wraps; that's fine, `base64 --decode` in the script handles
+   it either way).
+4. In [App Store Connect](https://appstoreconnect.apple.com) → Users and
+   Access → Integrations → **App Store Connect API** → generate a key with
+   the **Developer** role (notarization doesn't need Admin). Download the
+   `.p8` **immediately** — it's only downloadable once. Note its Key ID and
+   Issuer ID (shown on that same page).
+5. Base64-encode the `.p8` the same way as step 3.
+
+**Set these as GitHub Actions repo secrets** (Settings → Secrets and
+variables → Actions → New repository secret, or via `gh secret set <name>`
+run from your own machine — never paste secret material into a chat or
+commit):
+
+| Secret | Value |
+|---|---|
+| `MACOS_CERTIFICATE_P12_BASE64` | output of step 3 |
+| `MACOS_CERTIFICATE_PASSWORD` | the export password from step 2 |
+| `MACOS_NOTARY_KEY_ID` | Key ID from step 4 |
+| `MACOS_NOTARY_ISSUER_ID` | Issuer ID from step 4 |
+| `MACOS_NOTARY_KEY_P8_BASE64` | output of step 5 |
+
+```bash
+gh secret set MACOS_CERTIFICATE_P12_BASE64 < cert_base64.txt --repo YuyiChang/PLASMA
+gh secret set MACOS_CERTIFICATE_PASSWORD --repo YuyiChang/PLASMA   # prompts, hidden input
+gh secret set MACOS_NOTARY_KEY_ID --repo YuyiChang/PLASMA
+gh secret set MACOS_NOTARY_ISSUER_ID --repo YuyiChang/PLASMA
+gh secret set MACOS_NOTARY_KEY_P8_BASE64 < notary_key_base64.txt --repo YuyiChang/PLASMA
+```
+
+No `MACOS_SIGN_IDENTITY` secret is needed — the script imports the
+certificate into a throwaway keychain and reads the identity string
+(`security find-identity`) straight out of it. No keychain-password secret
+either — that keychain is created fresh and deleted at the end of every job
+run, so its unlock password is just generated inline (`openssl rand`) and
+never needs to be stored.
+
+`.github/macos_entitlements.plist` grants the Hardened Runtime exceptions a
+PyInstaller onedir bundle needs to actually *run* once signed (library
+validation would otherwise block loading bundled numpy/scipy/liblsl, since
+they're not signed by this project's Team ID) — see the comments in that
+file before changing it.
+
+**Once this is live**, two things become worth revisiting (not done as part
+of turning signing on): the Homebrew cask's `caveats` text ("PLASMA is not
+code-signed or notarized...") and its quarantine-clearing `postflight_steps`
+both go stale for signed releases — harmless to leave (clearing quarantine
+on an already-legitimate app is a no-op, not a problem), but worth cleaning
+up once a signed release has actually shipped.
 
 ## Homebrew tap (yuyichang/homebrew-plasma)
 

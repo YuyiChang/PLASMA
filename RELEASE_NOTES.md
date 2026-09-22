@@ -59,12 +59,17 @@
   Desktop icon, and an uninstaller. Unsigned, so SmartScreen still warns on
   first run (same as the previous raw `.exe`).
 - **New macOS installer.** `PLASMA_MacOS_arm64.dmg` — open it and drag
-  PLASMA.app into Applications. Unsigned/unnotarized, same Gatekeeper
-  right-click-Open step as before.
+  PLASMA.app into Applications.
 - The raw, installer-free download is still available for every platform —
   now a `.zip`/`.tar.gz` of the onedir folder instead of a single file — and
   the Homebrew cask continues to work as before (its install path was
   updated internally to match the new onedir layout).
+- **CI can now codesign + notarize the macOS `.app`**
+  (`.github/codesign_notarize_macos.sh`), once five signing/notarization
+  secrets are configured — see `docs/reference/release-process.md`. Until
+  then it's a no-op and every macOS asset (raw zip, `.app.zip`, `.dmg`)
+  keeps shipping unsigned/unnotarized exactly as before, same
+  Gatekeeper right-click-Open step.
 
 ---
 

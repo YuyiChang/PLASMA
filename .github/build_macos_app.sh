@@ -13,7 +13,10 @@
 # the pip-install Desktop icon.
 #
 # Usage: build_macos_app.sh <path-to-onedir-folder> <version>
-# Writes dist/PLASMA_MacOS_arm64.app.zip.
+# Writes dist/PLASMA.app (unsigned). Codesigning/notarization (if configured
+# — see codesign_notarize_macos.sh) and zipping into PLASMA_MacOS_arm64.app.zip
+# happen as separate later steps in build.yml, so the zip only ever contains
+# the final, already-signed bundle.
 set -euo pipefail
 
 BIN="${1:?usage: build_macos_app.sh <path-to-onedir-folder> <version>}"
@@ -64,7 +67,3 @@ osascript -e "tell application \"Terminal\" to activate" \
           -e "tell application \"Terminal\" to do script \"'$ESCAPED'\""
 LAUNCHER
 chmod +x "$OUT/Contents/MacOS/PLASMA"
-
-# ditto (not zip) preserves the bundle's permissions/resource forks/xattrs
-# correctly — the standard way to archive a .app for distribution.
-ditto -c -k --sequesterRsrc --keepParent "$OUT" "dist/PLASMA_MacOS_arm64.app.zip"
