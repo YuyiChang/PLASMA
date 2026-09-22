@@ -4,7 +4,7 @@
 
 ---
 
-## 🚀 v2.2.3 (unreleased)
+## 🚀 v2.2.3
 
 ### 🩹 MSense wristband fixes
 
