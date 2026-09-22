@@ -80,9 +80,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name=f'PLASMA_Linux_{linux_arch_tag()}',
     icon='plasma/resources/icons/plasma.png',
     debug=False,
@@ -97,4 +96,17 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+# onedir, not onefile: EXE() above is just the launcher stub; COLLECT()
+# assembles the actual dist/PLASMA_Linux_<arch>/ folder (exe + support
+# files) that ships — no more re-extracting to a temp dir on every launch.
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name=f'PLASMA_Linux_{linux_arch_tag()}',
 )

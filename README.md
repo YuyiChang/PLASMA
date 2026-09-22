@@ -53,7 +53,7 @@ plugins: `msense`, `qb2`, `pupil`, `shimmer`, `obs` (and `all`).
 - [x] linux aarch64 build — `PLASMA_Linux_arm64` for Jetson Orin (JetPack 6); CI job `build-linux-arm64`
 - [ ] infrequent stream (e.g., PLASMA journaler) shows green after recording stop
 - [ ] doc for msense workflow with better screenshots
-- [ ] memo `stage` transition logic optimization (e.g., timing of "ready to start" msg wrt sensor init status)
+- [x] memo `stage` transition logic optimization (e.g., timing of "ready to start" msg wrt sensor init status)
 
 ## developing a sensor plugin
 

@@ -12,19 +12,25 @@
 # same technique plasma.desktop_shortcut (via pyshortcuts) already uses for
 # the pip-install Desktop icon.
 #
-# Usage: build_macos_app.sh <path-to-frozen-binary> <version>
-# Writes dist/PLASMA_MacOS_arm64.app.zip.
+# Usage: build_macos_app.sh <path-to-onedir-folder> <version>
+# Writes dist/PLASMA.app (unsigned). Codesigning/notarization (if configured
+# — see codesign_notarize_macos.sh) and zipping into PLASMA_MacOS_arm64.app.zip
+# happen as separate later steps in build.yml, so the zip only ever contains
+# the final, already-signed bundle.
 set -euo pipefail
 
-BIN="${1:?usage: build_macos_app.sh <path-to-frozen-binary> <version>}"
-VERSION="${2:?usage: build_macos_app.sh <path-to-frozen-binary> <version>}"
+BIN="${1:?usage: build_macos_app.sh <path-to-onedir-folder> <version>}"
+VERSION="${2:?usage: build_macos_app.sh <path-to-onedir-folder> <version>}"
 OUT="dist/PLASMA.app"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 
-cp "$BIN" "$OUT/Contents/Resources/plasma-bin"
-chmod +x "$OUT/Contents/Resources/plasma-bin"
+# $BIN is PyInstaller onedir output (a folder: the exe + its _internal/
+# support files) — copy the whole folder in, keeping its own name, rather
+# than flattening to a single file the way the old onefile binary was.
+cp -R "$BIN" "$OUT/Contents/Resources/"
+chmod +x "$OUT/Contents/Resources/$(basename "$BIN")/$(basename "$BIN")"
 cp plasma/resources/icons/plasma.icns "$OUT/Contents/Resources/PLASMA.icns"
 
 cat > "$OUT/Contents/Info.plist" <<PLIST
@@ -55,13 +61,9 @@ cat > "$OUT/Contents/MacOS/PLASMA" <<'LAUNCHER'
 # visible Terminal window (see build_macos_app.sh for why).
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../Resources" && pwd)"
-BIN="$DIR/plasma-bin"
+BIN="$DIR/PLASMA_MacOS_arm64/PLASMA_MacOS_arm64"
 ESCAPED=${BIN//\"/\\\"}
 osascript -e "tell application \"Terminal\" to activate" \
           -e "tell application \"Terminal\" to do script \"'$ESCAPED'\""
 LAUNCHER
 chmod +x "$OUT/Contents/MacOS/PLASMA"
-
-# ditto (not zip) preserves the bundle's permissions/resource forks/xattrs
-# correctly — the standard way to archive a .app for distribution.
-ditto -c -k --sequesterRsrc --keepParent "$OUT" "dist/PLASMA_MacOS_arm64.app.zip"

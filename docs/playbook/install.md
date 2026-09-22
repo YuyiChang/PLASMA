@@ -34,36 +34,61 @@ PLASMA runs a local web server and opens in your browser at
     brew uninstall --cask plasma    # remove
     ```
 
+    Want tomorrow's fixes today instead of the last tagged release? Install
+    `plasma@nightly` instead — built automatically off `dev` every day at
+    07:00 UTC, so expect it to be less stable:
+
+    ```bash
+    brew install --cask yuyichang/plasma/plasma@nightly
+    ```
+
+    Conflicts with `plasma` (both install `PLASMA.app`) — only one can be
+    installed at a time. Homebrew has no version number to compare a nightly
+    build against, so `brew upgrade` won't fetch a new one on its own; run
+    `brew reinstall --cask plasma@nightly` to grab the latest build.
+
 === "Prebuilt binary (no Python)"
 
     Download the asset for your platform from the
     [latest release](https://github.com/YuyiChang/PLASMA/releases/latest):
 
-    | Platform | Asset |
-    |---|---|
-    | macOS (Apple silicon) | `PLASMA_MacOS_arm64` |
-    | Linux (x86-64) | `PLASMA_Linux_x64` |
-    | Linux arm64 — Jetson Orin, **JetPack 6** | `PLASMA_Linux_arm64` |
-    | Windows (x86-64) | `PLASMA_Windows_x64.exe` |
+    | Platform | Installer | Raw folder (no installer) |
+    |---|---|---|
+    | macOS (Apple silicon) | `PLASMA_MacOS_arm64.dmg` | `PLASMA_MacOS_arm64.zip` |
+    | Windows (x86-64) | `PLASMA_Windows_x64_Setup.exe` | `PLASMA_Windows_x64.zip` |
+    | Linux (x86-64) | — | `PLASMA_Linux_x64.tar.gz` |
+    | Linux arm64 — Jetson Orin, **JetPack 6** | — | `PLASMA_Linux_arm64.tar.gz` |
 
     `PLASMA_Linux_arm64` is built against Ubuntu 22.04 (glibc 2.35), so it needs
     **JetPack 6**. On JetPack 5 (Ubuntu 20.04), install from source instead. It
     does not bundle the qb2 LiDAR plugin.
 
-    It is a **single console executable**, not a `.app` or installer. On macOS,
-    the first run is blocked by Gatekeeper — right-click → **Open**, or
-    `xattr -dr com.apple.quarantine PLASMA_MacOS_arm64`, then run it from a
-    terminal:
+    **macOS:** open the `.dmg` and drag **PLASMA.app** into **Applications**.
+    It isn't code-signed or notarized, so the first launch is still blocked
+    by Gatekeeper — right-click PLASMA.app → **Open** once to approve it.
+
+    **Windows:** run `PLASMA_Windows_x64_Setup.exe`. It's unsigned, so
+    SmartScreen will warn "Windows protected your PC" — click **More info →
+    Run anyway**. Installs to Program Files with a Start Menu shortcut, an
+    optional Desktop icon, and an uninstaller.
+
+    **Raw folder (any platform):** unzip / `tar xzf` it. It's a **folder**
+    (the executable plus a support-files directory), not a single file —
+    keep the two together and run the executable from inside it:
 
     ```bash
-    chmod +x PLASMA_MacOS_arm64
-    ./PLASMA_MacOS_arm64
+    chmod +x PLASMA_MacOS_arm64/PLASMA_MacOS_arm64   # macOS/Linux only
+    ./PLASMA_MacOS_arm64/PLASMA_MacOS_arm64
     ```
 
+    On macOS, the raw folder also needs one extra step before Gatekeeper
+    will allow it to run: `xattr -dr com.apple.quarantine PLASMA_MacOS_arm64/`.
+
     !!! tip "macOS: use Homebrew instead"
-        The Homebrew tab above installs the same binary but handles the
+        The Homebrew tab above installs the same app but handles the
         Gatekeeper quarantine step for you, plus gives you a `/Applications`
-        icon and `brew upgrade`.
+        icon and `brew upgrade`. The DMG above is the next-best option if
+        you'd rather not use Homebrew.
 
 === "From PyPI (pip)"
 

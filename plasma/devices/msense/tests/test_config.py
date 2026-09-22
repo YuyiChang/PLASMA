@@ -113,17 +113,24 @@ _EXISTING = [
 ]
 
 
-def test_merge_append_skips_existing_address_case_insensitive():
+def test_merge_append_renames_existing_address_case_insensitive():
     scanned = [{"name": "w1-new", "address": "AA-BB"}, {"name": "w2", "address": "CC-DD"}]
     recs, msg = merge_msense_records(_EXISTING, scanned, overwrite=False)
     assert [r["UUID / MAC Address"] for r in recs] == ["aa-bb", "CC-DD"]
-    # existing row untouched (toggles + nickname preserved)
-    assert recs[0] == _EXISTING[0]
+    # existing row's Name refreshed to the freshly scanned name; toggles + nickname preserved
+    assert recs[0] == {**_EXISTING[0], "Name": "w1-new"}
     assert recs[1] == {
         "Name": "w2", "Nickname": "", "UUID / MAC Address": "CC-DD",
         "Enabled": True, "IMU Stream": False,
     }
-    assert "1 already listed" in msg
+    assert "1 new" in msg and "1 renamed" in msg
+
+
+def test_merge_append_leaves_unchanged_name_alone():
+    scanned = [{"name": "w1", "address": "AA-BB"}]
+    recs, msg = merge_msense_records(_EXISTING, scanned, overwrite=False)
+    assert recs == _EXISTING
+    assert "1 unchanged" in msg
 
 
 def test_merge_overwrite_replaces_and_resets_toggles():

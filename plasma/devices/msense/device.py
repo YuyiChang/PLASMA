@@ -74,6 +74,10 @@ BATTERY_CHAR_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 
 SQC_MIN_MTU = 128
 SQC_DEBUG = True  # emit per-notification telemetry (printed off the BLE thread)
+# devices with no active SQC/live session still get unsolicited NUS traffic
+# (boot chatter, or firmware that exposes the NUS char but doesn't speak the
+# SQC/live protocol) — coalesce that noise instead of one debug line/packet
+NUS_IDLE_LOG_WINDOW_S = 5.0
 
 # NOTE: the overall per-transaction backstop timeout stays DISABLED — the real
 # BLE data rate is far slower than the handoff doc's provisional 35/45 s
@@ -173,6 +177,11 @@ class MotionSenseHRV(PlasmaDevice):
         # addr -> live INFINITY-stream state (see _new_live_state); only ever
         # one NUS stream (SQC snapshot OR live) active per wristband at a time.
         self.live_state = {}
+        # addr -> {"count", "bytes", "window_start"} — coalesces the
+        # "ignored (no active stream)" debug line so a chatty/idle wristband
+        # doesn't flood the console one line per notification (see
+        # _log_nus_ignored / NUS_IDLE_LOG_WINDOW_S)
+        self._nus_idle_rx = {}
         # addr -> {"status": confirmed|unconfirmed|unverifiable|unknown,
         #          "checked_at": ts} — set by collection_ctl(addr, False), see
         # _confirm_acq_stopped. Cleared on the next collection_ctl(addr, True).
@@ -1325,7 +1334,7 @@ class MotionSenseHRV(PlasmaDevice):
             elif live and live.get("session") and not live["session"].is_terminal:
                 self._handle_live_notification(live, name, bytes(data), now, t_entry)
             else:
-                self._sqc_debug(name, f"rx {len(data)}B ignored (no active stream)")
+                self._log_nus_ignored(name, len(data))
         except Exception as e:
             self.info(f"Error handling NUS data from {name}: {e}")
 
@@ -1519,6 +1528,28 @@ class MotionSenseHRV(PlasmaDevice):
             MotionSenseHRV._dbg_q.put_nowait(f"[SQC {name}] {msg}")
         except queue.Full:
             pass  # never block the BLE thread on a slow console
+
+    def _log_nus_ignored(self, name, nbytes):
+        # first notification in a window prints immediately (so isolated,
+        # one-off chatter is still visible); anything after that within
+        # NUS_IDLE_LOG_WINDOW_S is tallied silently and flushed as one
+        # rolled-up line — keeps a continuously-chattering/no-session
+        # wristband (e.g. firmware that exposes NUS but doesn't speak the
+        # SQC/live protocol) from spamming a line per packet
+        st = self._nus_idle_rx.setdefault(name, {"count": 0, "bytes": 0, "window_start": 0.0})
+        now = time.time()
+        st["count"] += 1
+        st["bytes"] += nbytes
+        if now - st["window_start"] < NUS_IDLE_LOG_WINDOW_S:
+            return
+        if st["count"] > 1:
+            self._sqc_debug(
+                name, f"rx {st['count']}x ({st['bytes']}B total) ignored (no active stream)")
+        else:
+            self._sqc_debug(name, f"rx {nbytes}B ignored (no active stream)")
+        st["count"] = 0
+        st["bytes"] = 0
+        st["window_start"] = now
 
     def _sqc_diag_summary(self, name, store=None):
         d = (store or self.sqc_state).get(name, {}).get("diag")

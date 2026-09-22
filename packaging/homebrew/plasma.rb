@@ -22,7 +22,7 @@ cask "plasma" do
   # .github/build_macos_app.sh — the .app has no window of its own; it opens
   # this same binary in a visible Terminal window so startup failures stay
   # visible instead of failing silently in the background).
-  binary "#{appdir}/PLASMA.app/Contents/Resources/plasma-bin", target: "plasma"
+  binary "#{appdir}/PLASMA.app/Contents/Resources/PLASMA_MacOS_arm64/PLASMA_MacOS_arm64", target: "plasma"
 
   postflight_steps do
     # {{appdir}} is expanded at run time by the install-steps runner — the

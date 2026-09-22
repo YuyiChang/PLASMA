@@ -46,7 +46,12 @@ def merge_msense_records(existing, scanned, overwrite):
 
     ``overwrite=True``  → one fresh record per scanned device, nothing kept.
     ``overwrite=False`` → ``existing`` plus a record for every scanned address
-    not already listed (case-insensitive on "UUID / MAC Address").
+    not already listed (case-insensitive on "UUID / MAC Address"). A scanned
+    address that IS already listed has that record's Name refreshed to the
+    freshly advertised name instead — Nickname/Enabled/IMU Stream are left
+    alone — so a firmware update that changes the advertised name reaches the
+    table via Append without needing Overwrite (which would also reset those
+    per-device toggles for every other configured wristband).
 
     Fresh records use the advertised name as Name, blank Nickname, Enabled on,
     IMU Stream off. Returns ``(records, summary_str)``.
@@ -64,13 +69,30 @@ def merge_msense_records(existing, scanned, overwrite):
         records = [_fresh(dev) for dev in scanned]
         return records, f"Overwrote table with {len(records)} scanned wristband(s)"
 
+    scanned_by_addr = {dev["address"].strip().upper(): dev for dev in scanned}
+    records = []
+    renamed = 0
+    for rec in existing:
+        dev = scanned_by_addr.get(str(rec.get("UUID / MAC Address", "")).strip().upper())
+        if dev and dev["name"] != rec.get("Name", ""):
+            rec = {**rec, "Name": dev["name"]}
+            renamed += 1
+        records.append(rec)
+
     have = {str(rec.get("UUID / MAC Address", "")).strip().upper() for rec in existing}
     added = [_fresh(dev) for dev in scanned if dev["address"].strip().upper() not in have]
-    skipped = len(scanned) - len(added)
-    msg = f"Appended {len(added)} new wristband(s)"
-    if skipped:
-        msg += f" ({skipped} already listed)"
-    return list(existing) + added, msg
+    records += added
+
+    unchanged = len(scanned) - len(added) - renamed
+    parts = []
+    if added:
+        parts.append(f"{len(added)} new")
+    if renamed:
+        parts.append(f"{renamed} renamed")
+    if unchanged:
+        parts.append(f"{unchanged} unchanged")
+    msg = "Appended " + ", ".join(parts) if parts else "No changes"
+    return records, msg
 
 
 # ── device_info.json import (YAMS provisioning format) ───────────────────────

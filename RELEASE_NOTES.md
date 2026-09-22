@@ -4,6 +4,75 @@
 
 ---
 
+## 🚀 v2.2.3
+
+### 🩹 MSense wristband fixes
+
+- **Chatty/idle wristbands no longer flood the console.** A connected
+  wristband with no active SQC snapshot or live-view session (e.g. boot
+  chatter, or firmware that exposes the NUS characteristic but doesn't speak
+  the SQC/live protocol) used to log one `[SQC <addr>] rx NB ignored (no
+  active stream)` line per notification. That debug path now coalesces
+  repeated ignored notifications from the same device into a single
+  rolled-up line every few seconds instead of one per packet.
+- **Rescanning after a firmware update now picks up the new advertised
+  name.** Appending scan results to the MSense wristband table used to skip
+  any address already listed, silently keeping its old Name even after a
+  firmware update changed what the device advertises — the only way to pick
+  up the new name was Overwrite, which also reset every other wristband's
+  Nickname/Enabled/IMU Stream. Append now refreshes the Name of any
+  already-listed address to match the freshly scanned name, leaving those
+  per-device settings untouched.
+
+### 🛠 CI / nightly build
+
+- **Nightly build now actually builds off `dev`.** The `schedule` trigger
+  has no branch context of its own, so every checkout step (and the commit
+  hash stamped into the binary) was silently resolving to the repo's default
+  branch instead of `dev` as the comment claimed. `build.yml` now pins
+  `ref: dev` explicitly for the `schedule` event on every job, and derives
+  the stamped commit hash from the checked-out tree (`git rev-parse HEAD`)
+  rather than `github.sha`, which was wrong for the same reason.
+
+### 🍺 Nightly Homebrew cask
+
+- **`brew install --cask yuyichang/plasma/plasma@nightly`** installs the
+  rolling nightly build off `dev`, for anyone who wants fixes before the
+  next versioned release (expect it to be less stable). It conflicts with
+  the tagged `plasma` cask — only one can be installed at a time. Points at
+  the fixed `nightly` release tag `build.yml` republishes daily, so —
+  unlike `plasma` — this cask needs no per-release version/sha256 bump;
+  since Homebrew has no version number to detect a new nightly on its own,
+  `brew reinstall --cask plasma@nightly` is how you pull the latest build.
+
+### 📦 Onedir packaging + native installers
+
+- **Faster launch — no more per-run extraction.** All PyInstaller builds
+  (macOS, Windows, Linux) switched from onefile to onedir: the frozen app
+  now ships as a folder (executable + support files) instead of a single
+  self-extracting binary, so launch no longer re-extracts the whole bundle
+  to a temp directory every time. This is also what was silently causing
+  the frozen-build font-cache churn fixed in v2.2.2 — that fix stays in
+  place, but the underlying temp-dir volatility it worked around is gone.
+- **New Windows installer.** `PLASMA_Windows_x64_Setup.exe`, built with
+  Inno Setup, installs PLASMA with a Start Menu shortcut, an optional
+  Desktop icon, and an uninstaller. Unsigned, so SmartScreen still warns on
+  first run (same as the previous raw `.exe`).
+- **New macOS installer.** `PLASMA_MacOS_arm64.dmg` — open it and drag
+  PLASMA.app into Applications.
+- The raw, installer-free download is still available for every platform —
+  now a `.zip`/`.tar.gz` of the onedir folder instead of a single file — and
+  the Homebrew cask continues to work as before (its install path was
+  updated internally to match the new onedir layout).
+- **CI can now codesign + notarize the macOS `.app`**
+  (`.github/codesign_notarize_macos.sh`), once five signing/notarization
+  secrets are configured — see `docs/reference/release-process.md`. Until
+  then it's a no-op and every macOS asset (raw zip, `.app.zip`, `.dmg`)
+  keeps shipping unsigned/unnotarized exactly as before, same
+  Gatekeeper right-click-Open step.
+
+---
+
 ## 🚀 v2.2.2
 
 ### 🍺 Homebrew cask fix
