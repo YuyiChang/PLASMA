@@ -22,7 +22,7 @@ cask "plasma@nightly" do
   depends_on :macos
 
   app "PLASMA.app"
-  binary "#{appdir}/PLASMA.app/Contents/Resources/plasma-bin", target: "plasma"
+  binary "#{appdir}/PLASMA.app/Contents/Resources/PLASMA_MacOS_arm64/PLASMA_MacOS_arm64", target: "plasma"
 
   postflight_steps do
     # {{appdir}} is expanded at run time by the install-steps runner — the

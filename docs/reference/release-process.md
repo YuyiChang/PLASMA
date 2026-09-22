@@ -7,13 +7,23 @@
 Pushing a `vX.Y.Z` tag (matching `plasma.__version__`, enforced by
 `publish.yml`'s `check-version` job) fires two workflows:
 
-- `build.yml` — builds `PLASMA_MacOS_arm64` / `PLASMA_Linux_x64` /
-  `PLASMA_Linux_arm64` / `PLASMA_Windows_x64.exe`, smoke-tests each, and
-  attaches them to the GitHub Release. The macOS job also wraps the binary
-  in `PLASMA_MacOS_arm64.app.zip` (`.github/build_macos_app.sh` — the
-  Homebrew cask's install target; see the "why not PyInstaller's own
-  `BUNDLE()`" comment at the top of that script). Both macOS assets get a
-  companion `.sha256` file.
+- `build.yml` — builds all four platforms in PyInstaller **onedir** mode (a
+  folder — the exe plus a support-files directory — not a single
+  self-extracting file; switched from onefile to cut launch time, since
+  onefile re-extracts the whole bundle to a temp dir on every run),
+  smoke-tests each, and attaches release assets:
+    - macOS: `PLASMA_MacOS_arm64.zip` (raw onedir folder), `.app.zip`
+      (`.github/build_macos_app.sh` — the Homebrew cask's install target;
+      see the "why not PyInstaller's own `BUNDLE()`" comment at the top of
+      that script), and `.dmg` (`.github/build_macos_dmg.sh`, drag-to-
+      Applications, unsigned/unnotarized). All three get a companion
+      `.sha256` file.
+    - Windows: `PLASMA_Windows_x64.zip` (raw onedir folder) and
+      `PLASMA_Windows_x64_Setup.exe` (Inno Setup,
+      `packaging/windows/plasma_installer.iss` — unsigned, so SmartScreen
+      still warns on first run).
+    - Linux (x64 + arm64): `PLASMA_Linux_<arch>.tar.gz` (raw onedir folder
+      only — no installer for Linux by design).
 - `publish.yml` — builds the sdist/wheel and publishes `plasma-app` to PyPI.
 
 Both are source-of-truth downstream of the tag; nothing else needs to run to
@@ -33,6 +43,19 @@ git -C "$(brew --repo yuyichang/plasma)" diff   # review, then commit + push
 itself and computes the sha256 — you don't need to copy it from the
 `.sha256` file GitHub Actions attaches (that file exists for manual
 verification, e.g. by someone auditing the cask before merging).
+
+**One-time note for the first release built with onedir:** the cask's
+`binary` stanza changed from `.../Contents/Resources/plasma-bin` to
+`.../Contents/Resources/PLASMA_MacOS_arm64/PLASMA_MacOS_arm64` (the onedir
+folder is copied into `Contents/Resources/` keeping its own name now,
+instead of being flattened to a single `plasma-bin` file). `bump-cask-pr`
+only bumps `version`/`sha256`, so this path fix needs a manual edit
+alongside the first onedir-based version bump — already applied in
+`packaging/homebrew/plasma.rb`'s in-repo template; carry it into the tap's
+`Casks/plasma.rb` by hand when bumping. (Considered switching the cask to
+consume the `.dmg` directly via Homebrew Cask's native `.dmg` handling
+instead of the hand-rolled `.app.zip` — deferred; `.app.zip` stays the
+cask's source for now.)
 
 **Gotcha:** `bump-cask-pr` finds the *old* sha256 by searching the file for
 its literal (lowercased) text and replacing it — it only works when the

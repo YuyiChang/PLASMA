@@ -49,9 +49,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='PLASMA_MacOS_arm64',
     icon='plasma/resources/icons/plasma.icns',
     debug=False,
@@ -66,4 +65,17 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+# onedir, not onefile: EXE() above is just the launcher stub; COLLECT()
+# assembles the actual dist/PLASMA_MacOS_arm64/ folder (exe + support
+# files) that ships — no more re-extracting to a temp dir on every launch.
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='PLASMA_MacOS_arm64',
 )

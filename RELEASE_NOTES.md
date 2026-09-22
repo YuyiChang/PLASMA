@@ -45,6 +45,27 @@
   since Homebrew has no version number to detect a new nightly on its own,
   `brew reinstall --cask plasma@nightly` is how you pull the latest build.
 
+### 📦 Onedir packaging + native installers
+
+- **Faster launch — no more per-run extraction.** All PyInstaller builds
+  (macOS, Windows, Linux) switched from onefile to onedir: the frozen app
+  now ships as a folder (executable + support files) instead of a single
+  self-extracting binary, so launch no longer re-extracts the whole bundle
+  to a temp directory every time. This is also what was silently causing
+  the frozen-build font-cache churn fixed in v2.2.2 — that fix stays in
+  place, but the underlying temp-dir volatility it worked around is gone.
+- **New Windows installer.** `PLASMA_Windows_x64_Setup.exe`, built with
+  Inno Setup, installs PLASMA with a Start Menu shortcut, an optional
+  Desktop icon, and an uninstaller. Unsigned, so SmartScreen still warns on
+  first run (same as the previous raw `.exe`).
+- **New macOS installer.** `PLASMA_MacOS_arm64.dmg` — open it and drag
+  PLASMA.app into Applications. Unsigned/unnotarized, same Gatekeeper
+  right-click-Open step as before.
+- The raw, installer-free download is still available for every platform —
+  now a `.zip`/`.tar.gz` of the onedir folder instead of a single file — and
+  the Homebrew cask continues to work as before (its install path was
+  updated internally to match the new onedir layout).
+
 ---
 
 ## 🚀 v2.2.2
