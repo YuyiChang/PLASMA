@@ -4,6 +4,38 @@
 
 ---
 
+## 🚀 v2.2.3 (unreleased)
+
+### 🩹 MSense wristband fixes
+
+- **Chatty/idle wristbands no longer flood the console.** A connected
+  wristband with no active SQC snapshot or live-view session (e.g. boot
+  chatter, or firmware that exposes the NUS characteristic but doesn't speak
+  the SQC/live protocol) used to log one `[SQC <addr>] rx NB ignored (no
+  active stream)` line per notification. That debug path now coalesces
+  repeated ignored notifications from the same device into a single
+  rolled-up line every few seconds instead of one per packet.
+- **Rescanning after a firmware update now picks up the new advertised
+  name.** Appending scan results to the MSense wristband table used to skip
+  any address already listed, silently keeping its old Name even after a
+  firmware update changed what the device advertises — the only way to pick
+  up the new name was Overwrite, which also reset every other wristband's
+  Nickname/Enabled/IMU Stream. Append now refreshes the Name of any
+  already-listed address to match the freshly scanned name, leaving those
+  per-device settings untouched.
+
+### 🛠 CI / nightly build
+
+- **Nightly build now actually builds off `dev`.** The `schedule` trigger
+  has no branch context of its own, so every checkout step (and the commit
+  hash stamped into the binary) was silently resolving to the repo's default
+  branch instead of `dev` as the comment claimed. `build.yml` now pins
+  `ref: dev` explicitly for the `schedule` event on every job, and derives
+  the stamped commit hash from the checked-out tree (`git rev-parse HEAD`)
+  rather than `github.sha`, which was wrong for the same reason.
+
+---
+
 ## 🚀 v2.2.2
 
 ### 🍺 Homebrew cask fix
