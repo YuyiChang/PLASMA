@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Entitlements for the Hardened Runtime notarization requires
-  (codesign --options runtime). Without these, PLASMA's frozen onedir
+  (codesign's "options runtime" flag). Without these, PLASMA's frozen onedir
   bundle fails at launch under Hardened Runtime, not at signing/notarization
   time — Apple's notary service happily accepts it, it just won't run:
 
