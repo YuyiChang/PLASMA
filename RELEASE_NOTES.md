@@ -4,6 +4,29 @@
 
 ---
 
+## 🚀 v2.2.4 (unreleased)
+
+### 🍺 Self-updating Homebrew tap
+
+- **The `yuyichang/homebrew-plasma` tap now bumps its own `plasma` cask.** A
+  daily scheduled job living in that repo (not this one) checks PLASMA's
+  latest tagged release and opens a PR updating `version`/`sha256` when it's
+  out of date — no more running `brew bump-cask-pr` by hand after every
+  release. Runs on the tap repo's own default `GITHUB_TOKEN`, so no
+  cross-repo credential was needed to set this up.
+
+### 🔏 Optional Windows codesigning
+
+- **CI can now codesign the Windows `.exe`/installer** with a self-signed
+  certificate (`.github/codesign_windows.ps1`), once two secrets are
+  configured — see `docs/reference/release-process.md`. Until then it's a
+  no-op and Windows assets keep shipping unsigned exactly as before. Note
+  this does **not** remove the SmartScreen warning (that requires a
+  CA-issued certificate); it buys tamper-evidence and a consistent signer
+  identity across releases instead.
+
+---
+
 ## 🚀 v2.2.3
 
 ### 🩹 MSense wristband fixes

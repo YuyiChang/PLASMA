@@ -314,17 +314,35 @@ jobs:
           VERSION="$(python -c 'import re,pathlib; print(re.search(r"__version__ = \"(.*)\"", pathlib.Path("plasma/__init__.py").read_text())[1])')"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
+      # No-op (unsigned, unchanged) unless the WINDOWS_CERTIFICATE_*
+      # secrets are set — see docs/reference/release-process.md. A
+      # self-signed cert does NOT stop the SmartScreen warning below; see
+      # that doc / .github/codesign_windows.ps1 for what it does buy you.
+      - name: Codesign raw exe
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: .github\codesign_windows.ps1 dist\PLASMA_Windows_x64\PLASMA_Windows_x64.exe
+
       # raw, installer-free download — a zip of the onedir folder (exe +
       # its support-files directory; the two must stay together)
       - name: Zip raw onedir folder
         shell: pwsh
         run: Compress-Archive -Path dist\PLASMA_Windows_x64\* -DestinationPath dist\PLASMA_Windows_x64.zip
 
-      # unsigned — first run shows a SmartScreen "unknown publisher" warning,
-      # same as today's raw unsigned .exe (see packaging/windows/plasma_installer.iss)
+      # SmartScreen still warns on first run either way (self-signed certs
+      # earn no reputation with SmartScreen) — see packaging/windows/plasma_installer.iss
       - name: Build installer
         shell: pwsh
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=$env:VERSION packaging\windows\plasma_installer.iss'
+
+      - name: Codesign installer
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: .github\codesign_windows.ps1 dist\PLASMA_Windows_x64_Setup.exe
 
       # the .iss script can't be built/tested on the macOS dev machine this
       # was written on — silently install the built installer and re-run the

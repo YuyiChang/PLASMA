@@ -107,6 +107,55 @@ both go stale for signed releases — harmless to leave (clearing quarantine
 on an already-legitimate app is a no-op, not a problem), but worth cleaning
 up once a signed release has actually shipped.
 
+## Codesigning (Windows, self-signed)
+
+`build-windows`'s "Codesign raw exe" / "Codesign installer" steps
+(`.github/codesign_windows.ps1`) sign `PLASMA_Windows_x64.exe` and
+`PLASMA_Windows_x64_Setup.exe` with `signtool` — but only if two repo
+secrets are set. Until they are, this no-ops and every Windows asset ships
+unsigned exactly as before.
+
+**Important — set expectations before setting this up:** unlike the macOS
+notarization above, there is no free path to a CA-issued Windows
+certificate, and **a self-signed certificate does not stop SmartScreen's
+"Windows protected your PC" warning** — SmartScreen trusts a signature via
+Microsoft's reputation system, which only recognizes certificates from a
+handful of trusted CAs (building reputation over many downloads for a
+standard OV cert, or instantly for a paid EV cert). A self-signed cert is
+invisible to that system entirely. What it *does* buy: tamper-evidence, a
+consistent signer identity across releases (so an update can be verified as
+"from the same publisher" even though that publisher is unverified), and
+the exact signing plumbing a real purchased cert would slot into later —
+just swap the two secrets below, no pipeline changes.
+
+**One-time setup** — generate a self-signed code-signing certificate
+(anywhere with `openssl`, e.g. this same macOS machine; it doesn't need to
+be done on Windows):
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes \
+  -subj "/CN=PLASMA/O=YuyiChang" -addext "extendedKeyUsage=codeSigning"
+openssl pkcs12 -export -out plasma_selfsigned.pfx -inkey key.pem -in cert.pem \
+  -passout pass:<choose a password> -legacy   # -legacy: signtool needs RC2/3DES-era PKCS12, not OpenSSL 3's new default
+base64 -i plasma_selfsigned.pfx -o pfx_base64.txt
+rm key.pem cert.pem   # don't leave the private key sitting on disk afterward
+```
+
+**Set these as GitHub Actions repo secrets** (never paste secret material
+into a chat or commit):
+
+```bash
+gh secret set WINDOWS_CERTIFICATE_PFX_BASE64 < pfx_base64.txt --repo YuyiChang/PLASMA
+gh secret set WINDOWS_CERTIFICATE_PASSWORD --repo YuyiChang/PLASMA   # prompts, hidden input
+rm pfx_base64.txt plasma_selfsigned.pfx
+```
+
+No verification step runs after signing (unlike the macOS script's
+`codesign --verify`) — `signtool verify /pa` checks the signature chains to
+a trusted root, which a self-signed cert never does by design, so that
+check would always "fail" even on a correct signature. The `signtool sign`
+call's own exit code is the real check.
+
 ## Homebrew tap (yuyichang/homebrew-plasma)
 
 Separate repo. **Self-automated** via
