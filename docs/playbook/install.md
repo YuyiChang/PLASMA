@@ -15,10 +15,10 @@ ones under *For developers*.
     [latest release](https://github.com/YuyiChang/PLASMA/releases/latest).
 
     === "macOS"
+        [:material-download: Download PLASMA for Apple Silicon (.dmg)](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_MacOS_arm64.dmg){ .md-button .md-button--primary }
 
-        [:material-download: Download PLASMA for macOS (.dmg)](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_MacOS_arm64.dmg){ .md-button .md-button--primary }
-
-        Apple silicon (M1 and later) only — there is no Intel build.
+        !!! tip "For Apple Silicon only (M1 and later)"
+            For Intel CPUs, please see **For Developers → From Source**.
 
         1. Open the `.dmg` and drag **PLASMA.app** into **Applications**.
         2. The first time only: right-click PLASMA.app → **Open**, then
@@ -115,7 +115,7 @@ ones under *For developers*.
 
         Installs **PLASMA.app** into `/Applications` (launch it from
         Spotlight, the Dock, or Finder) plus a `plasma` command on `$PATH`.
-        Apple silicon only — there is no Intel build.
+        Apple silicon only 
 
         ```bash
         plasma
@@ -301,6 +301,9 @@ PLASMA opens on the **Session Dashboard**. The tab strip across the top is:
 - **Configuration** — the device catalog, network addresses, demo mode, power.
 
 The YAMS tab only appears when an MSense device (real or simulated) is enabled.
+
+!!! tip "Seeing more tabs than it should?"
+    You can manage what devices be enabled by referencing to [Configure PLASMA](configure.md).
 
 ---
 
