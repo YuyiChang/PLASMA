@@ -18,7 +18,7 @@ files under `plasma/devices/msense/docs/` in the repository for that.
 <div class="grid cards" markdown>
 
 - :material-download: **[Install & first launch](playbook/install.md)**
-  From source or a prebuilt binary; what PLASMA writes to disk.
+  Download the app, use a package manager, or install from source; what PLASMA writes to disk.
 
 - :material-cog: **[Configure PLASMA](playbook/configure.md)**
   The device catalog, network addresses, demo mode, restart / shut down.

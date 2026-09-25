@@ -166,7 +166,9 @@ excludes prereleases, so it naturally skips the rolling `nightly` tag — and,
 if the version differs from what `Casks/plasma.rb` currently has, downloads
 that release's `PLASMA_MacOS_arm64.app.zip`, computes its sha256, and opens
 a PR bumping both. Merge (or close) that PR by hand; nothing pushes to
-`main` automatically.
+`main` automatically. Needs the tap repo's **Settings → Actions → General →
+"Allow GitHub Actions to create and approve pull requests"** turned on (it
+is), or the Open PR step fails.
 
 This intentionally runs as a job *inside* `homebrew-plasma`, using that
 repo's own default `GITHUB_TOKEN` (scoped to itself, via `permissions:
@@ -217,3 +219,44 @@ cask at all. The tradeoff is the one `brew bump-cask-pr` normally buys you:
 Homebrew can't tell when a new nightly has landed, so users have to
 `brew reinstall --cask plasma@nightly` themselves to pick one up (documented
 in the cask's own `caveats`).
+
+## Scoop bucket (YuyiChang/scoop-plasma)
+
+Windows counterpart of the Homebrew tap: a separate repo holding
+`bucket/plasma.json` and `bucket/plasma-nightly.json` (sources kept in
+`packaging/scoop/` here). Installs `PLASMA_Windows_x64.zip` (the raw onedir
+folder), not the Inno Setup installer. The point is SmartScreen: its
+"Windows protected your PC" prompt keys off the Mark-of-the-Web a browser
+stamps on downloads, and Scoop downloads the zip itself, so the unsigned
+exe launches with no prompt. Code signing isn't involved at all. (It does
+not help against Smart App Control or AppLocker/WDAC, which judge the
+binary itself.)
+
+**Self-automated** the same way as the tap:
+`.github/workflows/bump-plasma.yml` *in that repo* polls
+`/releases/latest` daily (plus `workflow_dispatch`), and if the version
+differs from `bucket/plasma.json`'s, downloads that release's
+`PLASMA_Windows_x64.zip`, computes its sha256, and opens a PR rewriting
+`version` / `architecture.64bit.url` / `architecture.64bit.hash` with `jq`.
+Merge (or close) by hand. Same own-`GITHUB_TOKEN`, no-cross-repo-PAT
+reasoning as the tap. Needs the repo's **Settings → Actions → General →
+"Allow GitHub Actions to create and approve pull requests"** turned on (it
+is), or the Open PR step fails.
+
+The manifest also carries `checkver` / `autoupdate`, so a by-hand bump on a
+Windows machine with Scoop installed is:
+
+```powershell
+& "$(scoop prefix scoop)\bin\checkver.ps1" -App plasma -Dir .\bucket -Update
+```
+
+Keep `packaging/scoop/plasma.json` in sync if you change anything other
+than version/url/hash (the bump workflow only touches those three in the
+bucket copy).
+
+### `plasma-nightly` — no bump needed, ever
+
+`"version": "nightly"` with no `hash` is Scoop's built-in convention for
+this: it skips hash verification and treats the install as
+`nightly-<yyyyMMdd>`, so `scoop update plasma-nightly` re-downloads the
+fixed `nightly`-tag URL at most once a day. Nothing to bump per release.
