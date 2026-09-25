@@ -15,6 +15,17 @@
   release. Runs on the tap repo's own default `GITHUB_TOKEN`, so no
   cross-repo credential was needed to set this up.
 
+### 🪣 Scoop bucket for Windows
+
+- **`scoop install plasma` from the new
+  [`YuyiChang/scoop-plasma`](https://github.com/YuyiChang/scoop-plasma)
+  bucket** installs the Windows build with a Start Menu shortcut and a
+  `plasma` command, and **skips the SmartScreen "Windows protected your PC"
+  warning** (Scoop's own download carries no Mark-of-the-Web). A
+  `plasma-nightly` manifest tracks the rolling nightly. The bucket bumps
+  itself the same way the Homebrew tap does. Manifests are kept in
+  `packaging/scoop/`.
+
 ### 🔏 Optional Windows codesigning
 
 - **CI can now codesign the Windows `.exe`/installer** with a self-signed

@@ -27,7 +27,9 @@ from faults.
 ## quickstart
 
 **macOS: `brew install --cask yuyichang/plasma/plasma`** is the recommended
-way to get PLASMA — no Python, no `liblsl`, no Gatekeeper dance. See
+way to get PLASMA — no Python, no `liblsl`, no Gatekeeper dance. **Windows:
+`scoop bucket add plasma https://github.com/YuyiChang/scoop-plasma` then
+`scoop install plasma`** does the same, without the SmartScreen warning. See
 [Install & first launch](https://yuyichang.github.io/PLASMA/playbook/install/)
 for that and every other install path (prebuilt binaries, PyPI, from source).
 

@@ -5,169 +5,261 @@ PLASMA runs a local web server and opens in your browser at
 
 ## Get PLASMA
 
-=== "Homebrew (macOS)"
+**Not sure which to pick? Choose _Download the app_** and click the link for
+your operating system. None of the options below need Python, except the
+ones under *For developers*.
 
-    **Recommended on macOS** — no Python, no `liblsl` install, and no manual
-    Gatekeeper dance.
+=== "Download the app (recommended)"
 
-    ```bash
-    brew install --cask yuyichang/plasma/plasma
-    ```
+    A ready-to-run PLASMA — no Python, no `liblsl` install. Always the
+    [latest release](https://github.com/YuyiChang/PLASMA/releases/latest).
 
-    Installs **PLASMA.app** into `/Applications` (launch it from
-    Spotlight, the Dock, or Finder) plus a `plasma` command on `$PATH`.
-    Apple silicon only — there is no Intel build.
+    === "macOS"
 
-    ```bash
-    plasma
-    ```
+        [:material-download: Download PLASMA for macOS (.dmg)](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_MacOS_arm64.dmg){ .md-button .md-button--primary }
 
-    PLASMA has no GUI window of its own — it's a local web server. Either
-    launch path opens a Terminal window running the real console app, then
-    your browser at `http://127.0.0.1:7860`. The binary isn't code-signed
-    or notarized, but the cask clears the quarantine attribute on install,
-    so Gatekeeper won't block the first run (unlike the raw prebuilt-binary
-    download in the next tab, which needs a manual right-click → Open).
+        Apple silicon (M1 and later) only — there is no Intel build.
 
-    ```bash
-    brew upgrade --cask plasma      # update to the latest release
-    brew uninstall --cask plasma    # remove
-    ```
+        1. Open the `.dmg` and drag **PLASMA.app** into **Applications**.
+        2. The first time only: right-click PLASMA.app → **Open**, then
+           **Open** again. PLASMA isn't code-signed or notarized, so a plain
+           double-click is blocked by Gatekeeper until you approve it once.
 
-    Want tomorrow's fixes today instead of the last tagged release? Install
-    `plasma@nightly` instead — built automatically off `dev` every day at
-    07:00 UTC, so expect it to be less stable:
+        Launching PLASMA opens a Terminal window running the app, then your
+        browser at `http://127.0.0.1:7860`.
 
-    ```bash
-    brew install --cask yuyichang/plasma/plasma@nightly
-    ```
+        !!! tip "Skip the Gatekeeper step and get one-command updates"
+            See **Package manager → macOS** (Homebrew).
 
-    Conflicts with `plasma` (both install `PLASMA.app`) — only one can be
-    installed at a time. Homebrew has no version number to compare a nightly
-    build against, so `brew upgrade` won't fetch a new one on its own; run
-    `brew reinstall --cask plasma@nightly` to grab the latest build.
+        ??? note "No installer? Use the raw folder"
+            [`PLASMA_MacOS_arm64.zip`](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_MacOS_arm64.zip)
+            is the bare app folder (the executable plus a support-files
+            directory — keep the two together). Unzip it, then:
 
-=== "Prebuilt binary (no Python)"
+            ```bash
+            xattr -dr com.apple.quarantine PLASMA_MacOS_arm64/   # let Gatekeeper run it
+            chmod +x PLASMA_MacOS_arm64/PLASMA_MacOS_arm64
+            ./PLASMA_MacOS_arm64/PLASMA_MacOS_arm64
+            ```
 
-    Download the asset for your platform from the
-    [latest release](https://github.com/YuyiChang/PLASMA/releases/latest):
+    === "Windows"
 
-    | Platform | Installer | Raw folder (no installer) |
-    |---|---|---|
-    | macOS (Apple silicon) | `PLASMA_MacOS_arm64.dmg` | `PLASMA_MacOS_arm64.zip` |
-    | Windows (x86-64) | `PLASMA_Windows_x64_Setup.exe` | `PLASMA_Windows_x64.zip` |
-    | Linux (x86-64) | — | `PLASMA_Linux_x64.tar.gz` |
-    | Linux arm64 — Jetson Orin, **JetPack 6** | — | `PLASMA_Linux_arm64.tar.gz` |
+        [:material-download: Download PLASMA for Windows (Setup.exe)](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_Windows_x64_Setup.exe){ .md-button .md-button--primary }
 
-    `PLASMA_Linux_arm64` is built against Ubuntu 22.04 (glibc 2.35), so it needs
-    **JetPack 6**. On JetPack 5 (Ubuntu 20.04), install from source instead. It
-    does not bundle the qb2 LiDAR plugin.
+        64-bit (x86-64) Windows.
 
-    **macOS:** open the `.dmg` and drag **PLASMA.app** into **Applications**.
-    It isn't code-signed or notarized, so the first launch is still blocked
-    by Gatekeeper — right-click PLASMA.app → **Open** once to approve it.
+        1. Run `PLASMA_Windows_x64_Setup.exe`.
+        2. It's unsigned, so SmartScreen warns "Windows protected your PC" —
+           click **More info → Run anyway**.
 
-    **Windows:** run `PLASMA_Windows_x64_Setup.exe`. It's unsigned, so
-    SmartScreen will warn "Windows protected your PC" — click **More info →
-    Run anyway**. Installs to Program Files with a Start Menu shortcut, an
-    optional Desktop icon, and an uninstaller.
+        Installs to Program Files with a Start Menu shortcut, an optional
+        Desktop icon, and an uninstaller. Launching PLASMA opens a console
+        window running the app, then your browser at
+        `http://127.0.0.1:7860`.
 
-    **Raw folder (any platform):** unzip / `tar xzf` it. It's a **folder**
-    (the executable plus a support-files directory), not a single file —
-    keep the two together and run the executable from inside it:
+        !!! tip "Skip the SmartScreen warning and get one-command updates"
+            See **Package manager → Windows** (Scoop).
 
-    ```bash
-    chmod +x PLASMA_MacOS_arm64/PLASMA_MacOS_arm64   # macOS/Linux only
-    ./PLASMA_MacOS_arm64/PLASMA_MacOS_arm64
-    ```
+        ??? note "No installer? Use the raw folder"
+            [`PLASMA_Windows_x64.zip`](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_Windows_x64.zip)
+            is the bare app folder (the executable plus a support-files
+            directory — keep the two together). Unzip it and run
+            `PLASMA_Windows_x64.exe` from inside the folder. SmartScreen
+            warns on first run the same way as the installer.
 
-    On macOS, the raw folder also needs one extra step before Gatekeeper
-    will allow it to run: `xattr -dr com.apple.quarantine PLASMA_MacOS_arm64/`.
+    === "Linux"
 
-    !!! tip "macOS: use Homebrew instead"
-        The Homebrew tab above installs the same app but handles the
-        Gatekeeper quarantine step for you, plus gives you a `/Applications`
-        icon and `brew upgrade`. The DMG above is the next-best option if
-        you'd rather not use Homebrew.
+        | Machine | Download |
+        |---|---|
+        | x86-64 PC | [:material-download: `PLASMA_Linux_x64.tar.gz`](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_Linux_x64.tar.gz) |
+        | ARM64 — Jetson Orin, **JetPack 6** | [:material-download: `PLASMA_Linux_arm64.tar.gz`](https://github.com/YuyiChang/PLASMA/releases/latest/download/PLASMA_Linux_arm64.tar.gz) |
 
-=== "From PyPI (pip)"
+        It's a **folder** (the executable plus a support-files directory),
+        not a single file — keep the two together and run the executable
+        from inside it:
 
-    Installs the latest published release, no clone needed. You still need
-    [`liblsl`](https://github.com/sccn/liblsl) — a native library pip cannot
+        ```bash
+        tar xzf PLASMA_Linux_x64.tar.gz
+        chmod +x PLASMA_Linux_x64/PLASMA_Linux_x64
+        ./PLASMA_Linux_x64/PLASMA_Linux_x64
+        ```
+
+        (Substitute `arm64` for `x64` on a Jetson.) The app starts in the
+        terminal and opens your browser at `http://127.0.0.1:7860`.
+
+        `PLASMA_Linux_arm64` is built against Ubuntu 22.04 (glibc 2.35), so it
+        needs **JetPack 6**. On JetPack 5 (Ubuntu 20.04), install from source
+        instead (**For developers → From source**). It does not bundle the
+        qb2 LiDAR plugin.
+
+=== "Package manager"
+
+    One command to install, one to update, and **no security warning** on
+    first launch. Installs the same app as *Download the app*.
+
+    === "macOS"
+
+        **Homebrew**
+
+        ```bash
+        # one-time, if you don't have Homebrew yet (asks for your password)
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+        brew install --cask yuyichang/plasma/plasma
+        ```
+
+        When the Homebrew installer finishes, run the commands it prints under
+        **Next steps** — they put `brew` on your `PATH` (Homebrew lives in
+        `/opt/homebrew` on Apple silicon). Otherwise the next line fails with
+        `command not found: brew`.
+
+        Installs **PLASMA.app** into `/Applications` (launch it from
+        Spotlight, the Dock, or Finder) plus a `plasma` command on `$PATH`.
+        Apple silicon only — there is no Intel build.
+
+        ```bash
+        plasma
+        ```
+
+        PLASMA has no GUI window of its own — it's a local web server. Either
+        launch path opens a Terminal window running the real console app, then
+        your browser at `http://127.0.0.1:7860`. The binary isn't code-signed
+        or notarized, but the cask clears the quarantine attribute on install,
+        so Gatekeeper won't block the first run.
+
+        ```bash
+        brew upgrade --cask plasma      # update to the latest release
+        brew uninstall --cask plasma    # remove
+        ```
+
+        ??? note "Nightly builds"
+            Want tomorrow's fixes today instead of the last tagged release?
+            Install `plasma@nightly` instead — built automatically off `dev`
+            every day at 07:00 UTC, so expect it to be less stable:
+
+            ```bash
+            brew install --cask yuyichang/plasma/plasma@nightly
+            ```
+
+            Conflicts with `plasma` (both install `PLASMA.app`) — only one can
+            be installed at a time. Homebrew has no version number to compare
+            a nightly build against, so `brew upgrade` won't fetch a new one on
+            its own; run `brew reinstall --cask plasma@nightly` to grab the
+            latest build.
+
+    === "Windows"
+
+        **Scoop**
+
+        ```powershell
+        # one-time, if you don't have Scoop yet (no admin needed)
+        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+        irm get.scoop.sh | iex
+
+        scoop bucket add plasma https://github.com/YuyiChang/scoop-plasma
+        scoop install plasma
+        ```
+
+        Installs PLASMA into `~\scoop\apps\plasma` with a **PLASMA** Start Menu
+        shortcut plus a `plasma` command on `PATH`. x86-64 only.
+
+        ```powershell
+        plasma
+        ```
+
+        PLASMA has no GUI window of its own — it's a local web server. Either
+        launch path opens a console window running the app, then your browser
+        at `http://127.0.0.1:7860`. The binary isn't signed; SmartScreen only
+        warns about files a *browser* downloaded (it keys off the
+        Mark-of-the-Web the browser attaches), and Scoop downloads the release
+        itself, so no warning appears. Machines with **Smart App Control** on,
+        or an AppLocker/WDAC policy against unsigned apps, will still block it.
+
+        ```powershell
+        scoop update plasma      # update to the latest release
+        scoop uninstall plasma   # remove
+        ```
+
+        ??? note "Nightly builds"
+            For the nightly build off `dev` (rebuilt every day at 07:00 UTC,
+            less stable), install `plasma/plasma-nightly` instead. It installs
+            the same `plasma` command and shortcut, so only have one of the two
+            installed at a time; `scoop update plasma-nightly` fetches the
+            latest nightly.
+
+    === "Linux"
+
+        No package-manager option yet — use **Download the app → Linux**.
+
+=== "For developers"
+
+    Run PLASMA from a Python environment — to develop it, run unreleased
+    changes, or use it as a library. All of these need
+    [`liblsl`](https://github.com/sccn/liblsl), a native library pip cannot
     supply everywhere; conda-forge is the reliable source.
-
-    ```bash
-    conda create -n plasma python=3.12
-    conda activate plasma
-    conda install -c conda-forge liblsl
-    pip install "plasma-app[all]"    # or a lean subset: "plasma-app[msense]", "plasma-app[qb2,pupil]"
-    plasma
-    ```
 
     !!! warning "Don't skip `liblsl`"
         It is the step most installs miss. Without it the built-in recorder
         reports *unavailable* and no XDF is written.
 
-    !!! tip "zsh users: quote the extras"
-        `pip install plasma-app[desktop]` fails in zsh with "no matches
-        found" — `[...]` is glob syntax there. Quote the whole spec:
-        `pip install "plasma-app[desktop]"`.
+    === "pip (PyPI)"
 
-    `pip install` only puts `plasma` on `$PATH` — it doesn't add a clickable
-    icon anywhere. For a Desktop (and Start Menu / app-launcher) icon that
-    launches this environment's PLASMA without a terminal command:
+        Installs the latest published release, no clone needed.
 
-    ```bash
-    pip install "plasma-app[desktop]"
-    plasma-install-shortcut
-    ```
+        ```bash
+        conda create -n plasma python=3.12
+        conda activate plasma
+        conda install -c conda-forge liblsl
+        pip install "plasma-app[all]"    # or a lean subset: "plasma-app[msense]", "plasma-app[qb2,pupil]"
+        plasma
+        ```
 
-    Add `--no-terminal` to hide the console window (macOS: uses an Automator
-    wrapper and may need a one-time Gatekeeper approval), or
-    `--no-startmenu` for a Desktop-only icon. See
-    `plasma-install-shortcut --help`.
+        !!! tip "zsh users: quote the extras"
+            `pip install plasma-app[desktop]` fails in zsh with "no matches
+            found" — `[...]` is glob syntax there. Quote the whole spec:
+            `pip install "plasma-app[desktop]"`.
 
-=== "From source"
+        For a clickable icon, see *Desktop / Start Menu shortcut* below
+        (use `pip install "plasma-app[desktop]"`).
 
-    For development or to run unreleased changes. You need
-    [`liblsl`](https://github.com/sccn/liblsl) — a native library pip cannot
-    supply everywhere; conda-forge is the reliable source.
+    === "From source"
 
-    ```bash
-    conda create -n plasma python=3.12
-    conda activate plasma
-    conda install -c conda-forge liblsl
-    pip install -e ".[all]"        # or a lean subset: ".[msense]", ".[qb2,pupil]"
-    python -m plasma
-    ```
+        For development or to run unreleased changes.
 
-    !!! warning "Don't skip `liblsl`"
-        It is the step most source installs miss. Without it the built-in
-        recorder reports *unavailable* and no XDF is written.
+        ```bash
+        conda create -n plasma python=3.12
+        conda activate plasma
+        conda install -c conda-forge liblsl
+        pip install -e ".[all]"        # or a lean subset: ".[msense]", ".[qb2,pupil]"
+        python -m plasma
+        ```
 
-    `pip install` only puts `plasma` on `$PATH` — it doesn't add a clickable
-    icon anywhere. For a Desktop (and Start Menu / app-launcher) icon that
-    launches this environment's PLASMA without a terminal command:
+        For a clickable icon, see *Desktop / Start Menu shortcut* below
+        (use `pip install -e ".[desktop]"`).
 
-    ```bash
-    pip install -e ".[desktop]"
-    plasma-install-shortcut
-    ```
+    === "As a library"
 
-    This is separate from the prebuilt-binary tab above: it's a shortcut to
-    *this* pip install, not a standalone Python-free executable. Add
-    `--no-terminal` to hide the console window (macOS: uses an Automator
-    wrapper and may need a one-time Gatekeeper approval), or
-    `--no-startmenu` for a Desktop-only icon. See
-    `plasma-install-shortcut --help`.
+        The distribution is `plasma-app`; the import package is `plasma`.
 
-=== "Into another project"
+        ```bash
+        pip install "plasma-app[msense] @ git+https://github.com/YuyiChang/PLASMA@v2.0.0"
+        ```
 
-    The distribution is `plasma-app`; the import package is `plasma`.
+    ??? note "Desktop / Start Menu shortcut"
+        `pip install` only puts `plasma` on `$PATH` — it doesn't add a
+        clickable icon anywhere. For a Desktop (and Start Menu / app-launcher)
+        icon that launches this environment's PLASMA without a terminal
+        command, install the `desktop` extra, then:
 
-    ```bash
-    pip install "plasma-app[msense] @ git+https://github.com/YuyiChang/PLASMA@v2.0.0"
-    ```
+        ```bash
+        plasma-install-shortcut
+        ```
+
+        This is a shortcut to *this* Python environment, not a standalone
+        Python-free app (that's *Download the app*). Add `--no-terminal` to
+        hide the console window (macOS: uses an Automator wrapper and may
+        need a one-time Gatekeeper approval), or `--no-startmenu` for a
+        Desktop-only icon. See `plasma-install-shortcut --help`.
 
 ## First launch
 
@@ -177,9 +269,9 @@ configuration. Where the home directory is depends on how you started it:
 | How you run PLASMA | Home directory |
 |---|---|
 | `$PLASMA_HOME` is set | that path (always wins) |
-| Prebuilt binary / Homebrew, macOS | `~/Library/Application Support/PLASMA` |
-| Prebuilt binary, Windows | `%LOCALAPPDATA%\PLASMA` |
-| Prebuilt binary, Linux | `~/.local/share/plasma` |
+| Downloaded app / Homebrew, macOS | `~/Library/Application Support/PLASMA` |
+| Downloaded app / Scoop, Windows | `%LOCALAPPDATA%\PLASMA` |
+| Downloaded app, Linux | `~/.local/share/plasma` |
 | From source / PyPI | the current working directory |
 
 The path is resolved **once, at startup** — set `PLASMA_HOME` before launching
