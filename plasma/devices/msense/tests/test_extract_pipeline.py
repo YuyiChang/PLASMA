@@ -133,6 +133,21 @@ def test_extract_dir_report_shape():
         assert len(report.resolutions) == 2
 
 
+def test_extract_dir_names_files_with_and_without_participant_encoding(tmp_path):
+    src = tmp_path / "src"
+    out = tmp_path / "out"
+    src.mkdir()
+    (src / "ac5066.bin").write_bytes(_w_ac_v2(20))
+    (src / "ppg1047.bin").write_bytes(_w_ppg_v2(20))
+    (src / "123456ppg1700000000.bin").write_bytes(_w_ppg_v2(20))
+
+    report = extract_dir(str(src), str(out),
+                         options=ExtractionOptions(save_format="csv"))
+
+    names = {os.path.basename(path) for path in report.out_paths}
+    assert names == {"ac.csv", "ppg.csv", "sub-1234_ses-56__ppg.csv"}
+
+
 SPB = 1358  # ECB2 samples per block
 
 

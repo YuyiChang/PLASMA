@@ -15,6 +15,27 @@ from ..extract.options import (
 from ..extract.pipeline import extract_dir, extract_zip, get_session_encoding
 
 
+_SAVE_FORMATS = ("feather", "csv", "pickle")
+_PREF_CONFIG_KEY = "msense_extraction"
+
+
+def _saved_save_format():
+    from plasma.config import device_config
+    blob = device_config.get_plugin_config(_PREF_CONFIG_KEY)
+    saved = blob.get("save_format") if isinstance(blob, dict) else None
+    return saved if saved in _SAVE_FORMATS else ExtractionOptions().save_format
+
+
+def _save_save_format(value):
+    from plasma.config import device_config
+    if value not in _SAVE_FORMATS:
+        raise ValueError(f"Unsupported extraction save format: {value}")
+    existing = device_config.get_plugin_config(_PREF_CONFIG_KEY)
+    blob = dict(existing) if isinstance(existing, dict) else {}
+    blob["save_format"] = value
+    device_config.update_plugin_config(_PREF_CONFIG_KEY, blob)
+
+
 class ExtractionOptionsPanel:
     """The advanced-options accordion. Build one inside each Blocks context.
 
@@ -32,8 +53,11 @@ class ExtractionOptionsPanel:
             with gr.Row():
                 self.legacy_fs = gr.Checkbox(False, label="(Uncommon) legacy sampling rate")
                 self.save_format = gr.Radio(
-                    ["feather", "csv", "pickle"], value="feather", label="Save format",
-                    info="feather (fast, binary) · csv (plain text, needed for clocksync) · pickle")
+                    _SAVE_FORMATS, value=_saved_save_format(), label="Save format",
+                    info="feather (fast, binary) · csv (plain text, needed for clocksync) · "
+                         "pickle · selection saved for future launches")
+                self.save_format.change(_save_save_format, inputs=self.save_format,
+                                        outputs=None)
                 self.ignore_id_parsing = gr.Checkbox(False, label="Ignore subject/session ID parsing")
             with gr.Row():
                 self.ppg_format = gr.Dropdown(PPG_FORMAT_CHOICES, value="auto",

@@ -4,7 +4,18 @@
 
 ---
 
-## 🚀 v2.2.4 (unreleased)
+## 🚀 v2.2.4
+
+### 🗂️ MSense extraction
+
+- **Files without a participant encoding now get valid output names.** Raw
+  files such as `ac5066.bin` and `ppg1047.bin` previously inserted an empty
+  subject/session alias between every character of the output filename.
+  They now extract as `ac.csv` and `ppg.csv`.
+- **The selected extraction save format persists across launches.** Choosing
+  Feather, CSV, or Pickle in Advanced extraction options saves the preference
+  in the app configuration and restores it in the extraction panels on the
+  next launch.
 
 ### 🍺 Self-updating Homebrew tap
 
