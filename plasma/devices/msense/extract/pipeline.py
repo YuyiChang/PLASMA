@@ -316,19 +316,19 @@ class DataExtractor():
                                       out_dir=self.out_dir, id=id)
 
     def generate_csv_for_pattern(self, in_dir, type_prefix: str, search_key: str, out_dir="./", id=-1):
-        # 1. Ignore ID Parsing Handling
-        if self.ignore_id_parsing:
-            file_name = type_prefix  # Defaults to id + "ac.csv" or ".pkl"
+        # An empty ID means the binary starts with its sensor tag (e.g.
+        # ppg1047.bin), so there is no participant encoding to expand.
+        if self.ignore_id_parsing or id == "":
+            file_name = type_prefix
         else:
             if str(id) in self.encoding_alias.keys():
                 alias = self.encoding_alias[str(id)]
                 print('=====', id, alias)
-                file_name = f"{type_prefix}".replace(id, alias)
             else:
                 sub_id = str(id)[:-2]
                 ses_id = str(id)[-2:]
                 alias = f"sub-{sub_id}_ses-{ses_id}_{self.note}_"
-                file_name = f"{type_prefix}".replace(id, alias)
+            file_name = alias + type_prefix[len(str(id)):]
 
         print(type_prefix, search_key, '********')
         # session_dfs: one DataFrame per distinct recording/session sharing this
