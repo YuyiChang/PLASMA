@@ -60,6 +60,7 @@ class TaskSequence:
         self.timer = None
         self.generation = 0
         self.error = ""
+        self.completion_id = 0
 
     def load(self, tasks):
         with self.lock:
@@ -96,6 +97,8 @@ class TaskSequence:
             self.timer.cancel()
             self.timer = None
         self.status = status
+        if status == "Completed":
+            self.completion_id += 1
         try:
             self.emit(f"[{self.tasks[self.index].name}] end")
         except Exception as exc:
@@ -123,4 +126,5 @@ class TaskSequence:
                          else task.seconds if task and self.status == "Ready" else 0)
             return dict(task=task, index=self.index, total=len(self.tasks),
                         remaining=format_remaining(remaining), status=self.status,
-                        error=self.error, running=self.deadline is not None)
+                        error=self.error, running=self.deadline is not None,
+                        completion_id=self.completion_id)

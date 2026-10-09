@@ -9,6 +9,7 @@ import re
 from plasma.lsl_session import encode_participant, SessionInfo
 from plasma.journal import open_journal_outlet
 from plasma.task_sequence import TaskSequence, read_tasks
+from plasma.task_buzzer import BUZZER_CONTROLS
 import logging, datetime, time
 from logging import Logger
 from plasma import plugins, __version__, build_info
@@ -520,6 +521,19 @@ class IntegratedPanel():
         content = self._render_memo()
         return [gr.skip() if content == last else content, content]
 
+    def _buzzer_refresh(self, last):
+        completion = self.task_sequence.snapshot()["completion_id"]
+        event = f'<span data-completion-id="{completion}"></span>'
+        return [gr.skip() if last == completion else event, completion]
+
+    def wire_task_buzzer(self):
+        # One lightweight notification pump for the browser, independent of the
+        # selected tab. No audio data, device work, or extra task timers here.
+        event = gr.HTML(elem_id="plasma-buzzer-event", padding=False)
+        last = gr.State(None)
+        gr.Timer(value=0.5).tick(self._buzzer_refresh, inputs=last, outputs=[event, last],
+                                show_progress="hidden")
+
     def _task_view_refresh(self, last):
         snap = self.task_sequence.snapshot()
         task = snap["task"]
@@ -561,6 +575,7 @@ class IntegratedPanel():
             start = gr.Button("Start task (SPACE)", variant="primary", interactive=False,
                               elem_id="plasma-focus-task-start" if focus else "plasma-task-start")
             end = gr.Button("End task", interactive=False)
+        gr.HTML(BUZZER_CONTROLS, padding=False)
         gr.Markdown("Previous/Next ends a running task and prepares the selected row. "
                     "At 00:00 the task ends; advance and start the next task when ready.")
         last = gr.State(None)

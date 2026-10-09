@@ -218,3 +218,41 @@ def test_focus_view_has_no_upload_or_extra_controller():
     assert len(ip._session_views) == 2
     assert all(view["tab"] == "Focus" and not view["timer"].active
                for view in ip._session_views)
+
+
+def test_only_natural_expiry_creates_unique_completion_event():
+    runner, messages, now = sequence()
+    assert runner.snapshot()["completion_id"] == 0
+    runner.start()
+    runner.end()
+    runner.move(1)
+    runner.start()
+    runner.move(-1)
+    runner.start()
+    runner.load([Task("Replacement", "", 5)])
+    assert runner.snapshot()["completion_id"] == 0
+    runner.start()
+    old_timer = runner.timer
+    now[0] += 5
+    assert runner.snapshot()["completion_id"] == 1
+    old_timer.fire()
+    runner.end()
+    assert runner.snapshot()["completion_id"] == 1
+    runner.load([Task("Replacement", "", 5)])
+    runner.start()
+    runner.timer.fire()
+    assert runner.snapshot()["completion_id"] == 2
+    assert messages[-2:] == ["[Replacement] start", "[Replacement] end"]
+
+
+def test_buzzer_notification_baseline_and_no_repeated_payload():
+    ip = IntegratedPanel.__new__(IntegratedPanel)
+    ip.task_sequence, _, now = sequence()
+    event, baseline = ip._buzzer_refresh(None)
+    assert 'data-completion-id="0"' in event
+    assert ip._buzzer_refresh(baseline)[0] == gr.skip()
+    ip.task_sequence.start()
+    now[0] += 60
+    event, completion = ip._buzzer_refresh(baseline)
+    assert completion == 1 and 'data-completion-id="1"' in event
+    assert ip._buzzer_refresh(completion)[0] == gr.skip()

@@ -85,6 +85,14 @@ visible task view. Only the selected top-level view refreshes, and switching
 back updates its task and Memo immediately. Long Memo lists scroll inside the
 Focus panel so the countdown and controls stay visible.
 
+The expiry buzzer is always enabled in both task views. **Test buzzer** plays
+two short tones without changing the task or sending a marker.
+Start task, SPACE, or Test buzzer enables browser audio. Natural expiry plays
+the tones once; End task, navigation, stopping collection, and CSV replacement
+are silent. Switching tabs does not replay the sound. If the browser blocks
+audio, click Test buzzer as prompted. Browser suspension can delay sound;
+the task end marker is sent independently.
+
 ## 5 · Stop
 
 Press **Stop 🛑**. Every device is told to stop, the recorder flushes and
