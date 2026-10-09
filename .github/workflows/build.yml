@@ -1,4 +1,5 @@
 name: Build PLASMA
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.nightly && 'Nightly dev build' || 'Build PLASMA' }} · ${{ github.ref_name }}
 
 on:
   push:
@@ -6,20 +7,19 @@ on:
       - 'v*'
   pull_request:
   workflow_dispatch:
-  schedule:
-    # nightly build off `dev`'s HEAD (not the repo's default branch — a
-    # `schedule` trigger has no branch filter of its own, so the test checkout
-    # resolves `dev` and every build reuses that exact tested SHA), published as a
-    # rolling "nightly" pre-release (tag moves to the new commit each run)
-    # rather than a versioned vX.Y.Z release — see the release steps below.
-    - cron: '0 7 * * *'   # 07:00 UTC daily
+    inputs:
+      nightly:
+        description: Publish the rolling nightly release (select the dev branch)
+        type: boolean
+        default: false
+        required: false
 
 permissions:
   contents: read
 
 # Serialize rolling nightly updates; never cancel an in-progress release upload.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.nightly && 'nightly' || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -28,9 +28,17 @@ jobs:
     outputs:
       source-sha: ${{ steps.source.outputs.sha }}
     steps:
+      - name: Require dev branch for nightly builds
+        if: github.event_name == 'workflow_dispatch' && inputs.nightly
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/dev" ]; then
+            echo "::error::Nightly builds must be dispatched with ref dev."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
+          ref: ${{ github.sha }}
 
       - name: Pin source commit for every platform
         id: source
@@ -360,7 +368,7 @@ jobs:
   release:
     # The default success() condition prevents publication if any build fails.
     needs: [test, build-macos, build-linux, build-linux-arm64, build-windows]
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.nightly)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -385,7 +393,7 @@ jobs:
           sha256sum --check dist/*.sha256
 
       - name: Move nightly tag to the tested source commit
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'workflow_dispatch' && inputs.nightly
         uses: actions/github-script@v7
         env:
           SOURCE_SHA: ${{ needs.test.outputs.source-sha }}
@@ -405,10 +413,10 @@ jobs:
       - name: Publish all platform assets together
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.nightly && 'nightly' || github.ref_name }}
           target_commitish: ${{ needs.test.outputs.source-sha }}
-          name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
-          prerelease: ${{ github.event_name == 'schedule' }}
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.nightly && 'Nightly build (dev)' || github.ref_name }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.nightly }}
           fail_on_unmatched_files: true
           files: |
             dist/PLASMA_MacOS_arm64.zip

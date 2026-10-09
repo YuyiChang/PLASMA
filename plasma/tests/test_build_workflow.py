@@ -118,7 +118,8 @@ def test_only_release_job_can_publish_after_all_builds():
     platforms = {"build-macos", "build-linux", "build-linux-arm64", "build-windows"}
     assert set(release["needs"]) == platforms | {"test"}
     assert "always()" not in release["if"]
-    assert "schedule" in release["if"] and "refs/tags/" in release["if"]
+    assert "inputs.nightly" in release["if"] and "refs/tags/" in release["if"]
+    assert "workflow_dispatch" in release["if"]
     assert workflow["permissions"]["contents"] == "read"
     assert release["permissions"]["contents"] == "write"
     publishers = [name for name, job in jobs.items() for step in job["steps"]
@@ -127,6 +128,32 @@ def test_only_release_job_can_publish_after_all_builds():
     for name in platforms:
         checkout = next(s for s in jobs[name]["steps"] if s.get("uses", "").startswith("actions/checkout"))
         assert checkout["with"]["ref"] == "${{ needs.test.outputs.source-sha }}"
+
+
+def test_schedule_dispatches_actual_build_on_dev_only():
+    # BaseLoader preserves the YAML 1.2 key "on" (SafeLoader treats it as the
+    # YAML 1.1 boolean True). GitHub's workflow parser uses "on" as a key.
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    dispatcher = yaml.load((ROOT / ".github/workflows/nightly.yml").read_text(), Loader=yaml.BaseLoader)
+    assert "schedule" not in workflow["on"]
+    assert dispatcher["on"]["schedule"] == [{"cron": "0 7 * * *"}]
+    assert dispatcher["permissions"]["actions"] == "write"
+    script = dispatcher["jobs"]["dispatch"]["steps"][0]["with"]["script"]
+    assert "createWorkflowDispatch" in script
+    assert "workflow_id: 'build.yml'" in script and "ref: 'dev'" in script
+    assert "inputs: { nightly: 'true' }" in script
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["nightly"]["default"] == "false"
+    assert "Nightly dev build" in workflow["run-name"]
+
+
+@pytest.mark.parametrize("branch,success", [("refs/heads/dev", True), ("refs/heads/main", False)])
+def test_nightly_branch_guard_rejects_main(branch, success):
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    guard = workflow["jobs"]["test"]["steps"][0]
+    assert "inputs.nightly" in guard["if"]
+    result = subprocess.run(["bash", "-e", "-c", guard["run"]],
+                            env={**os.environ, "GITHUB_REF": branch}, capture_output=True, text=True)
+    assert (result.returncode == 0) == success
 
 
 def test_release_asset_validation_rejects_missing_or_corrupted_files(tmp_path):

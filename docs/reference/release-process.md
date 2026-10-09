@@ -38,10 +38,26 @@ make a release "live" on PyPI or GitHub Releases.
 `test` job. Builds upload artifacts to the current workflow run; a single
 `release` job downloads and checks the complete asset set and publishes only
 after all four platform builds succeed. A failed macOS build therefore leaves
-the previous nightly downloads intact for every platform. Scheduled runs move
+the previous nightly downloads intact for every platform. Nightly runs move
 the rolling `nightly` tag to the tested commit after the artifact checks.
-Release uploads are serialized by workflow concurrency. Manual dispatch builds
-still produce workflow artifacts without publishing a release.
+Release uploads are serialized by workflow concurrency. Ordinary manual dispatch
+builds still produce workflow artifacts without publishing a release.
+
+`.github/workflows/nightly.yml` schedules a small dispatcher at 07:00 UTC daily.
+GitHub runs cron workflows on the default branch, so this dispatcher explicitly
+launches `build.yml` with **ref `dev`** and the boolean `nightly` input enabled.
+The resulting build run is associated with `dev`, uses the workflow definition
+on `dev`, and pins every platform to that dispatch's source commit. Nightly
+dispatches from other branches fail before building. To run a nightly manually,
+dispatch `nightly.yml`, or select branch `dev` in `build.yml` and enable its
+nightly input. The dispatcher succeeding means only that the build was requested;
+its actual result is reported by the separate Build PLASMA run.
+
+Deploy the updated `build.yml` and supporting signing script to `dev`, and merge
+the workflow changes into the default branch so the scheduled dispatcher and
+manual dispatch trigger are registered. Remove the old `build.yml` cron trigger
+there as included in this change, so one nightly is requested each day. Prior
+scheduled build records retain their original default-branch label.
 
 ## Codesigning & notarization (macOS)
 
@@ -233,7 +249,7 @@ Homebrew Cask's native `.dmg` handling instead of the hand-rolled
 
 `packaging/homebrew/plasma@nightly.rb` (copy verbatim into the tap's
 `Casks/plasma@nightly.rb` once, then leave it alone) tracks the rolling
-`nightly` pre-release tag `build.yml`'s `schedule` job republishes daily.
+`nightly` pre-release tag the `nightly.yml` dispatcher and `build.yml` republish daily.
 Unlike `plasma.rb`, its `url` points at the fixed `nightly` tag rather than a
 version-substituted one, and it uses `version :latest` / `sha256 :no_check`
 instead of a pinned checksum — so there is no per-release bump step for this
