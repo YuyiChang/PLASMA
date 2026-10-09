@@ -56,6 +56,35 @@ dedicated LSL stream that is recorded alongside the sensors (so they land in the
 - **🚩 Flag** — a one-click `[FLAG]` marker for "something happened here, note
   it later".
 
+These controls are in the **Manual markers** sub-tab. For a timed protocol,
+choose **Task sequence** and drop in a CSV (or use the file picker). Required
+columns are `Condition` (task name), `Move_Instruction` (displayed instruction),
+and `load` (duration in seconds). Rows run in file order, including repeated
+task names. The countdown displays minutes and seconds; for example, 605 seconds
+is `10:05`. Literal `\n` in instructions displays as a line break.
+
+Start collection before starting tasks if you want their markers saved to XDF.
+**Start task** begins the selected row and sends `[TASK] start` on the existing
+PLASMA journal stream, using `Condition` for TASK. SPACE also starts a ready task
+when its controls are visible and focus is outside a text field or other control.
+**End task** or reaching `00:00` sends `[TASK] end` once. Completion continues
+even when you switch tabs; it waits for you to advance and start the next row.
+
+**Previous** and **Next** end a running task and prepare the adjacent row with
+its full duration. Replacing or clearing the upload also ends a running task;
+an invalid upload leaves the current sequence intact. Stopping collection ends
+the running task before the recorder flushes. All connected viewers share the
+sequence for the acquisition session. If the journal LSL stream is unavailable,
+the task controls show an error and starting is disabled.
+
+For a compact running view, open the **Focus** tab beside **Session Dashboard**.
+It places the countdown, task instructions, and Previous/Next/Start/End controls
+beside Memo. Upload the CSV in Journaler first; both views control the same
+sequence and send markers through the same LSL outlet. SPACE works in either
+visible task view. Only the selected top-level view refreshes, and switching
+back updates its task and Memo immediately. Long Memo lists scroll inside the
+Focus panel so the countdown and controls stay visible.
+
 ## 5 · Stop
 
 Press **Stop 🛑**. Every device is told to stop, the recorder flushes and

@@ -1,4 +1,5 @@
 import atexit
+import csv
 import gradio as gr
 import struct
 import os
@@ -7,6 +8,7 @@ import html as _html
 import re
 from plasma.lsl_session import encode_participant, SessionInfo
 from plasma.journal import open_journal_outlet
+from plasma.task_sequence import TaskSequence, read_tasks
 import logging, datetime, time
 from logging import Logger
 from plasma import plugins, __version__, build_info
@@ -64,16 +66,16 @@ def _fmt_elapsed(seconds):
 
 _MEMO_CSS = (
     "<style>"
-    f"#{MEMO_PANEL_ELEM_ID} .prose{{max-width:none}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-wrap{{font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-hdr{{font-weight:600;margin:1px 0 5px}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-row{{margin:4px 0}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-name{{font-weight:600}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-tag{{opacity:.6;font-weight:400;margin-left:7px}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-sub{{color:#555;padding-left:18px;font-size:12px}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-sub.rec{{color:{_STATUS_HEX['guidance']}}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-sub.guidance{{color:{_STATUS_HEX['guidance']}}}"
-    f"#{MEMO_PANEL_ELEM_ID} .m-dim{{opacity:.55}}"
+    ".plasma-memo .prose{max-width:none}"
+    ".plasma-memo .m-wrap{font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}"
+    ".plasma-memo .m-hdr{font-weight:600;margin:1px 0 5px}"
+    ".plasma-memo .m-row{margin:4px 0}"
+    ".plasma-memo .m-name{font-weight:600}"
+    ".plasma-memo .m-tag{opacity:.6;font-weight:400;margin-left:7px}"
+    ".plasma-memo .m-sub{color:#555;padding-left:18px;font-size:12px}"
+    f".plasma-memo .m-sub.rec{{color:{_STATUS_HEX['guidance']}}}"
+    f".plasma-memo .m-sub.guidance{{color:{_STATUS_HEX['guidance']}}}"
+    ".plasma-memo .m-dim{opacity:.55}"
     "</style>"
 )
 
@@ -185,6 +187,7 @@ class IntegratedPanel():
 
         # session task-marker LSL stream (None if liblsl is unavailable)
         self.journal_outlet = open_journal_outlet()
+        self.task_sequence = TaskSequence(self._sequence_marker)
 
         # built-in LSL -> XDF recorder (default on; see interface() checkbox).
         # Created fresh on each Start, kept after Stop so the memo panel can
@@ -214,6 +217,9 @@ class IntegratedPanel():
         atexit.register(self._atexit_cleanup)
 
     def _atexit_cleanup(self):
+        sequence = getattr(self, "task_sequence", None)
+        if sequence is not None:
+            sequence.end()
         rec = getattr(self, "lsl_recorder", None)
         if rec is not None:
             try:
@@ -232,6 +238,11 @@ class IntegratedPanel():
         if self.journal_outlet is not None:
             self.journal_outlet.push_sample([msg])
         self.logger.info(f"JOURNAL: {msg}")
+
+    def _sequence_marker(self, msg):
+        if self.journal_outlet is None:
+            raise RuntimeError("PLASMA journal LSL stream is unavailable")
+        self.journal(msg)
 
     def visualizer_interface(self):
         with gr.Column():
@@ -444,30 +455,147 @@ class IntegratedPanel():
                     self.btn_start.click(self.start_collection)
                     self.btn_stop.click(self.stop_collection)
 
-                    
-
                 with gr.Accordion(label="🗒️ Journaler", open=False):
-                    j_free = gr.Text(label="Marker text", placeholder="free text",
-                                     show_label=False)
-                    with gr.Row():
-                        j_send = gr.Button("✍️ Send marker", variant="primary")
-                        j_flag = gr.Button("🚩 Flag", scale=0)
+                    with gr.Tabs():
+                        with gr.Tab("Manual markers"):
+                            j_free = gr.Text(label="Marker text", placeholder="free text",
+                                                show_label=False)
+                            with gr.Row():
+                                j_send = gr.Button("✍️ Send marker", variant="primary")
+                                j_flag = gr.Button("🚩 Flag", scale=0)
+                            j_send.click(self._record_journal, inputs=j_free, outputs=j_free)
+                            j_flag.click(self._flag_journal)
+                        with gr.Tab("Task sequence"):
+                            self._task_sequence_interface()
 
-                    j_send.click(self._record_journal, inputs=j_free, outputs=j_free)
-                    j_flag.click(self._flag_journal)
 
                 with gr.Accordion(label="ℹ️ Memo", open=True):
-                    self.memo_html = gr.HTML(self._render_memo(),
-                                            elem_id=MEMO_PANEL_ELEM_ID, padding=False)
-                    timer = gr.Timer(value=1)
-                    timer.tick(fn=self._render_memo, outputs=self.memo_html,
-                            show_progress="hidden")
+                    self.memo_html = self._memo_interface("Session Dashboard", MEMO_PANEL_ELEM_ID)
 
         # with gr.Accordion("Help", open=False):
         #     with open("./plasma/help.md") as f:
         #         help_txt = f.read()
         #         # print(help_txt)
         #     md = gr.Markdown(help_txt)
+
+    def focus_interface(self):
+        with gr.Row():
+            with gr.Column(scale=3, min_width=320):
+                self._task_sequence_interface(focus=True)
+            with gr.Column(scale=2, min_width=320):
+                gr.Markdown("### Memo")
+                self._memo_interface("Focus", "plasma-focus-memo")
+
+    def _register_session_view(self, tab, timer, refresh, outputs, state):
+        if not hasattr(self, "_session_views"):
+            self._session_views = []
+        self._session_views.append(dict(tab=tab, timer=timer, refresh=refresh,
+                                        outputs=outputs, state=state))
+
+    def wire_session_views(self, tabs):
+        """Only refresh the selected top-level view; repaint it on selection.
+
+        State caches belong to each browser and display, so one Memo cannot
+        consume the other display's update or suppress a new viewer's first paint.
+        """
+        for view in self._session_views:
+            def select(last, evt: gr.SelectData, view=view):
+                active = evt.value == view["tab"]
+                values = view["refresh"](last) if active else [gr.skip()] * len(view["outputs"])
+                return [gr.Timer(active=active), *values]
+            tabs.select(select, inputs=view["state"],
+                        outputs=[view["timer"], *view["outputs"]], show_progress="hidden")
+
+    def _memo_interface(self, tab, elem_id):
+        content = self._render_memo()
+        display = gr.HTML(content, elem_id=elem_id, elem_classes=["plasma-memo"], padding=False)
+        last = gr.State(content)
+        timer = gr.Timer(value=1, active=(tab == "Session Dashboard"))
+        outputs = [display, last]
+        timer.tick(self._memo_view_refresh, inputs=last, outputs=outputs, show_progress="hidden")
+        self._register_session_view(tab, timer, self._memo_view_refresh, outputs, last)
+        return display
+
+    def _memo_view_refresh(self, last):
+        content = self._render_memo()
+        return [gr.skip() if content == last else content, content]
+
+    def _task_view_refresh(self, last):
+        snap = self.task_sequence.snapshot()
+        task = snap["task"]
+        name = _html.escape(task.name) if task else "Upload a CSV in Journaler to begin"
+        status = _html.escape(snap["status"])
+        error = _html.escape(snap["error"])
+        if self.journal_outlet is None:
+            error = "PLASMA journal LSL stream is unavailable. Tasks cannot start."
+        content = (f'<div style="text-align:center"><div>Task {snap["index"] + 1 if task else 0}'
+                   f' / {snap["total"]} · {status}</div>'
+                   f'<div style="font-size:3rem;font-variant-numeric:tabular-nums">'
+                   f'{snap["remaining"]}</div><h3>{name}</h3></div>')
+        if error:
+            content += f'<p role="alert">{error}</p>'
+        current = (content, task.instruction if task else "",
+                   bool(task) and snap["index"] > 0,
+                   bool(task) and snap["index"] < snap["total"] - 1,
+                   bool(task) and snap["status"] == "Ready" and self.journal_outlet is not None,
+                   snap["running"])
+        values = [gr.skip() if last is not None and last[i] == value
+                  else value if i < 2 else gr.update(interactive=value)
+                  for i, value in enumerate(current)]
+        return [*values, current]
+
+    def _task_sequence_interface(self, focus=False):
+        tab = "Focus" if focus else "Session Dashboard"
+        if not focus:
+            gr.Markdown("Drop a CSV with **Condition**, **Move_Instruction**, and **load** "
+                        "(seconds). Start collection first to save markers to XDF. "
+                        "All connected viewers share this task sequence.")
+            upload = gr.File(label="Task sequence CSV", file_types=[".csv"], type="filepath")
+        display = gr.HTML()
+        instruction = gr.Textbox(label="Move instruction", lines=4 if focus else 6,
+                                 max_lines=6 if focus else 20, interactive=False)
+        with gr.Row():
+            previous = gr.Button("← Previous", interactive=False)
+            following = gr.Button("Next →", interactive=False)
+        with gr.Row():
+            start = gr.Button("Start task (SPACE)", variant="primary", interactive=False,
+                              elem_id="plasma-focus-task-start" if focus else "plasma-task-start")
+            end = gr.Button("End task", interactive=False)
+        gr.Markdown("Previous/Next ends a running task and prepares the selected row. "
+                    "At 00:00 the task ends; advance and start the next task when ready.")
+        last = gr.State(None)
+        outputs = [display, instruction, previous, following, start, end, last]
+
+        def load(path, last):
+            try:
+                tasks = read_tasks(path) if path else []
+                self.task_sequence.load(tasks)
+            except (ValueError, OSError, UnicodeError, csv.Error) as exc:
+                gr.Warning(f"Cannot load task CSV: {exc}")
+            return self._task_view_refresh(last)
+
+        def action(name):
+            def callback(last):
+                try:
+                    if name == "previous":
+                        self.task_sequence.move(-1)
+                    elif name == "next":
+                        self.task_sequence.move(1)
+                    else:
+                        getattr(self.task_sequence, name)()
+                except Exception as exc:
+                    gr.Warning(f"Task action failed: {exc}")
+                return self._task_view_refresh(last)
+            return callback
+
+        if not focus:
+            upload.change(load, inputs=[upload, last], outputs=outputs, show_progress="hidden")
+        for button, name in [(previous, "previous"), (following, "next"),
+                             (start, "start"), (end, "end")]:
+            button.click(action(name), inputs=last, outputs=outputs, show_progress="hidden")
+        timer = gr.Timer(value=0.5, active=not focus)
+        timer.tick(self._task_view_refresh, inputs=last, outputs=outputs, show_progress="hidden")
+        self._register_session_view(tab, timer, self._task_view_refresh, outputs, last)
 
     def _refresh_devices(self):
         active = list(device_config.get_active_table().keys())
@@ -557,6 +685,7 @@ class IntegratedPanel():
 
     def stop_collection(self):
         self.sts = "Stopping..."
+        self.task_sequence.end()
         for dev in self.available_devices:
             try:
                 dev.stop()
@@ -619,9 +748,7 @@ class IntegratedPanel():
         return _status.STOPPED if self._collection_stopped is not None else _status.COLLECTING
 
     def _render_memo(self):
-        """HTML for the memo panel. Returns gr.skip() when nothing changed since
-        the last tick, so gr.HTML doesn't tear down + re-render its subtree
-        (which reads as a 1 Hz blink)."""
+        """Build Memo HTML; each display owns its own browser-local cache."""
         rec = self.lsl_recorder
         started = self._collection_started
         elapsed = None
@@ -633,9 +760,6 @@ class IntegratedPanel():
             rec.status() if rec is not None else None,
             ext_streams=self._external_lsl_streams(), elapsed=elapsed,
             phase=self.phase)
-        if html == getattr(self, "_memo_last", None):
-            return gr.skip()
-        self._memo_last = html
         return html
 
 
