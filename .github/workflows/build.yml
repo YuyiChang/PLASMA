@@ -8,22 +8,33 @@ on:
   workflow_dispatch:
   schedule:
     # nightly build off `dev`'s HEAD (not the repo's default branch — a
-    # `schedule` trigger has no branch filter of its own, so every checkout
-    # step below pins `ref: dev` for this event explicitly), published as a
+    # `schedule` trigger has no branch filter of its own, so the test checkout
+    # resolves `dev` and every build reuses that exact tested SHA), published as a
     # rolling "nightly" pre-release (tag moves to the new commit each run)
     # rather than a versioned vX.Y.Z release — see the release steps below.
     - cron: '0 7 * * *'   # 07:00 UTC daily
 
 permissions:
-  contents: write
+  contents: read
+
+# Serialize rolling nightly updates; never cancel an in-progress release upload.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      source-sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
+
+      - name: Pin source commit for every platform
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -42,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
+          ref: ${{ needs.test.outputs.source-sha }}
 
       - uses: conda-incubator/setup-miniconda@v3
         with:
@@ -79,18 +90,30 @@ jobs:
           VERSION="$(python3 -c 'import re,pathlib; print(re.search(r"__version__ = \"(.*)\"", pathlib.Path("plasma/__init__.py").read_text())[1])')"
           bash .github/build_macos_app.sh dist/PLASMA_MacOS_arm64 "$VERSION"
 
-      # No-op (unsigned build, unchanged) unless the MACOS_CERTIFICATE_*/
-      # MACOS_NOTARY_* secrets are set — see
-      # docs/reference/release-process.md for how to obtain/configure them.
-      - name: Codesign + notarize .app
+      # Unsigned builds remain supported when no certificate is configured.
+      # Distinct steps distinguish certificate failures from Apple account/API failures.
+      - name: Codesign and verify .app
         shell: bash -el {0}
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: bash .github/codesign_notarize_macos.sh sign
+
+      - name: Notarize .app with Apple
+        timeout-minutes: 30
+        shell: bash -el {0}
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
           MACOS_NOTARY_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_KEY_P8_BASE64 }}
-        run: bash .github/codesign_notarize_macos.sh
+        run: bash .github/codesign_notarize_macos.sh notarize
+
+      - name: Staple and validate notarization ticket
+        shell: bash -el {0}
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+        run: bash .github/codesign_notarize_macos.sh staple
 
       # ditto (not zip) preserves the bundle's permissions/resource forks/
       # xattrs correctly — the standard way to archive a .app for
@@ -144,20 +167,6 @@ jobs:
             dist/PLASMA_MacOS_arm64.dmg
             dist/PLASMA_MacOS_arm64.dmg.sha256
 
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
-        with:
-          tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
-          name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
-          prerelease: ${{ github.event_name == 'schedule' }}
-          files: |
-            dist/PLASMA_MacOS_arm64.zip
-            dist/PLASMA_MacOS_arm64.zip.sha256
-            dist/PLASMA_MacOS_arm64.app.zip
-            dist/PLASMA_MacOS_arm64.app.zip.sha256
-            dist/PLASMA_MacOS_arm64.dmg
-            dist/PLASMA_MacOS_arm64.dmg.sha256
-
   build-linux:
     needs: test
     if: github.event_name != 'pull_request'
@@ -165,7 +174,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
+          ref: ${{ needs.test.outputs.source-sha }}
 
       - uses: conda-incubator/setup-miniconda@v3
         with:
@@ -202,14 +211,6 @@ jobs:
           name: PLASMA-Linux-x64
           path: dist/PLASMA_Linux_x64.tar.gz
 
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
-        with:
-          tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
-          name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
-          prerelease: ${{ github.event_name == 'schedule' }}
-          files: dist/PLASMA_Linux_x64.tar.gz
-
   build-linux-arm64:
     # aarch64 build for NVIDIA Jetson Orin — targets JetPack 6 (Ubuntu 22.04 /
     # glibc 2.35), so it must build on the jammy ARM runner (not 24.04-arm).
@@ -225,7 +226,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
+          ref: ${{ needs.test.outputs.source-sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -271,14 +272,6 @@ jobs:
           name: PLASMA-Linux-arm64
           path: dist/PLASMA_Linux_arm64.tar.gz
 
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
-        with:
-          tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
-          name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
-          prerelease: ${{ github.event_name == 'schedule' }}
-          files: dist/PLASMA_Linux_arm64.tar.gz
-
   build-windows:
     needs: test
     if: github.event_name != 'pull_request'
@@ -286,7 +279,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'schedule' && 'dev' || github.sha }}
+          ref: ${{ needs.test.outputs.source-sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -364,12 +357,67 @@ jobs:
             dist/PLASMA_Windows_x64.zip
             dist/PLASMA_Windows_x64_Setup.exe
 
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
+  release:
+    # The default success() condition prevents publication if any build fails.
+    needs: [test, build-macos, build-linux, build-linux-arm64, build-windows]
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all platform artifacts from this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: PLASMA-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify complete release asset set
+        run: |
+          for asset in \
+            PLASMA_MacOS_arm64.zip PLASMA_MacOS_arm64.zip.sha256 \
+            PLASMA_MacOS_arm64.app.zip PLASMA_MacOS_arm64.app.zip.sha256 \
+            PLASMA_MacOS_arm64.dmg PLASMA_MacOS_arm64.dmg.sha256 \
+            PLASMA_Linux_x64.tar.gz PLASMA_Linux_arm64.tar.gz \
+            PLASMA_Windows_x64.zip PLASMA_Windows_x64_Setup.exe; do
+            test -s "dist/$asset" || { echo "::error::Missing release asset: $asset"; exit 1; }
+          done
+          sha256sum --check dist/*.sha256
+
+      - name: Move nightly tag to the tested source commit
+        if: github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        env:
+          SOURCE_SHA: ${{ needs.test.outputs.source-sha }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = process.env.SOURCE_SHA;
+            try {
+              await github.rest.git.getRef({ owner, repo, ref: 'tags/nightly' });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.git.createRef({ owner, repo, ref: 'refs/tags/nightly', sha });
+              return;
+            }
+            await github.rest.git.updateRef({ owner, repo, ref: 'tags/nightly', sha, force: true });
+
+      - name: Publish all platform assets together
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'schedule' && 'nightly' || github.ref_name }}
+          target_commitish: ${{ needs.test.outputs.source-sha }}
           name: ${{ github.event_name == 'schedule' && 'Nightly build' || github.ref_name }}
           prerelease: ${{ github.event_name == 'schedule' }}
+          fail_on_unmatched_files: true
           files: |
+            dist/PLASMA_MacOS_arm64.zip
+            dist/PLASMA_MacOS_arm64.zip.sha256
+            dist/PLASMA_MacOS_arm64.app.zip
+            dist/PLASMA_MacOS_arm64.app.zip.sha256
+            dist/PLASMA_MacOS_arm64.dmg
+            dist/PLASMA_MacOS_arm64.dmg.sha256
+            dist/PLASMA_Linux_x64.tar.gz
+            dist/PLASMA_Linux_arm64.tar.gz
             dist/PLASMA_Windows_x64.zip
             dist/PLASMA_Windows_x64_Setup.exe
