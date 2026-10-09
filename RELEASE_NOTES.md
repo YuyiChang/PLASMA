@@ -4,6 +4,83 @@
 
 ---
 
+## 🚀 v2.3.0
+
+### 🗒️ Timed task sequences in Journaler
+
+- **Run a protocol from a CSV.** The new **Task sequence** sub-tab accepts
+  drag-and-drop uploads or a file picker. Each row supplies a task name from
+  `Condition`, instructions from `Move_Instruction`, and a duration in seconds
+  from `load`. Tasks retain their CSV order, including repeated task names.
+  The display converts durations to `MM:SS` — for example, 605 seconds becomes
+  `10:05`. UTF-8 BOM files and literal `\n` instruction line breaks are supported;
+  invalid names or durations produce row-specific errors.
+- **Control each task explicitly.** **Start task** begins the countdown;
+  **End task** ends it early. **Previous** and **Next** end any running task,
+  select the adjacent row, and reset its timer to the full duration. Reaching
+  `00:00` completes the task and waits for the operator to advance and start
+  the next row. SPACE starts a ready task when its controls are visible and
+  focus is outside text fields and other keyboard controls.
+- **Task boundaries use the existing PLASMA journal LSL stream.** Starting
+  sends `[TASK] start` and ending sends `[TASK] end`, using `Condition` as
+  TASK. Each running task emits one end marker, including on natural expiry,
+  navigation, CSV replacement or clearing, and collection stop. Start
+  collection before tasks to capture their markers in XDF; collection stop
+  ends the active task before the recorder flushes.
+- **The countdown continues independently of browser refreshes.** Switching
+  tabs does not delay task completion or its end marker. An invalid upload
+  leaves the current sequence intact. Existing free-text markers and Flag
+  remain available in the **Manual markers** sub-tab.
+
+### 🎯 Focus mode
+
+- **Keep the task and Memo visible together.** The new **Focus** tab beside
+  **Session Dashboard** places the countdown, instructions, and task controls
+  next to live device and recording status. Long Memo lists scroll within the
+  panel, and long instructions stay within a bounded text area.
+- **Both task views control the same sequence.** Upload the CSV in Journaler,
+  then operate it from either view. Switching views refreshes their shared
+  state without restarting tasks or duplicating markers. Only the selected
+  top-level task/Memo view refreshes, and unchanged content is preserved to
+  avoid flicker and allow instruction text to be selected and copied.
+
+### 🔔 Task expiry buzzer
+
+- **Two short tones announce natural task completion.** The buzzer is always
+  enabled. Manual End, Previous/Next, CSV replacement, and collection stop are
+  silent; switching views does not replay an expiry sound.
+- **Test the sound before running a protocol.** **Test buzzer** is available
+  in both task views and plays the same tones without changing the task or
+  sending LSL markers. Start task, SPACE, or Test buzzer activates browser
+  audio. If audio is blocked, the view prompts the operator to click Test
+  buzzer. Browser suspension can delay sound; task markers remain independent
+  of audio playback.
+
+### 🛠️ Nightly builds and macOS release verification
+
+- **Nightly build runs now originate from `dev`.** A small scheduled dispatcher
+  on the default branch launches the build workflow explicitly on `dev`, so
+  both its workflow definition and source come from that branch. Nightly
+  dispatches from other branches are rejected. All platform builds use the
+  exact tested source commit, and the rolling `nightly` tag moves to that
+  commit after artifact validation.
+- **A failed platform build no longer updates only part of the nightly
+  release.** A single publishing job waits for macOS, Windows, Linux x64, and
+  Linux arm64 to succeed, checks the complete asset set and macOS checksums,
+  then publishes their downloads together. Release runs are serialized.
+- **macOS signing, notarization, and stapling have separate CI steps.** Missing
+  secrets fail with their names, notarization must return `Accepted`, the
+  stapled ticket is validated, and notarization has a 30-minute timeout.
+  Builds without a configured signing certificate remain supported as unsigned
+  builds.
+- **Apple agreement failures now explain the required action.** A notarization
+  HTTP 403 reporting a missing or expired agreement directs the Apple Developer
+  Account Holder to accept pending agreements and verify membership. This
+  account restriction still requires action in the Apple Developer portal;
+  the CI update does not bypass it.
+
+---
+
 ## 🚀 v2.2.4
 
 ### 🗂️ MSense extraction
