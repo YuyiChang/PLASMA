@@ -34,15 +34,53 @@ Pushing a `vX.Y.Z` tag (matching `plasma.__version__`, enforced by
 Both are source-of-truth downstream of the tag; nothing else needs to run to
 make a release "live" on PyPI or GitHub Releases.
 
+`build.yml` pins all platform checkouts to the exact commit tested by its
+`test` job. Builds upload artifacts to the current workflow run; a single
+`release` job downloads and checks the complete asset set and publishes only
+after all four platform builds succeed. A failed macOS build therefore leaves
+the previous nightly downloads intact for every platform. Nightly runs move
+the rolling `nightly` tag to the tested commit after the artifact checks.
+Release uploads are serialized by workflow concurrency. Ordinary manual dispatch
+builds still produce workflow artifacts without publishing a release.
+
+`.github/workflows/nightly.yml` schedules a small dispatcher at 07:00 UTC daily.
+GitHub runs cron workflows on the default branch, so this dispatcher explicitly
+launches `build.yml` with **ref `dev`** and the boolean `nightly` input enabled.
+The resulting build run is associated with `dev`, uses the workflow definition
+on `dev`, and pins every platform to that dispatch's source commit. Nightly
+dispatches from other branches fail before building. To run a nightly manually,
+dispatch `nightly.yml`, or select branch `dev` in `build.yml` and enable its
+nightly input. The dispatcher succeeding means only that the build was requested;
+its actual result is reported by the separate Build PLASMA run.
+
+Deploy the updated `build.yml` and supporting signing script to `dev`, and merge
+the workflow changes into the default branch so the scheduled dispatcher and
+manual dispatch trigger are registered. Remove the old `build.yml` cron trigger
+there as included in this change, so one nightly is requested each day. Prior
+scheduled build records retain their original default-branch label.
+
 ## Codesigning & notarization (macOS)
 
-`build-macos`'s "Codesign + notarize .app" step (`.github/codesign_notarize_macos.sh`)
-signs `dist/PLASMA.app` with a "Developer ID Application" certificate, submits
-it to Apple's notary service, and staples the resulting ticket — but only if
-five repo secrets are set. **Until they are, this step no-ops and every macOS
+`build-macos` has separate **Codesign and verify .app**, **Notarize .app with
+Apple**, and **Staple and validate notarization ticket** steps. They invoke
+`.github/codesign_notarize_macos.sh` with `sign`, `notarize`, and `staple`
+respectively; invoking the script without arguments still runs all three stages.
+It signs `dist/PLASMA.app` with a "Developer ID Application" certificate,
+submits it to Apple's notary service, and staples the resulting ticket.
+**Without a signing certificate configured, all three steps no-op and every macOS
 asset ships unsigned/unnotarized exactly as before** (first launch blocked by
-Gatekeeper, right-click → Open) — nothing else needs to change to turn this
-on later.
+Gatekeeper, right-click → Open). Once the certificate is set, missing required
+secrets fail explicitly. Notarization must return `Accepted` before stapling,
+and the stapled ticket is validated. The notarization step has a 30-minute
+timeout rather than waiting indefinitely.
+
+If notarization returns **HTTP 403: a required agreement is missing or expired**,
+the Apple Developer Account Holder must sign into
+[the account portal](https://developer.apple.com/account/), accept pending
+developer agreements, and verify that membership is active. This is an Apple
+account restriction; reducing build frequency or replacing signing certificates
+does not resolve it. Once corrected, rerun the failed macOS job; publishing
+remains gated until all builds succeed.
 
 **One-time setup, on the Apple side (requires an Apple Developer Program
 membership, $99/yr):**
@@ -211,7 +249,7 @@ Homebrew Cask's native `.dmg` handling instead of the hand-rolled
 
 `packaging/homebrew/plasma@nightly.rb` (copy verbatim into the tap's
 `Casks/plasma@nightly.rb` once, then leave it alone) tracks the rolling
-`nightly` pre-release tag `build.yml`'s `schedule` job republishes daily.
+`nightly` pre-release tag the `nightly.yml` dispatcher and `build.yml` republish daily.
 Unlike `plasma.rb`, its `url` points at the fixed `nightly` tag rather than a
 version-substituted one, and it uses `version :latest` / `sha256 :no_check`
 instead of a pinned checksum — so there is no per-release bump step for this

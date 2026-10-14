@@ -15,8 +15,17 @@ def test_build_blocks_assembles_the_ui(monkeypatch):
     """build_blocks() (shared by main() and scripts/capture_screenshots.py)
     returns a gr.Blocks with every core tab + the headless API registered."""
     import gradio as gr
+    import pylsl
+    from unittest.mock import Mock
     from plasma import plugins
     from plasma.config import device_config
+
+    # UI assembly does not need native outlets/resolver threads. Keeping them
+    # alive through interpreter teardown can crash liblsl's native finalizers.
+    monkeypatch.setattr("plasma.integrated_panel.open_journal_outlet", lambda: None)
+    resolver = Mock()
+    resolver.results.return_value = []
+    monkeypatch.setattr(pylsl, "ContinuousResolver", lambda: resolver)
 
     plugins.load_plugins()
     device_config.refresh_defaults()
@@ -24,6 +33,9 @@ def test_build_blocks_assembles_the_ui(monkeypatch):
     app = m.build_blocks(ip)
     assert isinstance(app, gr.Blocks)
     assert hasattr(ip, "_event_log")          # plasma_api.register(ip) ran
+    assert any(c.get("props", {}).get("label") == "Focus" for c in app.config["components"])
+    assert len(ip._session_views) == 4
+    assert [v["timer"].active for v in ip._session_views] == [True, True, False, False]
 
 
 # ── _relaunch_argv ──────────────────────────────────────────────────────────

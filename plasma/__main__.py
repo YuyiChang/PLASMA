@@ -6,6 +6,7 @@ import gradio as gr
 from plasma import plugins
 from plasma.app_context import app_context
 from plasma.integrated_panel import IntegratedPanel
+from plasma.task_buzzer import BUZZER_JS
 from plasma.config import device_config
 from plasma import api as plasma_api
 
@@ -99,6 +100,25 @@ function refresh() {
     });
     obs.observe(document.body, {childList: true, subtree: true});
     window.addEventListener('pagehide', () => obs.disconnect(), {once: true});
+""" + BUZZER_JS + """
+    // SPACE starts a ready task only while its controls are visible. Let
+    // inputs, buttons and other keyboard controls retain their native behavior.
+    const taskKey = (event) => {
+        if (event.code !== 'Space' || event.repeat || event.altKey ||
+            event.ctrlKey || event.metaKey || event.shiftKey) return;
+        if (event.target.closest('input, textarea, button, select, a, [role="tab"], [contenteditable="true"]')) return;
+        for (const control of document.querySelectorAll('#plasma-task-start, #plasma-focus-task-start')) {
+            const button = control.matches('button') ? control : control.querySelector('button');
+            if (button && !button.disabled && button.getClientRects().length) {
+                event.preventDefault();
+                unlockAudio();
+                button.click();
+                break;
+            }
+        }
+    };
+    document.addEventListener('keydown', taskKey);
+    window.addEventListener('pagehide', () => document.removeEventListener('keydown', taskKey), {once: true});
 }
 """
 
@@ -107,11 +127,15 @@ def build_blocks(ip):
     the given `IntegratedPanel`. Shared by `main()` and the screenshot-capture
     tool (`scripts/capture_screenshots.py`) so both build the identical UI.
     Does not launch the server."""
-    with gr.Blocks(title=app_context().app_name, theme=gr.themes.Ocean(), js=js_func) as app:
+    with gr.Blocks(title=app_context().app_name, theme=gr.themes.Ocean(), js=js_func,
+                   css="#plasma-focus-memo {max-height: calc(100vh - 180px); overflow-y: auto;} "
+                       "#plasma-buzzer-event {display:none;}") as app:
         yams_title = None
         with gr.Tabs() as top_tabs:
             with gr.Tab("Session Dashboard"):
                 ip.interface()
+            with gr.Tab("Focus"):
+                ip.focus_interface()
             with gr.Tab("Data Dashboard"):
                 ip.visualizer_interface()
             # extra tabs contributed by enabled plugins (e.g. MSense SQC / IMU).
@@ -134,6 +158,8 @@ def build_blocks(ip):
             #     pl.interface()
 
         _wire_plot_timer_gate(ip, top_tabs, yams_title)
+        ip.wire_session_views(top_tabs)
+        ip.wire_task_buzzer()
 
         # stop any live MSense stream when the last browser tab goes away — a
         # continuous stream with nobody watching just churns the BLE radio and
