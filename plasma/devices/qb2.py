@@ -1,85 +1,241 @@
-import blickfeld_qb2
-import numpy as np
-from pylsl import StreamInfo, StreamOutlet
-from plasma.lsl_util import mark_plasma_origin
+"""Blickfeld QB2 capture: full frames on disk, frame IDs over LSL.
+
+The SDK's async API lets Stop cancel a pending network read. A bounded writer
+queue absorbs short disk stalls without accumulating unbounded point clouds.
+"""
+import asyncio
+from datetime import datetime, timezone
+import os
+from pathlib import Path
 import threading
 import time
-import asyncio
-from blickfeld_qb2.base.grpc.channel import Channel
-import socket
-import os
-import gradio as gr
-import threading
-import asyncio
-from plasma.devices.template import PlasmaDevice, PlasmaMemo
-# from plasma.config import IP_QB2_LIDAR
+import uuid
+
+try:
+    import blickfeld_qb2
+except ImportError:
+    blickfeld_qb2 = None  # optional plugin dependency; keep other sensors usable
+import numpy as np
+from pylsl import StreamInfo, StreamOutlet, local_clock
+
 from plasma.config import plasma_config
+from plasma.devices.template import PlasmaDevice, PlasmaMemo
+from plasma.lsl_util import mark_plasma_origin
+
 
 class Qb2(PlasmaDevice):
-    def __init__(self, session_info, logger, tag) -> None:
+    STREAM_NAME = "blickfield_qb2"  # retain the existing stream name for consumers
+    FRAME_TIMEOUT_S = 10.0
+    STOP_TIMEOUT_S = 5.0
+    WRITE_QUEUE_SIZE = 8
+
+    def __init__(self, session_info, logger=None, tag="qb2 LiDAR"):
         super().__init__(session_info, logger, tag)
-        self.memo = PlasmaMemo('qb2 LiDAR')
-        self.session_info = session_info
-        self.addr = plasma_config.ip_lidar
-        self.status = ""
-        self.last_lsl = ""
-
-        self.out_dir = os.path.join(self.session_info['log_dir'], "qb2")
-        os.makedirs(self.out_dir, exist_ok=True)
-
-        print(f"Initializing Qb2 LiDAR at {self.addr}")
-
-
-        self._thread = None
-        self._stop_event = threading.Event()
-        
-    # def init_device(self):
-        info = StreamInfo('blickfield_qb2', 'Image', 1, 8, 'int32', 'qb2-xxxx')
-        self.outlet = StreamOutlet(mark_plasma_origin(info))
-
+        self.memo = PlasmaMemo(tag)
+        self.addr = (plasma_config.ip_lidar or "").strip()
+        self._api_key = (plasma_config.qb2_api_key or "").strip()
+        self._loop = None
+        self._reader = None
+        self._state_lock = threading.Lock()
+        self._fault = None
+        self.outlet = None
+        self.out_dir = None
+        if not self.addr:
+            self._fail(ValueError("Set the QB2 LiDAR IP address in Configuration"))
+            return
+        if blickfeld_qb2 is None:
+            self._fail(ImportError('Install the QB2 SDK with pip install "plasma-app[qb2]"'))
+            return
+        info = StreamInfo(self.STREAM_NAME, "Image", 1, 8, "string",
+                          f"plasma-qb2-{self.addr}-{uuid.uuid4().hex}")
+        info.desc().append_child_value("frame_id_encoding", "decimal uint64")
+        info.desc().append_child_value("timestamp_reference", "host receipt, LSL local_clock")
         try:
-            channel = blickfeld_qb2.Channel(fqdn_or_ip=self.addr)
-            print("qb2 ready")
-            self.memo.sts = "Ready"
-        except Exception as e:
-            gr.Error(str(e))
-            self.memo.sts = f"⛔ {str(e)}"
+            self.outlet = StreamOutlet(mark_plasma_origin(info))
+        except Exception as error:
+            self._fail(error)
+            return
+        # Channel creation is lazy; the first frame verifies transport and auth.
+        self.memo.sts = "Ready"
+        self.memo.set_latest("Configured; connection will be checked on Start")
 
     def lsl_streams(self):
-        return {"blickfield_qb2": self.tag}
+        return {self.STREAM_NAME: self.tag}
 
-    def interface(self):
-        pass
+    def _fail(self, error):
+        # Vendor exceptions can contain credentials; redact before logging/UI.
+        detail = str(error)
+        status = getattr(getattr(error, "status", None), "name", "")
+        if status in {"NOT_FOUND", "UNAUTHENTICATED", "PERMISSION_DENIED"}:
+            detail += "; check the QB2 application key and its account permissions in Configuration"
+        if self._api_key:
+            detail = detail.replace(self._api_key, "[redacted]")
+        self._fault = f"{type(error).__name__}: {detail}"
+        self.memo.sts = f"⛔ QB2 capture failed: {self._fault}"
+        self.memo.set_latest(self._fault)
+        self.info(self.memo.sts)
+
+    def start(self):
+        with self._state_lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("QB2 capture is still active; wait for Stop to finish")
+            if self.outlet is None:
+                raise RuntimeError(self._fault or "QB2 is not configured")
+            # Resolve at Start, after the panel injects its shared session folder.
+            root = self.session_dir or os.path.join(
+                self.session_info["log_dir"],
+                f"{self.session_info['participant_enc']}_{time.strftime('%y%m%d_%H%M%S')}")
+            self.out_dir = Path(root) / "qb2"
+            try:
+                self.out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                self._fail(error)
+                raise
+            self._run_id = uuid.uuid4().hex
+            self._fault = None
+            self.frames_saved = 0
+            self._stop_event.clear()
+            self.memo.sts = "Starting..."
+            self.memo.set_latest(f"Connecting to {self.addr}")
+            self._thread = threading.Thread(target=self.streaming, daemon=True,
+                                            name="plasma-qb2")
+            self._thread.start()
 
     def streaming(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        # self.loop = asyncio.get_event_loop()
-        # asyncio.set_event_loop(self.loop)
-        # asyncio.new_event_loop()
+        try:
+            asyncio.run(self._capture())
+        except Exception as error:
+            self._fail(error)
+        finally:
+            with self._state_lock:
+                self._loop = None
+                self._reader = None
+            if self._fault is None:
+                self.memo.sts = "🟥 stopped"
+                self.memo.set_latest(f"Saved {self.frames_saved} frames to {self.out_dir}")
 
-        with blickfeld_qb2.Channel(fqdn_or_ip=self.addr) as channel:
-            service = blickfeld_qb2.core_processing.services.PointCloud(channel)
+    async def _capture(self):
+        queue = asyncio.Queue(maxsize=self.WRITE_QUEUE_SIZE)
+        reader_done = asyncio.Event()
+        loop = asyncio.get_running_loop()
 
-            for i, response in enumerate(service.stream()):
-
-                # Extract a point cloud frame from the response
-                frame = response.frame
-
-                self.outlet.push_sample([frame.id])
-                self.memo.latest("frame ID = ", frame.id)
-
-                # response = client.recv(1024).decode()
-                # should_continue = response.lower() == 'true'
-                # print(f"Should continue: {should_continue}")
-
-                out_path = os.path.join(self.out_dir, f"qb2-{frame.id}.npy")
-
-                if frame.id % 100 == 0:
-                    print("Received frame with ID:", frame.id)
-
-                with open(out_path, "wb") as f:
-                    np.save(f, frame, allow_pickle=True)
-
+        async def receive():
+            args = {"fqdn_or_ip": self.addr, "secure": True}
+            if self._api_key:
+                args["token"] = blickfeld_qb2.TokenFactory(
+                    application_key_secret=self._api_key)
+            try:
                 if self._stop_event.is_set():
-                    break
+                    return
+                with blickfeld_qb2.Channel(**args) as channel:
+                    stream = blickfeld_qb2.core_processing.services.PointCloud(channel).async_stream()
+                    try:
+                        while not self._stop_event.is_set():
+                            try:
+                                response = await asyncio.wait_for(
+                                    stream.__anext__(), timeout=self.FRAME_TIMEOUT_S)
+                            except StopAsyncIteration:
+                                raise RuntimeError("Point-cloud stream ended unexpectedly") from None
+                            except asyncio.TimeoutError:
+                                raise TimeoutError(
+                                    f"No QB2 frame received for {self.FRAME_TIMEOUT_S:g} seconds; "
+                                    "check power, network, and application key") from None
+                            if self._stop_event.is_set():
+                                break
+                            unix_now, lsl_now = time.time(), local_clock()
+                            frame = response.frame
+                            payload = {
+                                "frame": frame,
+                                "unix_time": unix_now,
+                                "datetime": datetime.fromtimestamp(
+                                    unix_now, timezone.utc).isoformat(timespec="milliseconds"),
+                                "lsl_time": lsl_now,
+                            }
+                            try:
+                                queue.put_nowait((payload, lsl_now))
+                            except asyncio.QueueFull:
+                                raise RuntimeError(
+                                    "QB2 disk writer cannot keep up (frame queue full); "
+                                    "capture halted to avoid silent data loss") from None
+                            self.memo.sts = "🟢"
+                    finally:
+                        await stream.aclose()
+            except asyncio.CancelledError:
+                if not self._stop_event.is_set():
+                    raise
+            finally:
+                reader_done.set()
+
+        async def write():
+            while not (reader_done.is_set() and queue.empty()):
+                try:
+                    payload, lsl_now = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                # Keep disk I/O off the event loop so network reads and Stop
+                # stay responsive. Only one write is in flight at a time.
+                path = await asyncio.to_thread(self._save_frame, payload)
+                self.frames_saved += 1
+                # Publish only after a complete file exists. Strings preserve
+                # uint64 frame IDs, which the old int32 outlet could overflow.
+                self.outlet.push_sample([str(payload["frame"].id)], timestamp=lsl_now)
+                self.memo.set_latest(
+                    f"frame ID = {payload['frame'].id}; {self.frames_saved} saved → {path.name}")
+
+        reader = asyncio.create_task(receive())
+        writer = asyncio.create_task(write())
+        with self._state_lock:
+            self._loop, self._reader = loop, reader
+            if self._stop_event.is_set():
+                reader.cancel()
+                reader_done.set()
+        try:
+            done, _ = await asyncio.wait((reader, writer), return_when=asyncio.FIRST_COMPLETED)
+            if writer in done:
+                # A writer failure must interrupt a stalled network read.
+                await writer
+            try:
+                await reader
+            finally:
+                # Drain already accepted frames even on timeout/network failure.
+                await writer
+        finally:
+            for task in (reader, writer):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(reader, writer, return_exceptions=True)
+
+    def _save_frame(self, payload):
+        frame_id = int(payload["frame"].id)
+        path = self.out_dir / f"frame_{self._run_id}_{self.frames_saved:08d}_{frame_id}.npy"
+        partial = path.with_suffix(".npy.partial")
+        try:
+            with partial.open("xb") as handle:
+                np.save(handle, payload, allow_pickle=True)
+            os.replace(partial, path)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
+        return path
+
+    def stop(self):
+        self._stop_event.set()
+        with self._state_lock:
+            loop, reader, thread = self._loop, self._reader, self._thread
+            if loop is not None and reader is not None:
+                try:
+                    loop.call_soon_threadsafe(reader.cancel)
+                except RuntimeError:  # event loop finished while Stop acquired lock
+                    pass
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=self.STOP_TIMEOUT_S)
+            if thread.is_alive():
+                self.memo.sts = "⛔ QB2 stop unconfirmed; capture worker still active"
+                raise RuntimeError("QB2 Stop timed out; wait for pending disk I/O before restarting")
+        if self._fault is None:
+            self.memo.sts = "🟥 stopped"
+
+    def disconnect(self):
+        self.stop()
+        # Drop the native outlet only after its producer has exited.
+        self.outlet = None

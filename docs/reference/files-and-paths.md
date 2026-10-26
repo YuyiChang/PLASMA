@@ -25,7 +25,8 @@ All writable state lives under one **home directory**, resolved once at startup:
     └── <sub>/<ses>/<enc>_<YYMMDD_HHMMSS>/    # one folder per Start
         ├── plasma_recording_<YYMMDD_HHMMSS>.xdf
         ├── events.jsonl                     # this session's slice of the fault history
-        └── msense/                          # MSense .txt dumps, SQC snapshots
+        ├── msense/                          # MSense .txt dumps, SQC snapshots
+        └── qb2/                             # full point-cloud frames (.npy)
 ```
 
 `<enc>` is the participant encoding: the first integer in `<sub>` × 100 + the
@@ -37,6 +38,7 @@ first integer in `<ses>` (e.g. `sub-4021`, `ses-02` → `402102`).
 {
   "enabled_devices": ["MSense Wristbands", "ShimmerGSR"],
   "ip_qb2_lidar": "",
+  "qb2_api_key": "",
   "ip_pupil_labs": "",
   "demo_mode": false,
   "plugins": {
@@ -51,6 +53,9 @@ first integer in `<ses>` (e.g. `sub-4021`, `ses-02` → `402102`).
 
 Written by the Configuration tab; safe to hand-edit while PLASMA is closed.
 Import / export from the Configuration tab moves it between machines.
+`qb2_api_key` is stored as plaintext in this file and config exports, although
+the UI masks it. See [QB2 recording](qb2-recording.md) for the point-cloud schema
+and LSL marker compatibility changes.
 
 ## `events.jsonl`
 

@@ -25,6 +25,13 @@ off by default (it needs PyBluez).
 
 - **QB2 LiDAR IP address** and **Pupil Labs IP address** — the addresses those
   devices listen on. Leave blank if you're not using them.
+- **QB2 application key secret** — the device's application key, masked in the
+  UI. Leave blank only for QB2 devices allowing unauthenticated access. Click
+  **Apply**, then re-Initialize QB2 to use a changed address/key. The local and
+  exported JSON config contain the actual key. Point clouds are saved in the
+  shared recording folder under `qb2/`, beside MSense data and the XDF file.
+  See [QB2 recording](../reference/qb2-recording.md) for file format, timing,
+  and fault handling.
 
 ## Import / export
 

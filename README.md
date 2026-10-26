@@ -64,7 +64,8 @@ plugins: `msense`, `qb2`, `pupil`, `shimmer`, `obs` (and `all`).
 
 ## Known issue / future works
 
-- [ ] need manually set lidar ip addr
+- [x] QB2 LiDAR address and application key configurable in Configuration;
+      point clouds share the session recording folder — [QB2 recording & review](docs/reference/qb2-recording.md)
 - [ ] the built-in LSL→XDF recorder captures **every** stream on the default
       liblsl session, so a concurrent `pytest` run or another lab tool leaks
       into the recording; re-Initialize doesn't fully tear down old outlets.

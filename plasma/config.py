@@ -11,6 +11,7 @@ from plasma.app_context import app_context
 _DEFAULTS = {
     "enabled_devices": [],
     "ip_qb2_lidar": "",
+    "qb2_api_key": "",
     "ip_pupil_labs": "",
     "plugins": {},
     # when True, plugins.load_plugins() also registers the simulated MSense
@@ -25,6 +26,7 @@ class DeviceConfig:
         cfg = self._load()
         self._active = list(cfg["enabled_devices"])
         self.ip_lidar = cfg["ip_qb2_lidar"]
+        self.qb2_api_key = cfg["qb2_api_key"]
         self.ip_pupil_labs = cfg["ip_pupil_labs"]
         # env var wins so a wrapper / CI can force demo mode without touching
         # the saved file
@@ -47,6 +49,7 @@ class DeviceConfig:
                 return {
                     "enabled_devices": list(raw.get("enabled_devices", [])),
                     "ip_qb2_lidar": raw.get("ip_qb2_lidar", ""),
+                    "qb2_api_key": raw.get("qb2_api_key", ""),
                     "ip_pupil_labs": raw.get("ip_pupil_labs", ""),
                     "plugins": dict(raw.get("plugins", {})),
                     "demo_mode": bool(raw.get("demo_mode", False)),
@@ -58,6 +61,7 @@ class DeviceConfig:
         return {
             "enabled_devices": [],
             "ip_qb2_lidar": "",
+            "qb2_api_key": "",
             "ip_pupil_labs": "",
             "plugins": {},
             "demo_mode": False,
@@ -67,14 +71,23 @@ class DeviceConfig:
     def _save(self):
         path = app_context().config_path
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump({
-                "enabled_devices": self._active,
-                "ip_qb2_lidar": self.ip_lidar,
-                "ip_pupil_labs": self.ip_pupil_labs,
-                "plugins": self.plugins,
-                "demo_mode": self.demo_mode,
-            }, f, indent=2)
+        # Atomic replacement avoids a truncated config after interruption;
+        # mkstemp also keeps application keys owner-readable only (POSIX).
+        fd, temporary = tempfile.mkstemp(prefix=".plasma-config-", dir=os.path.dirname(path) or ".")
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump({
+                    "enabled_devices": self._active,
+                    "ip_qb2_lidar": self.ip_lidar,
+                    "qb2_api_key": self.qb2_api_key,
+                    "ip_pupil_labs": self.ip_pupil_labs,
+                    "plugins": self.plugins,
+                    "demo_mode": self.demo_mode,
+                }, f, indent=2)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def refresh_defaults(self):
         """Run once from ``main()`` after ``plugins.load_plugins()``: fill the
@@ -105,19 +118,21 @@ class DeviceConfig:
 
     # ── UI callbacks ──────────────────────────────────────────────────────────
 
-    def _apply(self, selected, ip_lidar, ip_pupil_labs, demo_mode):
+    def _apply(self, selected, ip_lidar, ip_pupil_labs, demo_mode, qb2_api_key=""):
         self._active = list(selected)
         self.ip_lidar = ip_lidar
+        self.qb2_api_key = (qb2_api_key or "").strip()
         self.ip_pupil_labs = ip_pupil_labs
         self.demo_mode = bool(demo_mode) or bool(os.environ.get("PLASMA_DEMO"))
         self._save()
         note = " — restart PLASMA to load the simulated device" if self.demo_mode else ""
         return f"Saved — {len(self._active)} device type(s) enabled{note}"
 
-    def _export_config(self, selected, ip_lidar, ip_pupil_labs):
+    def _export_config(self, selected, ip_lidar, ip_pupil_labs, qb2_api_key=None):
         config = {
             "enabled_devices": selected,
             "ip_qb2_lidar": ip_lidar,
+            "qb2_api_key": self.qb2_api_key if qb2_api_key is None else qb2_api_key.strip(),
             "ip_pupil_labs": ip_pupil_labs,
             "plugins": self.plugins,
             "demo_mode": self.demo_mode,
@@ -129,7 +144,7 @@ class DeviceConfig:
 
     def _import_config(self, file):
         if file is None:
-            return gr.update(), gr.update(), gr.update(), ""
+            return gr.update(), gr.update(), gr.update(), gr.update(), ""
         try:
             with open(file, 'r') as f:
                 raw = json.load(f)
@@ -138,16 +153,18 @@ class DeviceConfig:
             unknown = [d for d in raw.get("enabled_devices", []) if d not in catalog]
             ip_lidar = raw.get("ip_qb2_lidar", self.ip_lidar)
             ip_pupil = raw.get("ip_pupil_labs", self.ip_pupil_labs)
+            qb2_api_key = raw.get("qb2_api_key", "") or ""
             if "plugins" in raw:
                 # plugin config sections re-render from get_plugin_config on the
                 # next Configuration-tab visit
                 self.plugins = dict(raw["plugins"])
-                self._active = enabled
-                self.ip_lidar = ip_lidar
-                self.ip_pupil_labs = ip_pupil
-                self.demo_mode = (bool(raw.get("demo_mode", self.demo_mode))
-                                  or bool(os.environ.get("PLASMA_DEMO")))
-                self._save()
+            self._active = enabled
+            self.ip_lidar = ip_lidar
+            self.qb2_api_key = qb2_api_key
+            self.ip_pupil_labs = ip_pupil
+            self.demo_mode = (bool(raw.get("demo_mode", self.demo_mode))
+                              or bool(os.environ.get("PLASMA_DEMO")))
+            self._save()
             msg = f"Loaded — {len(enabled)} device type(s)"
             if unknown:
                 msg += f" (skipped unknown: {', '.join(unknown)})"
@@ -155,10 +172,11 @@ class DeviceConfig:
                 gr.update(value=enabled),
                 gr.update(value=ip_lidar),
                 gr.update(value=ip_pupil),
+                gr.update(value=qb2_api_key),
                 msg,
             )
         except Exception as e:
-            return gr.update(), gr.update(), gr.update(), f"Import error: {e}"
+            return gr.update(), gr.update(), gr.update(), gr.update(), f"Import error: {e}"
 
     # ── Gradio interface ──────────────────────────────────────────────────────
 
@@ -180,6 +198,11 @@ class DeviceConfig:
 
             with gr.Accordion("Network settings", open=True):
                 ip_lidar_txt = gr.Text(value=self.ip_lidar, label="QB2 LiDAR IP address")
+                qb2_key_txt = gr.Textbox(
+                    value=self.qb2_api_key, type="password", label="QB2 application key secret",
+                    info="Optional for devices without user management. Saved locally and included "
+                         "in exported config. Re-Initialize QB2 after changing settings.",
+                )
                 ip_pupil_txt = gr.Text(value=self.ip_pupil_labs, label="Pupil Labs IP address")
 
             with gr.Row():
@@ -192,18 +215,18 @@ class DeviceConfig:
 
             btn_apply.click(
                 self._apply,
-                inputs=[checkbox_group, ip_lidar_txt, ip_pupil_txt, demo_mode_chk],
+                inputs=[checkbox_group, ip_lidar_txt, ip_pupil_txt, demo_mode_chk, qb2_key_txt],
                 outputs=status,
             )
             btn_export.click(
                 self._export_config,
-                inputs=[checkbox_group, ip_lidar_txt, ip_pupil_txt],
+                inputs=[checkbox_group, ip_lidar_txt, ip_pupil_txt, qb2_key_txt],
                 outputs=[export_file, status],
             )
             file_import.change(
                 self._import_config,
                 inputs=file_import,
-                outputs=[checkbox_group, ip_lidar_txt, ip_pupil_txt, status],
+                outputs=[checkbox_group, ip_lidar_txt, ip_pupil_txt, qb2_key_txt, status],
             )
 
             # Per-plugin Configuration sections. Each owns its own Apply button
