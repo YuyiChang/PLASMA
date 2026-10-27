@@ -20,20 +20,24 @@ from pylsl import StreamInfo, StreamOutlet, local_clock
 
 from plasma.config import plasma_config
 from plasma.devices.template import PlasmaDevice, PlasmaMemo
+from plasma.devices.qb2_config import configured_devices
 from plasma.lsl_util import mark_plasma_origin
 
 
-class Qb2(PlasmaDevice):
+class Qb2Unit(PlasmaDevice):
     STREAM_NAME = "blickfield_qb2"  # retain the existing stream name for consumers
     FRAME_TIMEOUT_S = 10.0
     STOP_TIMEOUT_S = 5.0
     WRITE_QUEUE_SIZE = 8
 
-    def __init__(self, session_info, logger=None, tag="qb2 LiDAR"):
+    def __init__(self, session_info, logger=None, tag="qb2 LiDAR", *,
+                 address=None, api_key=None, device_id=None):
         super().__init__(session_info, logger, tag)
         self.memo = PlasmaMemo(tag)
-        self.addr = (plasma_config.ip_lidar or "").strip()
-        self._api_key = (plasma_config.qb2_api_key or "").strip()
+        self.addr = (address if address is not None else plasma_config.ip_lidar or "").strip()
+        self._api_key = (api_key if api_key is not None else plasma_config.qb2_api_key or "").strip()
+        self.device_id = device_id
+        self.stream_name = f"{self.STREAM_NAME}_{device_id}" if device_id else self.STREAM_NAME
         self._loop = None
         self._reader = None
         self._state_lock = threading.Lock()
@@ -46,10 +50,12 @@ class Qb2(PlasmaDevice):
         if blickfeld_qb2 is None:
             self._fail(ImportError('Install the QB2 SDK with pip install "plasma-app[qb2]"'))
             return
-        info = StreamInfo(self.STREAM_NAME, "Image", 1, 8, "string",
+        info = StreamInfo(self.stream_name, "Image", 1, 8, "string",
                           f"plasma-qb2-{self.addr}-{uuid.uuid4().hex}")
         info.desc().append_child_value("frame_id_encoding", "decimal uint64")
         info.desc().append_child_value("timestamp_reference", "host receipt, LSL local_clock")
+        info.desc().append_child_value("device_address", self.addr)
+        info.desc().append_child_value("device_label", tag)
         try:
             self.outlet = StreamOutlet(mark_plasma_origin(info))
         except Exception as error:
@@ -60,7 +66,7 @@ class Qb2(PlasmaDevice):
         self.memo.set_latest("Configured; connection will be checked on Start")
 
     def lsl_streams(self):
-        return {self.STREAM_NAME: self.tag}
+        return {self.stream_name: self.tag}
 
     def _fail(self, error):
         # Vendor exceptions can contain credentials; redact before logging/UI.
@@ -86,6 +92,8 @@ class Qb2(PlasmaDevice):
                 self.session_info["log_dir"],
                 f"{self.session_info['participant_enc']}_{time.strftime('%y%m%d_%H%M%S')}")
             self.out_dir = Path(root) / "qb2"
+            if self.device_id:
+                self.out_dir /= self.device_id
             try:
                 self.out_dir.mkdir(parents=True, exist_ok=True)
             except OSError as error:
@@ -120,11 +128,11 @@ class Qb2(PlasmaDevice):
         loop = asyncio.get_running_loop()
 
         async def receive():
-            args = {"fqdn_or_ip": self.addr, "secure": True}
-            if self._api_key:
-                args["token"] = blickfeld_qb2.TokenFactory(
-                    application_key_secret=self._api_key)
             try:
+                args = {"fqdn_or_ip": self.addr, "secure": True}
+                if self._api_key:
+                    args["token"] = blickfeld_qb2.TokenFactory(
+                        application_key_secret=self._api_key)
                 if self._stop_event.is_set():
                     return
                 with blickfeld_qb2.Channel(**args) as channel:
@@ -150,6 +158,8 @@ class Qb2(PlasmaDevice):
                                 "datetime": datetime.fromtimestamp(
                                     unix_now, timezone.utc).isoformat(timespec="milliseconds"),
                                 "lsl_time": lsl_now,
+                                "device_id": self.device_id,
+                                "device_address": self.addr,
                             }
                             try:
                                 queue.put_nowait((payload, lsl_now))
@@ -219,16 +229,24 @@ class Qb2(PlasmaDevice):
         return path
 
     def stop(self):
+        self.request_stop()
+        self.wait_stopped(self.STOP_TIMEOUT_S)
+
+    def request_stop(self):
+        """Signal without joining, so all LiDARs receive Stop immediately."""
         self._stop_event.set()
         with self._state_lock:
-            loop, reader, thread = self._loop, self._reader, self._thread
+            loop, reader = self._loop, self._reader
             if loop is not None and reader is not None:
                 try:
                     loop.call_soon_threadsafe(reader.cancel)
                 except RuntimeError:  # event loop finished while Stop acquired lock
                     pass
+
+    def wait_stopped(self, timeout):
+        thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=self.STOP_TIMEOUT_S)
+            thread.join(timeout=max(0, timeout))
             if thread.is_alive():
                 self.memo.sts = "⛔ QB2 stop unconfirmed; capture worker still active"
                 raise RuntimeError("QB2 Stop timed out; wait for pending disk I/O before restarting")
@@ -239,3 +257,76 @@ class Qb2(PlasmaDevice):
         self.stop()
         # Drop the native outlet only after its producer has exited.
         self.outlet = None
+
+
+class Qb2(PlasmaDevice):
+    """One catalog plugin with independently monitored physical LiDAR units."""
+
+    def __init__(self, session_info, logger=None, tag="qb2 LiDAR"):
+        super().__init__(session_info, logger, tag)
+        self.units = {}
+        self.memo = {}
+        try:
+            records = configured_devices(plasma_config)
+        except ValueError as error:
+            memo = PlasmaMemo(tag)
+            memo.sts = "⛔ Invalid QB2 device settings"
+            memo.set_latest(str(error))
+            self.memo[tag] = memo
+            return
+        for row in records:
+            if not row["enabled"]:
+                continue
+            identity = row["id"]
+            unit = Qb2Unit(session_info, logger, f"{row['name']} [{row['address']}]",
+                           address=row["address"], api_key=row["api_key"], device_id=identity)
+            self.units[identity] = unit
+            self.memo[identity] = unit.memo
+        if not self.units:
+            memo = PlasmaMemo(tag)
+            memo.sts = "Ready"
+            memo.set_latest("No enabled LiDARs — add or enable devices in Configuration → QB2 LiDARs")
+            self.memo[tag] = memo
+
+    def lsl_streams(self):
+        return {unit.stream_name: identity for identity, unit in self.units.items()
+                if unit.outlet is not None}
+
+    def start(self):
+        if any(u._thread is not None and u._thread.is_alive() for u in self.units.values()):
+            raise RuntimeError("QB2 capture is still active; wait for Stop to finish")
+        # Compute one fallback path for standalone use, as the panel normally
+        # injects its own shared folder before this call.
+        root = self.session_dir or os.path.join(
+            self.session_info["log_dir"],
+            f"{self.session_info['participant_enc']}_{time.strftime('%y%m%d_%H%M%S')}")
+        for unit in self.units.values():
+            unit.session_info = self.session_info
+            unit.session_dir = root
+            unit.journal_hook = self.journal_hook
+            try:
+                unit.start()
+            except Exception as error:
+                unit._fail(error)  # one broken unit must not block its peers
+
+    def stop(self):
+        for unit in self.units.values():
+            unit.request_stop()
+        # One total timeout, rather than N sequential five-second timeouts.
+        deadline = time.monotonic() + Qb2Unit.STOP_TIMEOUT_S
+        failed = 0
+        for unit in self.units.values():
+            try:
+                unit.wait_stopped(deadline - time.monotonic())
+            except RuntimeError:
+                failed += 1
+        if failed:
+            raise RuntimeError(f"QB2 Stop unconfirmed for {failed} LiDAR(s); wait for pending disk I/O")
+
+    def disconnect(self):
+        try:
+            self.stop()
+        finally:
+            for unit in self.units.values():
+                if unit._thread is None or not unit._thread.is_alive():
+                    unit.outlet = None

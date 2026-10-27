@@ -23,15 +23,25 @@ off by default (it needs PyBluez).
 
 ## Network settings
 
-- **QB2 LiDAR IP address** and **Pupil Labs IP address** — the addresses those
-  devices listen on. Leave blank if you're not using them.
-- **QB2 application key secret** — the device's application key, masked in the
-  UI. Leave blank only for QB2 devices allowing unauthenticated access. Click
-  **Apply**, then re-Initialize QB2 to use a changed address/key. The local and
-  exported JSON config contain the actual key. Point clouds are saved in the
-  shared recording folder under `qb2/`, beside MSense data and the XDF file.
-  See [QB2 recording](../reference/qb2-recording.md) for file format, timing,
-  and fault handling.
+- **Pupil Labs IP address** — the address that device listens on.
+
+## QB2 LiDARs
+
+Use **Add new LiDAR**, enter its name and IP address/hostname, optionally enter
+an **Application key secret**, set **Enable this LiDAR**, and click **Save LiDAR**.
+Repeat for as many devices as needed. Select a saved unit under **Edit LiDAR**
+to change its key, enable/disable it, or remove it. Each device saves separately.
+Keys are masked in the editor; the overview only shows whether a key is configured.
+
+Enable **qb2 LiDAR** in the catalog and click **Apply**, then re-Initialize on the
+dashboard after changing the list. Only enabled units connect and record. Each
+writes to `qb2/<device-id>/` in the shared subject/session recording folder,
+beside MSense data and the XDF file. A failed unit does not stop its peers.
+
+Existing single-LiDAR settings are read automatically. After importing config,
+click **Reload saved LiDARs** to refresh the editor. The local and exported JSON
+config contain the actual keys. See [QB2 recording](../reference/qb2-recording.md)
+for file format, timing, and fault handling.
 
 ## Import / export
 

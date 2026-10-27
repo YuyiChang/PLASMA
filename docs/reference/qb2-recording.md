@@ -2,12 +2,27 @@
 
 ## Configure and record
 
-In **Configuration → Network settings**, set **QB2 LiDAR IP address** (a hostname
-is also accepted) and **QB2 application key secret**, then click **Apply**.
-Enable **qb2 LiDAR**, refresh the dashboard's device list, and Initialize it.
-Re-Initialize after changing the address or key. This integration configures the
-existing single QB2 device; the reference script's multi-LiDAR launcher is not
-used by PLASMA.
+In **Configuration → QB2 LiDARs**, use **Add new LiDAR** to create a device.
+Enter a name, IP address or hostname, and optional application key. Set
+**Enable this LiDAR** and click **Save LiDAR**. Repeat for any number of devices.
+Select an existing device under **Edit LiDAR** to change it, clear its key,
+disable it, or remove it. The overview shows whether a key is configured without
+showing the secret. Each Save persists immediately; the global Apply button
+controls the sensor catalog separately.
+
+Enable **qb2 LiDAR** in the catalog, click **Apply**, refresh the dashboard's
+device list, and Initialize it. Re-Initialize after changing LiDAR settings.
+Existing single-device address/key settings are read as one enabled LiDAR; the
+first Save stores the list under `plugins.qb2.devices`. Importing a legacy config
+also migrates it. After importing, click **Reload saved LiDARs** in the editor.
+An explicitly empty list overrides legacy values, so deleted devices stay deleted.
+
+Disabled devices create no connections, capture workers, LSL outlets, or recording
+folders. Each enabled device has its own memo row, LSL stream, worker, bounded
+queue, and output subfolder. A connection, authentication, or disk error on one
+unit leaves its peers running. Stop signals all units before waiting against one
+shared five-second deadline. There is no configured device-count limit; actual
+capacity depends on host resources, storage, and network throughput.
 
 The key is optional only for devices which permit unauthenticated access.
 PLASMA uses the SDK's `TokenFactory(application_key_secret=...)` when a key is
@@ -19,7 +34,7 @@ config contain the actual key. Local config writes use atomic replacement and
 owner-only permissions on POSIX. Windows permissions follow the containing
 folder's ACL. Avoid sharing a config export containing a real key.
 
-**Initialize** prepares the LSL outlet without opening a sensor connection.
+**Initialize** prepares each enabled device’s LSL outlet without opening a sensor connection.
 **Start** connects and authenticates; the row stays `Starting...` until the first
 frame arrives. This is intentional: SDK channel construction alone does not
 verify authentication. No-frame timeout is 10 seconds per read, including the
@@ -32,7 +47,8 @@ data/<subject>/<session>/<encoding>_<YYMMDD_HHMMSS>/
 ├── plasma_recording_<YYMMDD_HHMMSS>.xdf
 ├── msense/
 └── qb2/
-    └── frame_<run-uuid>_<sequence>_<device-frame-id>.npy
+    └── <stable-device-id>/
+        └── frame_<run-uuid>_<sequence>_<device-frame-id>.npy
 ```
 
 The UUID and sequence prevent overwriting if a device repeats/resets its frame
@@ -52,6 +68,8 @@ Each `.npy` contains a dictionary, following `lib/blickfeld-qb2-lidar/main.py`:
 | `unix_time` | Host receipt time, seconds since Unix epoch |
 | `datetime` | The same receipt time, ISO 8601 UTC with milliseconds and explicit offset |
 | `lsl_time` | Host receipt time on the LSL local clock, seconds |
+| `device_id` | Stable configured device ID (also the output subfolder and stream suffix) |
+| `device_address` | Configured sensor IP address or hostname |
 
 The standalone script's `datetime` was a local-time string without a timezone;
 PLASMA writes UTC explicitly. The previous plugin saved the bare frame object;
@@ -67,8 +85,10 @@ frame = record["frame"]
 xyz = frame.binary.cartesian
 ```
 
-The existing LSL name `blickfield_qb2` is retained, including its historical
-spelling. Its single channel now carries a **decimal string**, replacing `int32`:
+Each unit publishes `blickfield_qb2_<stable-device-id>`, using the existing name
+as a prefix. The suffix distinguishes units even if display names are identical.
+Update consumers that resolved the exact old stream name `blickfield_qb2`.
+Each stream’s single channel carries a **decimal string**, replacing `int32`:
 Blickfeld specifies `frame.id` as `uint64`, whose full range cannot be represented
 in signed int32/int64. Convert marker values with `int(value)` in consumers.
 Stream source IDs are unique per initialized instance to avoid reattaching to a
@@ -141,10 +161,6 @@ remain and are not complete recordings.
    and a new Start. Automatic reconnect should use bounded exponential backoff,
    separate authentication failures from transient transport errors, and journal
    each gap/recovery. Do not silently label an interrupted session continuous.
-6. **Extend to multiple QB2 units if needed.** The reference script supports
-   multiple devices; this port retains the existing plugin's single-device
-   settings. Multiple units need a validated address/key table, per-device memo
-   rows and LSL identities, separate output subfolders, and independent workers.
 
 ## Validation
 
@@ -153,7 +169,9 @@ real SDK frame objects, including point-array serialization, uint64 IDs,
 authenticated/keyless channels, shared session paths, duplicate counters and
 repeated starts, immediate/stalled Stop, disk failure, queue overflow, network
 failure and redaction, stream termination, missing SDK/outlet faults, and
-settings persistence/import/export/atomic failure. The session-directory and UI
+settings persistence/import/export/atomic failure. Multi-unit tests cover mixed
+keyed/keyless devices, disabled units, isolated failures, unique folders and
+streams, duplicate-address validation, stable IDs, and legacy migration. The session-directory and UI
 lifecycle regression tests cover the surrounding integration.
 
 [python]: https://docs.blickfeld.com/qb2/Qb2/developer/client_libraries/python.html

@@ -93,7 +93,7 @@ class Source:
 
 
 def device(module, tmp_path):
-    return module.Qb2({"log_dir": str(tmp_path / "old-sub" / "old-ses"),
+    return module.Qb2Unit({"log_dir": str(tmp_path / "old-sub" / "old-ses"),
                        "participant_enc": 100}, logging.getLogger("test-qb2"), "qb2 LiDAR")
 
 
@@ -268,15 +268,16 @@ def test_unconfigured_device_fails_before_creating_outlet(qb2, tmp_path):
 def test_settings_persist_export_and_import(tmp_path):
     plugins.load_plugins()
     cfg = DeviceConfig()
-    cfg._apply(["qb2 LiDAR"], "192.0.2.1", "", False, " demo-key ")
+    cfg.ip_lidar, cfg.qb2_api_key = "192.0.2.1", "demo-key"
+    cfg._apply(["qb2 LiDAR"], "", False)
     loaded = DeviceConfig()
     assert loaded.ip_lidar == "192.0.2.1"
     assert loaded.qb2_api_key == "demo-key"
-    exported, _ = cfg._export_config(cfg._active, cfg.ip_lidar, "", "new-key")
+    exported, _ = cfg._export_config(cfg._active, "")
     try:
         result = cfg._import_config(exported)
-        assert result[3]["value"] == "new-key"
-        assert DeviceConfig().qb2_api_key == "new-key"
+        assert "Loaded" in result[2]
+        assert DeviceConfig().get_plugin_config("qb2")["devices"][0]["api_key"] == "demo-key"
     finally:
         os.unlink(exported)
         os.rmdir(os.path.dirname(exported))
@@ -351,3 +352,194 @@ def test_unexpected_stream_end_is_a_fault(qb2, monkeypatch, tmp_path):
     assert not dev._thread.is_alive()
     assert "ended unexpectedly" in dev.memo.sts
     assert source.closed.is_set()
+
+
+def multi_device(module, tmp_path, monkeypatch, rows):
+    cfg = DeviceConfig()
+    cfg.update_plugin_config("qb2", {"devices": rows})
+    monkeypatch.setattr(module, "plasma_config", cfg)
+    dev = module.Qb2({"log_dir": str(tmp_path / "data"), "participant_enc": 100},
+                     logging.getLogger("test-qb2-multi"))
+    dev.session_dir = str(tmp_path / "shared-session")
+    return dev
+
+
+def test_many_devices_mixed_keys_and_disabled(qb2, monkeypatch, tmp_path):
+    source = Source(qb2, monkeypatch, ids=[42])
+    rows = [{"id": f"unit-{i}", "address": f"192.0.2.{i+1}", "name": f"LiDAR {i}",
+             "api_key": f"key-{i}" if i % 2 else "", "enabled": i != 3} for i in range(12)]
+    dev = multi_device(qb2, tmp_path, monkeypatch, rows)
+    assert len(dev.units) == 11
+    assert "unit-3" not in dev.memo
+    assert set(dev.get_sources()) == set(dev.units)
+    assert len(dev.lsl_streams()) == 11
+    try:
+        dev.start()
+        wait_for(lambda: all(getattr(u, "frames_saved", 0) == 1 for u in dev.units.values()))
+    finally:
+        dev.stop()
+    assert len(source.args) == 11
+    assert sum("token" in a for a in source.args) == 5
+    assert {a["fqdn_or_ip"] for a in source.args} == {r["address"] for r in rows if r["enabled"]}
+    for identity, unit in dev.units.items():
+        assert unit.out_dir == tmp_path / "shared-session" / "qb2" / identity
+        assert len(list(unit.out_dir.glob("*.npy"))) == 1
+        assert not unit._thread.is_alive()
+        assert dev.lsl_streams()[unit.stream_name] == identity
+    dev.disconnect()
+    assert all(u.outlet is None for u in dev.units.values())
+
+
+def test_one_lidar_failure_does_not_stop_peers(qb2, monkeypatch, tmp_path):
+    Source(qb2, monkeypatch, ids=[10])
+    original_channel = qb2.blickfeld_qb2.Channel
+
+    def channel(**kwargs):
+        if kwargs["fqdn_or_ip"] == "bad.example":
+            raise RuntimeError("bad-key authentication failed")
+        return original_channel(**kwargs)
+
+    monkeypatch.setattr(qb2.blickfeld_qb2, "Channel", channel)
+    dev = multi_device(qb2, tmp_path, monkeypatch, [
+        {"id": "bad", "address": "bad.example", "api_key": "bad-key"},
+        {"id": "good", "address": "good.example"},
+    ])
+    try:
+        dev.start()
+        wait_for(lambda: dev.units["bad"]._fault is not None and dev.units["good"].frames_saved == 1)
+        assert "bad-key" not in dev.memo["bad"].sts
+        assert dev.memo["good"].sts == "🟢"
+        assert dev.units["good"]._thread.is_alive()
+    finally:
+        dev.stop()
+    assert dev.memo["bad"].sts.startswith("⛔")
+
+
+def test_token_factory_failure_terminates_worker(qb2, monkeypatch, tmp_path):
+    Source(qb2, monkeypatch)
+
+    def invalid(**kwargs):
+        raise ValueError("invalid test-secret")
+
+    monkeypatch.setattr(qb2.blickfeld_qb2, "TokenFactory", invalid)
+    dev = device(qb2, tmp_path)
+    dev.start()
+    dev._thread.join(2)
+    assert not dev._thread.is_alive()
+    assert "[redacted]" in dev.memo.sts
+
+
+def test_all_disabled_creates_no_workers_outlets_or_folders(qb2, monkeypatch, tmp_path):
+    source = Source(qb2, monkeypatch)
+    dev = multi_device(qb2, tmp_path, monkeypatch, [
+        {"id": "disabled", "address": "192.0.2.1", "enabled": False}])
+    dev.start()
+    dev.stop()
+    assert dev.units == {}
+    assert dev.lsl_streams() == {}
+    assert source.args == []
+    assert not (tmp_path / "shared-session").exists()
+
+
+def test_device_editor_save_disable_remove_and_export(tmp_path):
+    from plasma.devices.qb2_config import configured_devices, save_device, remove_device
+    cfg = DeviceConfig()
+    cfg.ip_lidar, cfg.qb2_api_key = "192.0.2.1", "legacy-key"
+    legacy = configured_devices(cfg)[0]
+    assert legacy["api_key"] == "legacy-key"
+    saved = save_device(cfg, legacy["id"], "Left", "192.0.2.1", "", False)
+    other = save_device(cfg, None, "Right", "qb2-example", "new-key", True)
+    loaded = configured_devices(DeviceConfig())
+    assert len(loaded) == 2
+    assert loaded[0]["id"] == saved
+    assert loaded[0]["enabled"] is False
+    assert loaded[0]["api_key"] == ""
+    assert loaded[1]["id"] == other
+    exported, _ = cfg._export_config([], "")
+    try:
+        imported = DeviceConfig()
+        assert "Loaded" in imported._import_config(exported)[2]
+        assert configured_devices(imported) == loaded
+    finally:
+        os.unlink(exported)
+        os.rmdir(os.path.dirname(exported))
+    remove_device(cfg, saved)
+    remove_device(cfg, other)
+    assert configured_devices(cfg) == []  # legacy values cannot resurrect a removed device
+    assert configured_devices(DeviceConfig()) == []
+
+
+@pytest.mark.parametrize("rows", [
+    [{"id": "a", "address": "qb2-host"}, {"id": "b", "address": "QB2-HOST."}],
+    [{"id": "a", "address": "192.0.2.1"}, {"id": "a", "address": "192.0.2.2"}],
+    [{"id": "../escape", "address": "192.0.2.1"}],
+    [{"id": "a", "address": "http://192.0.2.1"}],
+    [{"id": "a", "address": ""}],
+    [{"id": "a", "address": "192.0.2.1", "enabled": "false"}],
+])
+def test_invalid_device_list_is_rejected_without_overwriting(rows):
+    from plasma.devices.qb2_config import normalize_devices
+    with pytest.raises(ValueError):
+        normalize_devices(rows)
+
+
+def test_invalid_import_preserves_saved_device_list(tmp_path):
+    from plasma.devices.qb2_config import configured_devices, save_device
+    cfg = DeviceConfig()
+    save_device(cfg, None, "Good", "192.0.2.1", "", True)
+    previous = configured_devices(cfg)
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text(json.dumps({"plugins": {"qb2": {"devices": [{"address": "http://bad"}]}}}))
+    assert "Import error" in cfg._import_config(str(invalid))[2]
+    assert configured_devices(DeviceConfig()) == previous
+
+
+def test_multi_stop_signals_all_and_releases_finished_outlets(qb2, monkeypatch, tmp_path):
+    Source(qb2, monkeypatch, ids=[1])
+    dev = multi_device(qb2, tmp_path, monkeypatch, [
+        {"id": "slow", "address": "slow.example"},
+        {"id": "fast", "address": "fast.example"},
+    ])
+    slow = dev.units["slow"]
+    writing, release = threading.Event(), threading.Event()
+    original = slow._save_frame
+
+    def delayed(payload):
+        writing.set()
+        assert release.wait(3)
+        return original(payload)
+
+    monkeypatch.setattr(slow, "_save_frame", delayed)
+    # Allow the idle writer's 100-ms wake-up while holding only one disk write.
+    monkeypatch.setattr(qb2.Qb2Unit, "STOP_TIMEOUT_S", 0.3)
+    try:
+        dev.start()
+        assert writing.wait(2)
+        wait_for(lambda: dev.units["fast"].frames_saved == 1)
+        with pytest.raises(RuntimeError, match="Stop unconfirmed"):
+            dev.disconnect()
+        assert all(u._stop_event.is_set() for u in dev.units.values())
+        assert not dev.units["fast"]._thread.is_alive()
+        assert dev.units["fast"].outlet is None
+        assert slow.outlet is not None  # never release a worker's active outlet
+    finally:
+        release.set()
+        slow._thread.join(3)
+        dev.disconnect()
+    assert slow.frames_saved == 1
+
+
+def test_failed_device_save_restores_in_memory_settings(monkeypatch):
+    from plasma.devices.qb2_config import configured_devices, save_device
+    cfg = DeviceConfig()
+    save_device(cfg, None, "First", "192.0.2.1", "", True)
+    previous = configured_devices(cfg)
+
+    def fail():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cfg, "_save", fail)
+    with pytest.raises(OSError):
+        save_device(cfg, None, "Second", "192.0.2.2", "", True)
+    assert configured_devices(cfg) == previous
+    assert configured_devices(DeviceConfig()) == previous

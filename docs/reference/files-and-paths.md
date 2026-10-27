@@ -26,7 +26,7 @@ All writable state lives under one **home directory**, resolved once at startup:
         ├── plasma_recording_<YYMMDD_HHMMSS>.xdf
         ├── events.jsonl                     # this session's slice of the fault history
         ├── msense/                          # MSense .txt dumps, SQC snapshots
-        └── qb2/                             # full point-cloud frames (.npy)
+        └── qb2/                             # <device-id>/frame_<run>_<sequence>_<id>.npy
 ```
 
 `<enc>` is the participant encoding: the first integer in `<sub>` × 100 + the
@@ -42,6 +42,12 @@ first integer in `<ses>` (e.g. `sub-4021`, `ses-02` → `402102`).
   "ip_pupil_labs": "",
   "demo_mode": false,
   "plugins": {
+    "qb2": { "devices": [
+      {"id": "lidar-left", "name": "Left", "address": "192.0.2.1",
+       "api_key": "", "enabled": true},
+      {"id": "lidar-right", "name": "Right", "address": "qb2-right",
+       "api_key": "", "enabled": false}
+    ]},
     "msense": { "...": "name ↔ address pairs" },
     "msense_demo": { "devices": [
       {"Name": "DEMO-PPG-01", "Nickname": "left wrist", "Sensor": "PPG",
@@ -53,8 +59,9 @@ first integer in `<ses>` (e.g. `sub-4021`, `ses-02` → `402102`).
 
 Written by the Configuration tab; safe to hand-edit while PLASMA is closed.
 Import / export from the Configuration tab moves it between machines.
-`qb2_api_key` is stored as plaintext in this file and config exports, although
-the UI masks it. See [QB2 recording](qb2-recording.md) for the point-cloud schema
+QB2 `api_key` values are stored as plaintext in this file and config exports,
+although the UI masks them. Top-level `ip_qb2_lidar` / `qb2_api_key` are legacy
+single-device settings; `plugins.qb2.devices` takes precedence when present. See [QB2 recording](qb2-recording.md) for the point-cloud schema
 and LSL marker compatibility changes.
 
 ## `events.jsonl`
