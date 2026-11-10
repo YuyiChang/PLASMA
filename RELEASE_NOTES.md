@@ -4,6 +4,15 @@
 
 ---
 
+## 🚀 v2.3.1
+
+- **Fix macOS native LSL discovery aborts.** Bundled liblsl now skips unavailable
+  multicast interfaces instead of terminating with
+  `set_option: Can't assign requested address`. This can occur when network
+  interfaces change, including while a LiDAR uses a separate Ethernet adapter.
+
+---
+
 ## 🚀 v2.3.0
 
 ### 🗒️ Timed task sequences in Journaler

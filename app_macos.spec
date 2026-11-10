@@ -14,8 +14,12 @@ from spec_common import common_datas, plasma_datas, plasma_hiddenimports, strip_
 
 datas = common_datas() + plasma_datas()
 
-# liblsl is not bundled in the macOS pylsl wheel — find it from conda or homebrew
+# CI supplies the patched library from .github/build_liblsl_macos.sh.
+# Keep conda/Homebrew as a fallback for local development builds.
+if os.environ.get('PYLSL_LIB') and not os.path.isfile(os.environ['PYLSL_LIB']):
+    raise FileNotFoundError(f"PYLSL_LIB does not exist: {os.environ['PYLSL_LIB']}")
 _liblsl_candidates = [
+    os.environ.get('PYLSL_LIB', ''),
     os.path.join(os.environ.get('CONDA_PREFIX', ''), 'lib', 'liblsl.dylib'),
     '/opt/homebrew/lib/liblsl.dylib',
     '/usr/local/lib/liblsl.dylib',

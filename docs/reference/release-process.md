@@ -145,6 +145,32 @@ both go stale for signed releases — harmless to leave (clearing quarantine
 on an already-legitimate app is a no-op, not a problem), but worth cleaning
 up once a signed release has actually shipped.
 
+## macOS LSL networking fix
+
+The macOS build compiles liblsl 1.17.5 with
+`.github/patches/liblsl-unavailable-interface.patch`. liblsl caches network
+interfaces at startup; selecting an interface that has since disappeared can
+throw `set_option: Can't assign requested address` on its discovery thread,
+aborting the process outside Python's exception handlers. The patch uses the
+nonthrowing socket-option API and skips unavailable interfaces while continuing
+discovery on healthy ones. IPv4 and IPv6 remain enabled.
+
+For a local frozen build, run in the activated build environment:
+
+```bash
+bash .github/build_liblsl_macos.sh /tmp/plasma-liblsl
+export PYLSL_LIB=/tmp/plasma-liblsl/install/lib/liblsl.dylib
+pyinstaller app_macos.spec --noconfirm
+```
+
+The helper verifies the source archive checksum and runs a native regression
+check with an unavailable IPv4 interface before and after a working loopback
+interface. Both continuous and one-shot stream discovery must succeed.
+The `test-lsl-macos` job runs this on pull requests as well as release builds;
+packaging depends on that job. After PyInstaller finishes, CI repeats the
+regression against the actual dylib inside the frozen distribution.
+The installed conda/Homebrew library is not modified.
+
 ## Codesigning (Windows, self-signed)
 
 `build-windows`'s "Codesign raw exe" / "Codesign installer" steps
