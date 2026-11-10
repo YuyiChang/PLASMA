@@ -107,6 +107,28 @@ def test_build_yml_has_the_arm64_job():
     assert "sccn/liblsl/releases" in ci
 
 
+def test_macos_build_bundles_the_tested_patched_lsl():
+    import yaml
+
+    workflow = yaml.safe_load((_ROOT / ".github/workflows/build.yml").read_text())
+    native_test = workflow["jobs"]["test-lsl-macos"]
+    assert "if" not in native_test  # the regression also runs on PRs
+    assert any("build_liblsl_macos.sh" in s.get("run", "") for s in native_test["steps"])
+    macos = workflow["jobs"]["build-macos"]
+    assert "test-lsl-macos" in macos["needs"]
+    packaged_test = next(s for s in macos["steps"] if s.get("name") == "Test the packaged LSL library")
+    assert "_internal/pylsl/lib/liblsl.dylib" in packaged_test["run"]
+    build = next(s for s in workflow["jobs"]["build-macos"]["steps"] if s.get("name") == "Build")
+    commands = build["run"]
+    assert commands.index("build_liblsl_macos.sh") < commands.index("pyinstaller")
+    assert 'export PYLSL_LIB="$RUNNER_TEMP/plasma-liblsl/install/lib/liblsl.dylib"' in commands
+    helper = (_ROOT / ".github/build_liblsl_macos.sh").read_text()
+    assert "test_liblsl_interfaces.py" in helper
+    assert "liblsl-unavailable-interface.patch" in helper
+    spec = (_ROOT / "app_macos.spec").read_text()
+    assert spec.index("os.environ.get('PYLSL_LIB', '')") < spec.index("'/opt/homebrew/lib/liblsl.dylib'")
+
+
 def test_arm64_job_omits_qb2():
     # blickfeld-qb2 is sdist-only on aarch64; installing [all] would break the
     # build. The qb2 plugin still ships (lazy _STATIC import) — see plasma.plugins.

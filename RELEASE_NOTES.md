@@ -4,6 +4,49 @@
 
 ---
 
+## 🚀 v2.3.1
+
+### 🩹 macOS LSL discovery
+
+- **Fix macOS native LSL discovery aborts.** Bundled liblsl now skips unavailable
+  multicast interfaces instead of terminating with
+  `set_option: Can't assign requested address`. This can occur when network
+  interfaces change, including while a LiDAR uses a separate Ethernet adapter.
+- **CI checks the patched library before release.** macOS builds compile
+  liblsl 1.17.5 with the local fix, test discovery with an unavailable interface,
+  and repeat the regression against the library inside the packaged app. The
+  native regression also runs on pull requests. This bundled patch applies to
+  macOS; Windows and Linux continue to use their existing upstream libraries.
+
+### 📡 QB2 recording and multiple LiDARs
+
+- **Configure multiple QB2 units independently.** Add, edit, enable, disable,
+  or remove devices in **Configuration → QB2 LiDARs**, with an address and
+  optional application key for each. Existing single-device settings are read
+  automatically. Each enabled unit has its own Memo status, LSL stream, and
+  output directory; a fault on one unit leaves its peers running.
+- **Record within the shared session folder.** Frames are saved beneath
+  `qb2/<stable-device-id>/`, beside the XDF and MSense recordings. Paths are
+  resolved at Start so subject/session edits made after Initialize are respected.
+  Run identifiers and sequence numbers prevent repeated frame IDs from
+  overwriting earlier files.
+- **Capture failures remain visible.** The plugin supports application-key
+  authentication over encrypted transport, asynchronous cancellation of pending
+  reads, and a bounded disk-writing queue. Authentication errors, no-frame
+  timeouts, queue overflow, and disk failures appear in Memo. Frame markers
+  are emitted only after their files are completely written, using the original
+  host-receipt LSL timestamps.
+- **QB2 reader compatibility changes:** `.npy` files now contain a dictionary
+  with `frame`, host timing, and device metadata; extract the SDK frame with
+  `np.load(path, allow_pickle=True).item()["frame"]`. LSL stream names now use
+  `blickfield_qb2_<stable-device-id>`, and frame IDs are decimal strings rather
+  than `int32`, preserving their full unsigned 64-bit range. Update consumers
+  that rely on the previous file layout, exact stream name, or channel type.
+  See [QB2 recording](docs/reference/qb2-recording.md) for the full format and
+  timing details.
+
+---
+
 ## 🚀 v2.3.0
 
 ### 🗒️ Timed task sequences in Journaler

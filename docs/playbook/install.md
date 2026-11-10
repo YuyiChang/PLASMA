@@ -234,6 +234,19 @@ ones under *For developers*.
         python -m plasma
         ```
 
+        On macOS, if LSL discovery aborts with
+        `set_option: Can't assign requested address`, build the patched native
+        library from this checkout (requires CMake and Xcode command-line tools):
+
+        ```bash
+        bash .github/build_liblsl_macos.sh "$PWD/build/patched-liblsl"
+        export PYLSL_LIB="$PWD/build/patched-liblsl/install/lib/liblsl.dylib"
+        python -m plasma
+        ```
+
+        Set `PYLSL_LIB` in each terminal that runs the source version. Updating
+        PLASMA's Python code alone does not replace conda's native library.
+
         For a clickable icon, see *Desktop / Start Menu shortcut* below
         (use `pip install -e ".[desktop]"`).
 

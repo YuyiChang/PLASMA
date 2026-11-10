@@ -26,6 +26,11 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 
+def _qb2_config_section(host):
+    from plasma.devices.qb2_config import config_section
+    config_section(host)
+
+
 @dataclass(frozen=True)
 class PlasmaPlugin:
     id: str                      # stable slug, e.g. "msense"
@@ -41,10 +46,11 @@ class PlasmaPlugin:
     tabs: tuple = ()
 
 
-# Devices with no UI contribution — declared here so a broken vendor SDK still
-# leaves the entry in the catalog (the class is imported only on instantiation).
+# Devices with lazy drivers and optional lightweight settings callbacks. A
+# broken SDK leaves the entry in the catalog; drivers load on instantiation.
 _STATIC = [
-    PlasmaPlugin("qb2", "qb2 LiDAR", "plasma.devices.qb2", "Qb2"),
+    PlasmaPlugin("qb2", "qb2 LiDAR", "plasma.devices.qb2", "Qb2",
+                 config_section=_qb2_config_section),
     PlasmaPlugin("pupil_labs_imu", "Pupil Lab IMU",
                  "plasma.devices.pupil_labs", "PupilLabsIMU"),
     PlasmaPlugin("pupil_labs_blink", "Pupil Lab Eye Event Blink",

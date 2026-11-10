@@ -1,0 +1,25 @@
+--- a/src/resolve_attempt_udp.cpp
++++ b/src/resolve_attempt_udp.cpp
+@@ -165,9 +165,19 @@
+ 		// Mismatching protocols? Skip this round
+ 		if (mcit->addr.is_v4() != (proto == asio::ip::udp::v4()))
+ 			next = targets_.end();
+-		else
+-			multicast_socket_.set_option(mcit->addr.is_v4() ? outbound_interface(mcit->addr.to_v4())
+-															: outbound_interface(mcit->ifindex));
++		else {
++			// Interfaces are cached at startup and can disappear (VPN, Wi-Fi,
++			// USB Ethernet). Never throw from the resolver's ASIO callback.
++			asio::error_code error;
++			multicast_socket_.set_option(mcit->addr.is_v4()
++					? outbound_interface(mcit->addr.to_v4())
++					: outbound_interface(mcit->ifindex), error);
++			if (error) {
++				DLOG_F(1, "Skipping unavailable multicast interface %s: %s",
++					mcit->name.c_str(), error.message().c_str());
++				next = targets_.end();
++			}
++		}
+ 	}
+ 	if (next != targets_.end()) {
+ 		udp::endpoint ep(*next++);

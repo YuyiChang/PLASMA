@@ -54,8 +54,27 @@ jobs:
       - name: Run tests
         run: pytest
 
-  build-macos:
+  test-lsl-macos:
     needs: test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.test.outputs.source-sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python LSL binding
+        run: pip install pylsl
+
+      # Run on pull requests too: the ordinary packaging jobs skip PRs.
+      - name: Test native LSL discovery with an unavailable interface
+        run: bash .github/build_liblsl_macos.sh "$RUNNER_TEMP/plasma-liblsl"
+
+  build-macos:
+    needs: [test, test-lsl-macos]
     if: github.event_name != 'pull_request'
     runs-on: macos-15
     steps:
@@ -80,7 +99,16 @@ jobs:
 
       - name: Build
         shell: bash -el {0}
-        run: pyinstaller app_macos.spec --noconfirm
+        run: |
+          bash .github/build_liblsl_macos.sh "$RUNNER_TEMP/plasma-liblsl"
+          export PYLSL_LIB="$RUNNER_TEMP/plasma-liblsl/install/lib/liblsl.dylib"
+          pyinstaller app_macos.spec --noconfirm
+
+      - name: Test the packaged LSL library
+        shell: bash -el {0}
+        run: >-
+          python .github/test_liblsl_interfaces.py
+          --library "$PWD/dist/PLASMA_MacOS_arm64/_internal/pylsl/lib/liblsl.dylib"
 
       - name: Smoke test (clean dir)
         shell: bash -el {0}

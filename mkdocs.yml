@@ -91,6 +91,7 @@ nav:
       - Abnormal handling: playbook/abnormal-handling.md
   - Reference:
       - Files & paths: reference/files-and-paths.md
+      - QB2 recording & review: reference/qb2-recording.md
       - Headless control & API: reference/headless.md
       - Failure levels (internal): reference/failure-levels.md
       - MSense reconnect behaviour (internal): reference/msense-reconnect.md
