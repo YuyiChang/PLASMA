@@ -69,9 +69,15 @@ def test_display_labels_keyed_by_address():
     ]}
     out = display_labels(blob)
     assert out == {
-        "u1": "MSense4ECG-Z5G4A (left wrist)",
-        "u2": "MSense4ECG-EX4BT",
+        "U1": "MSense4ECG-Z5G4A (left wrist)",
+        "U2": "MSense4ECG-EX4BT",
     }
+
+
+def test_address_case_and_whitespace_are_consistent_across_helpers():
+    blob = {"devices": [{"Name": "MSense4PPG", "Nickname": "left", "UUID / MAC Address": " ab:cd:ef ",
+                         "Enabled": True, "IMU Stream": True}]}
+    assert set(active_devices(blob)) == imu_stream_devices(blob) == set(display_labels(blob)) == {"AB:CD:EF"}
 
 
 # ── two wristbands sharing a Name stay distinct (address is the identity key) ──

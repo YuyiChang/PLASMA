@@ -1,4 +1,5 @@
 import atexit
+import argparse
 import os
 import signal
 import sys
@@ -31,6 +32,7 @@ def _relaunch_argv():
 # set by main() so shutdown() can stop the server (frees the port before a
 # restart re-binds it)
 app = None
+instructor_app = None
 
 
 def shutdown(restart=False):
@@ -41,6 +43,11 @@ def shutdown(restart=False):
     event-handler thread — mirrors `_handle_sigterm`'s
     `atexit._run_exitfuncs()` + hard-exit pattern."""
     atexit._run_exitfuncs()
+    if instructor_app is not None:
+        try:
+            instructor_app.close()
+        except Exception:
+            pass
     if app is not None:
         try:
             app.close()
@@ -208,22 +215,60 @@ def _wire_plot_timer_gate(ip, top_tabs, yams_title):
     top_tabs.select(_on_top, inputs=sub_state, outputs=[t for t, _, _ in specs])
 
 
-def main():
-    global app
+def _launch_options(argv=None):
+    parser = argparse.ArgumentParser(description="PLASMA sensor acquisition")
+    parser.add_argument("--training", action="store_true", help="Enable MSense simulation and the separate Instructor Console")
+    parser.add_argument("--instructor-host", default="127.0.0.1", help="Instructor bind address (default: localhost)")
+    parser.add_argument("--instructor-port", type=int, default=7861)
+    options = parser.parse_args(argv)
+    if options.training:
+        if options.instructor_port == 7860 or not 1 <= options.instructor_port <= 65535:
+            parser.error("Choose an instructor port from 1–65535 other than trainee port 7860")
+        if options.instructor_host not in {"127.0.0.1", "localhost", "::1"} and not os.environ.get("PLASMA_INSTRUCTOR_TOKEN"):
+            parser.error("Set PLASMA_INSTRUCTOR_TOKEN before exposing the Instructor Console beyond localhost")
+    return options
+
+
+def main(argv=None):
+    global app, instructor_app
+    options = _launch_options(argv)
 
     try:
         signal.signal(signal.SIGTERM, _handle_sigterm)
     except ValueError:
         pass  # not the main thread (e.g. imported oddly) — atexit still covers normal exit
 
+    if options.training:
+        device_config.demo_mode = True
     plugins.load_plugins()
-    device_config.refresh_defaults()
+    if options.training:
+        # Runtime selection only; do not overwrite the lab's saved catalog.
+        if "MSense Demo (simulated)" not in plugins.catalog():
+            raise RuntimeError('Training simulator unavailable; install PLASMA with the msense extra and check plugin startup errors.')
+        device_config._active = ["MSense Demo (simulated)"]
+    else:
+        device_config.refresh_defaults()
 
     ip = IntegratedPanel()
-    # pl = PupilLabsDashboard()
+    if options.training:
+        from plasma.training import TrainingController, build_instructor_blocks
+        ip.training = TrainingController(ip)
+        instructor_app = build_instructor_blocks(ip.training)
 
     app = build_blocks(ip)
-    app.launch(inbrowser=True, share=False)
+    try:
+        if instructor_app is not None:
+            token = os.environ.get("PLASMA_INSTRUCTOR_TOKEN")
+            instructor_app.launch(server_name=options.instructor_host,
+                                  server_port=options.instructor_port,
+                                  auth=("instructor", token) if token else None,
+                                  share=False, inbrowser=False, prevent_thread_lock=True)
+            print(f"Instructor Console listening on {options.instructor_host}:{options.instructor_port}")
+        app.launch(inbrowser=True, share=False, server_port=7860 if options.training else None)
+    finally:
+        if options.training:
+            ip.training.close()
+            instructor_app.close()
 
 
 if __name__ == '__main__':

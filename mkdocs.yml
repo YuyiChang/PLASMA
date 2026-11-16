@@ -89,6 +89,7 @@ nav:
       - MSense tools (YAMS): playbook/msense-tools.md
       - The memo engine: playbook/memo-engine.md
       - Abnormal handling: playbook/abnormal-handling.md
+      - RA training / Instructor Console: playbook/training.md
   - Reference:
       - Files & paths: reference/files-and-paths.md
       - QB2 recording & review: reference/qb2-recording.md

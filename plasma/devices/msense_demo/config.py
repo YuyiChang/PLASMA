@@ -32,7 +32,11 @@ def _synth_addr(name, nickname=""):
 
 
 def _records(blob):
-    return blob.get("devices", []) if isinstance(blob, dict) else []
+    # The editor and driver must use the same first-use defaults. An absent
+    # list means never configured; an explicitly empty list means no devices.
+    if not isinstance(blob, dict) or "devices" not in blob:
+        return [_default_row(0), _default_row(1)]
+    return blob["devices"]
 
 
 def _normalize_row(rec):
@@ -112,8 +116,6 @@ def _default_row(n):
 
 def config_section(host):
     devices = [_normalize_row(r) for r in _records(host.get_plugin_config("msense_demo"))]
-    if not devices:
-        devices = [_default_row(0), _default_row(1)]
 
     fault_lines = "\n".join(
         f"- `{fid}` — {meta['label']}: {meta['help']}"

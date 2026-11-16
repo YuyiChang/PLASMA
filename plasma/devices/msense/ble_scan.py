@@ -8,9 +8,46 @@ Configuration / MSense-Tools tabs.
 """
 import os
 import re
+import asyncio
 from glob import glob
 
 _MAC_RE = re.compile(r'([0-9A-Fa-f]{2}[:]){5}([0-9A-Fa-f]{2})')
+
+
+async def discover_targets(addresses, timeout=5.0, scanner_factory=None):
+    """Discover configured addresses once, retaining native BLEDevice objects.
+
+    Stop early when every target has advertised a name. Incomplete/nameless
+    adverts are still retained at the deadline: identity is the address, not
+    a local name that may arrive only in a later scan response.
+    """
+    targets = {str(address).strip().upper() for address in addresses}
+    if not targets:
+        return {}
+    if scanner_factory is None:
+        from bleak import BleakScanner
+        scanner_factory = BleakScanner
+    found = {}
+    ready = asyncio.Event()
+
+    def detected(device, advertisement):
+        address = str(device.address).strip().upper()
+        if address not in targets:
+            return
+        previous = found.get(address)
+        # Do not replace a useful scan response with a later nameless packet.
+        if previous and not advertisement.local_name and previous[1].local_name:
+            return
+        found[address] = (device, advertisement)
+        if targets.issubset(found) and all(adv.local_name for _, adv in found.values()):
+            ready.set()
+
+    async with scanner_factory(detection_callback=detected):
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+    return found
 
 
 def scan_msense(timeout_ms=5000, filter_name="MSense", adapter=None):

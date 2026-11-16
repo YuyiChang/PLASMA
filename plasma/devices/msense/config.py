@@ -166,7 +166,7 @@ def active_devices(blob):
     would silently collapse the duplicates to one connected+recorded device.
     """
     return {
-        rec["UUID / MAC Address"]: rec["Name"]
+        str(rec["UUID / MAC Address"]).strip().upper(): rec["Name"]
         for rec in _records(blob) if _row_ok(rec)
     }
 
@@ -174,7 +174,7 @@ def active_devices(blob):
 def imu_stream_devices(blob):
     """Addresses of wristbands with the demo IMU-stream characteristic enabled."""
     return {
-        rec["UUID / MAC Address"]
+        str(rec["UUID / MAC Address"]).strip().upper()
         for rec in _records(blob)
         if _row_ok(rec) and rec.get("IMU Stream", False)
     }
@@ -190,7 +190,7 @@ def display_labels(blob):
             continue
         name = str(rec["Name"]).strip()
         nick = str(rec.get("Nickname", "")).strip()
-        out[rec["UUID / MAC Address"]] = f"{name} ({nick})" if nick else name
+        out[str(rec["UUID / MAC Address"]).strip().upper()] = f"{name} ({nick})" if nick else name
     return out
 
 

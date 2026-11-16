@@ -13,6 +13,32 @@ never gives up on its own: a dropped wristband is retried every
 "reconnect failed" status** — the row stays `🔌 disconnected` and only its
 *colour* escalates.
 
+Initialization, manual connection retries, disconnect, and watchdog reconnects
+share a per-driver connection lock. This prevents the watchdog from replacing a
+client while Initialize is setting it up. A disconnect request stops new
+watchdog reconnection work, including one waiting through its reconnect pause.
+
+## Multi-wristband initialization
+
+The initial scan uses one Bleak scanner on the driver's BLE loop and retains
+native `BLEDevice` objects for configured addresses. Passing those objects to
+`BleakClient` avoids implicit per-address discovery, a documented source of
+multi-device trouble in Bleak/CoreBluetooth. Matching no longer requires an
+advertised MSense name; later scan responses can supply the product/name.
+
+The initial scan lasts at most five seconds unless all names arrive sooner.
+Connection setup has two bounded passes; the second rescans only missing/failed
+targets for up to three seconds. Healthy clients and their LSL outlets survive
+that pass. An initial battery read is optional and bounded to three seconds.
+The log records scan, connection, and capability-setup timings separately.
+
+Repeating Initialize with unchanged real MSense settings reuses the driver and
+rescans only missing peers. Configuration changes or simulated drivers still
+cause replacement. Replaced MSense drivers dispose their BLE loop and exit hook.
+Initialize during collection is rejected. A device never seen or never connected
+is retried by Initialize, rather than silently entering the dropped-link watchdog
+table; the manual Reconnect control reports this distinction.
+
 ---
 
 ## Timeline of a single BLE drop (phase = COLLECTING)
@@ -95,9 +121,12 @@ and nothing is being lost.
    stream.
 8. Set `memo.sts = "🔄 reconnected"`.
 
-`connect_devices` and `disconnect()` retire every client they drop, and
-`connect_devices` clears `_live_client` up front — a re-scan / re-connect
-from the Configuration tab never leaks the previous pass's clients.
+`connect_devices` retires failed clients while preserving healthy clients,
+outlets, and notification subscriptions. `disconnect()` retires all clients.
+Callbacks from retired clients are ignored even when there is no replacement
+client yet. On Linux, removing a BlueZ peer invalidates its cached `BLEDevice`;
+the next reconnect falls back to fresh address discovery instead of reusing that
+invalid native object. macOS reuses its discovered peripheral object.
 
 ---
 

@@ -10,6 +10,7 @@ fake that generates synthetic notifications.
 import struct
 import threading
 import time
+import uuid
 
 from plasma.devices.msense.device import (
     MotionSenseHRV, NUS_RX_CHAR_UUID, NUS_TX_CHAR_UUID, BATTERY_CHAR_UUID,
@@ -44,23 +45,58 @@ class MSenseDemo(MotionSenseHRV):
         self._sensor_type = _config.sensor_types(blob)     # addr -> "PPG"/"ECG"
         self._demo_faults = _config.device_faults(blob)    # addr -> fault id
         self._demo_collecting = False
+        self.training_instance_id = uuid.uuid4().hex
+        self._training_lock = threading.RLock()
+        self._training_faults = {}
 
     def _read_blob(self):
         from plasma.config import device_config
         return device_config.get_plugin_config(self.CONFIG_KEY)
 
     def fault_for(self, addr):
+        with self._training_lock:
+            if addr in self._training_faults:
+                return self._training_faults[addr]
         return self._demo_faults.get(addr, _faults.NO_FAULT)
+
+    def training_fault_for(self, addr):
+        with self._training_lock:
+            return self._training_faults.get(addr)
+
+    def set_training_fault(self, addr, fault):
+        if addr not in self.device_list:
+            raise ValueError("Simulated wristband no longer exists")
+        if fault not in {"offline", "stream_stall", "sqc_error", "acq_stop_ignored"}:
+            raise ValueError("Unknown instructor fault")
+        with self._training_lock:
+            self._training_faults[addr] = fault
+        if fault == "offline":
+            self.trigger_disconnect(addr)
+
+    def clear_training_fault(self, addr):
+        with self._training_lock:
+            self._training_faults.pop(addr, None)
+
+    def consume_training_fault(self, addr, fault):
+        """Stream/SQC faults affect one transfer, not every future request."""
+        with self._training_lock:
+            if self._training_faults.get(addr) == fault:
+                self._training_faults.pop(addr)
+                return True
+        return False
 
     # ── BLE seams ───────────────────────────────────────────────────────────
 
-    def scan_devices(self, filter_name="MSense"):
+    def scan_devices(self, filter_name="MSense", *, targets=None, timeout_s=None, append=False):
         """Build ``self.devices`` straight from config — no radio. A wristband
         with the ``device_not_found`` fault is left out, so the inherited
         ``connect_devices`` marks it '⛔ device not found'."""
-        self.devices = {}
+        if not append:
+            self.devices = {}
         for addr, blename in self.device_list.items():
-            if self.fault_for(addr) == "device_not_found":
+            if targets is not None and addr not in targets:
+                continue
+            if self.fault_for(addr) in {"device_not_found", "offline"}:
                 continue
             self.devices[addr] = {
                 "name": f"{blename} [{addr}]",
@@ -127,6 +163,8 @@ class FakePeripheral:
     # ---- BleakClient surface -------------------------------------------------
 
     async def connect(self):
+        if self.fault() == "offline":
+            raise ConnectionError("Sensor unavailable")
         self.is_connected = True
         self._alive = True
 
@@ -271,6 +309,7 @@ class FakePeripheral:
     def _sqc_loop(self, stream_id):
         sensor = self._driver._sensor_type.get(self._name, "PPG")
         fault = self.fault()
+        self._driver.consume_training_fault(self._name, "sqc_error")
         frames, terminal = fake_stream.sqc_frames(
             sensor, stream_id,
             fault=(fault if fault in ("sqc_error", "stream_stall") else None))
@@ -290,12 +329,17 @@ class FakePeripheral:
 
     def _infinity_loop(self, stream_id):
         sensor = self._driver._sensor_type.get(self._name, "PPG")
-        fault = self.fault()
+        # Saved baseline faults remain persistent. Instructor faults are read
+        # live so an already running transfer can stall, or an armed stall can
+        # be canceled before it fires. Always deliver the handshake first.
+        fault = self._driver._demo_faults.get(self._name, _faults.NO_FAULT)
         gen = fake_stream.infinity_frame_iter(sensor, stream_id,
                                               stop_event=self._sqc_cancel)
         time.sleep(0.05)
         for i, frame in enumerate(gen):
             if not self._alive:
+                return
+            if i > 6 and self._driver.consume_training_fault(self._name, "stream_stall"):
                 return
             if fault == "stream_stall" and i > 6:
                 return  # go silent -> watchdog fires

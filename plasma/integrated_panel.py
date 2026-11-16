@@ -218,6 +218,9 @@ class IntegratedPanel():
         atexit.register(self._atexit_cleanup)
 
     def _atexit_cleanup(self):
+        training = getattr(self, "training", None)
+        if training is not None:
+            training.close()
         sequence = getattr(self, "task_sequence", None)
         if sequence is not None:
             sequence.end()
@@ -617,14 +620,38 @@ class IntegratedPanel():
         return gr.CheckboxGroup(choices=active, value=active)
 
     def init_devices(self, selected_devices):
+        if (getattr(self, "_collection_started", None) is not None
+                and getattr(self, "_collection_stopped", None) is None):
+            gr.Warning("Stop collection before initializing devices.")
+            return
+        training = getattr(self, "training", None)
+        if training is not None:
+            # Serialize instructor actions against removal of driver instances.
+            with training.lock:
+                training.restore_all()
+                return self._initialize_devices(selected_devices)
+        return self._initialize_devices(selected_devices)
+
+    def _initialize_devices(self, selected_devices):
         self.sts = "Initializing..."
+        selected_devices = list(selected_devices)
+        reusable = {dev.tag: dev for dev in self.available_devices
+                    if dev.tag in selected_devices
+                    and callable(getattr(dev, "can_retry_initialization", None))
+                    and dev.can_retry_initialization()}
         for dev in self.available_devices:
+            if dev.tag in reusable:
+                continue
             try:
                 dev.stop()
             except Exception as e:
                 self.logger.warning(f"Error stopping previous device before reinit: {e}")
             try:
-                dev.disconnect()
+                dispose = getattr(dev, "dispose", None)
+                if callable(dispose):
+                    dispose()
+                else:
+                    dev.disconnect()
             except Exception as e:
                 self.logger.warning(f"Error disconnecting previous device before reinit: {e}")
 
@@ -632,6 +659,15 @@ class IntegratedPanel():
         active_table = device_config.get_active_table()
         for dev in selected_devices:
             plugin = active_table[dev]
+            if dev in reusable:
+                device_instance = reusable[dev]
+                device_instance.session_info = self.session_info
+                self.available_devices.append(device_instance)
+                try:
+                    self.logger.info(device_instance.retry_initialization())
+                except Exception as error:
+                    self.logger.warning(f"MSense setup retry failed: {error}")
+                continue
             print(dev, plugin)
             Device = plugins.load_device_class(plugin)
             device_instance = Device(self.session_info, self.logger, tag=dev)

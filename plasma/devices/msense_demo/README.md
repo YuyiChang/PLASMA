@@ -20,12 +20,21 @@ With demo mode on, **"MSense Demo (simulated)"** appears in the sensor catalog
 (disabled by default). Enable it, Apply, then Initialize on the Session
 dashboard. Configure the simulated wristbands (name, `PPG`/`ECG`, IMU stream,
 injected fault) in the Configuration tab's "MSense Demo (simulated)" section.
+Before a wristband list has been saved, one PPG and one ECG demo wristband are
+available automatically, matching the editor's initial rows. Press **Apply demo
+wristbands** to save edits. Saving an empty list or disabling every row keeps
+the simulator empty until devices are added or enabled again.
 
 > Enabling **both** "MSense Wristbands" and "MSense Demo (simulated)" at once is
 > unsupported — they share the "🍠 YAMS (MSense Tools)" tab, which binds to
 > whichever device initialised first.
 
 ## What it simulates
+
+For mentor-controlled incidents on a separate web interface, launch
+`plasma --training`. The trainee uses port 7860 and the Instructor Console uses
+port 7861. See [RA training](../../../docs/playbook/training.md) for scheduling,
+restoration, assessments, and remote mentor access.
 
 | | |
 |---|---|

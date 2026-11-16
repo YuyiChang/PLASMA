@@ -1,5 +1,5 @@
 from plasma.devices.template import PlasmaDevice, PlasmaMemo
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 import asyncio
 import concurrent.futures
 import atexit
@@ -107,6 +107,10 @@ SQC_AUTO_RECONNECT = True
 # event-loop thread (_start_ble_loop/_run_async below); BLE_OP_TIMEOUT_S
 # bounds how long any caller waits for one.
 BLE_OP_TIMEOUT_S = 15.0
+BLE_SCAN_TIMEOUT_S = 5.0
+BLE_RESCAN_TIMEOUT_S = 3.0
+BLE_CONNECT_PASSES = 2
+BLE_INITIAL_BATTERY_TIMEOUT_S = 3.0
 
 # On BlueZ (Linux), a failed or aborted reconnect leaves stale D-Bus
 # disconnect subscriptions and half-open ACLs behind. Observed on a Jetson:
@@ -160,6 +164,7 @@ class MotionSenseHRV(PlasmaDevice):
 
     def __init__(self, session_info, logger, tag):
         super().__init__(session_info, logger, tag)
+        self._connection_lock = threading.RLock()
 
         self._load_device_config()
 
@@ -271,8 +276,9 @@ class MotionSenseHRV(PlasmaDevice):
 
         The callback passes the client through so ``_on_unexpected_disconnect``
         can drop callbacks fired by a client we've already retired."""
+        native_device = getattr(self, "devices", {}).get(key, {}).get("ble_device")
         return BleakClient(
-            addr,
+            native_device if native_device is not None else addr,
             disconnected_callback=lambda c, nm=key: self._on_unexpected_disconnect(nm, c),
         )
 
@@ -307,6 +313,10 @@ class MotionSenseHRV(PlasmaDevice):
         try:
             subprocess.run(["bluetoothctl", "remove", addr],
                            timeout=6, capture_output=True, check=False)
+            # BlueZ invalidates the cached object when RemoveDevice runs.
+            for device in getattr(self, "devices", {}).values():
+                if str(device.get("address", "")).upper() == addr.upper():
+                    device.pop("ble_device", None)
             self._sqc_debug(addr, f"  BlueZ RemoveDevice ({reason})")
         except Exception as e:
             self._sqc_debug(addr, f"  BlueZ RemoveDevice failed: {e}")
@@ -375,112 +385,133 @@ class MotionSenseHRV(PlasmaDevice):
             future.cancel()
             raise TimeoutError(f"BLE op timed out after {timeout_s:.0f}s")
 
-    def scan_devices(self, filter_name="MSense"):
-        print("start scanning devices")
+    def scan_devices(self, filter_name="MSense", *, targets=None, timeout_s=BLE_SCAN_TIMEOUT_S, append=False):
+        from .ble_scan import discover_targets
+        targets = set(self.device_list) if targets is None else set(targets)
+        started = time.monotonic()
         self.info("start device scanning")
         self.ctl_state = "Start device scanning"
+        self._scan_error = None
         try:
-            found = self._run_async(BleakScanner.discover(timeout=5.0, return_adv=True),
-                                    timeout_s=10.0)
+            found = self._run_async(discover_targets(targets, timeout=timeout_s),
+                                    timeout_s=timeout_s + 5.0)
         except Exception as e:
             self.info(f"scan failed: {e}")
+            self._scan_error = str(e)
             found = {}
 
-        self.devices = {}
-        for i, (addr, (ble_device, adv)) in enumerate(found.items()):
-            identifier = ble_device.name or adv.local_name or ""
-            if filter_name in identifier:
-                addr_u = addr.upper()
-                self.info(f"{i}: {identifier} [{addr_u}]")
-                self.devices[addr_u] = {
-                    "name": f"{identifier} [{addr_u}]",
-                    "address": addr_u,
-                    "rssi": adv.rssi,
-                    "product": _product_from_name(identifier),
-                }
-
-        print(self.devices)
-        self.info("device scanning completed")
+        if not append:
+            self.devices = {}
+        for addr, (ble_device, adv) in found.items():
+            identifier = adv.local_name or ble_device.name or self.device_list.get(addr, "")
+            self.devices[addr] = {
+                "name": f"{identifier} [{addr}]", "address": addr,
+                "ble_device": ble_device, "rssi": adv.rssi,
+                "product": _product_from_name(identifier) or _product_from_name(self.device_list.get(addr, "")),
+            }
+        self.info(f"MSense scan: {len(found)}/{len(targets)} targets seen in {time.monotonic() - started:.2f}s")
         self.ctl_state = "Device scanning completed"
 
+    def _connections_guard(self):
+        # Laziness also supports standalone drivers constructed without __init__.
+        if not hasattr(self, "_connection_lock"):
+            self._connection_lock = threading.RLock()
+        return self._connection_lock
+
+    def _missing_connections(self):
+        return [addr for addr in self.device_list
+                if not getattr(self.active_devices.get(addr), "is_connected", False)]
+
+    def can_retry_initialization(self):
+        """Reuse real wristbands only when their saved setup is unchanged."""
+        if self.CONFIG_KEY != "msense" or getattr(self, "_sqc_threads_stopped", False):
+            return False
+        from . import config as mcfg
+        blob = device_config.get_plugin_config(self.CONFIG_KEY)
+        return (mcfg.active_devices(blob) == self.device_list
+                and mcfg.imu_stream_devices(blob) == self.imu_stream_devices
+                and mcfg.display_labels(blob) == self.display_labels)
+
+    def retry_initialization(self):
+        with self._connections_guard():
+            missing = self._missing_connections()
+            if missing:
+                self.scan_devices(targets=missing, append=True)
+                self.connect_devices()
+            return f"{len(self.device_list) - len(self._missing_connections())}/{len(self.device_list)} MSense wristbands connected"
+
+    def _connect_one(self, addr):
+        dev = self.devices[addr]
+        started = time.monotonic()
+        p = None
+        self.memo[addr].set_transition("Initializing...")
+        old = self._live_client.get(addr) or self.active_devices.get(addr)
+        if old is not None:
+            self._retire_client(addr, old)
+        try:
+            p = self._make_client(addr, addr)
+            self._live_client[addr] = p
+            self._run_async(p.connect())
+            if not p.is_connected:
+                raise ConnectionError("Bluetooth connection did not remain established")
+            connected_at = time.monotonic()
+            self.active_devices[addr] = p
+            if addr not in self.active_outlets:
+                self.active_outlets[addr] = MsenseOutlet(dev["name"], addr)
+            self._connect_rssi[addr] = dev.get("rssi")
+            self.caps[addr].update(product=dev.get("product"), nus=False, battery=False, acq_readback=False)
+            try:
+                self._ensure_mtu(p, addr)
+            except Exception as e:
+                self.info(f"{addr}: MTU negotiation error: {e}")
+            try:
+                self.register_nus_notify(p, addr)
+                self.caps[addr]["nus"] = True
+            except Exception as e:
+                self.info(f"NUS (ECG/PPG SQC) unavailable on {addr}: {e}")
+            self.caps[addr]["acq_readback"] = self._read_acq_enabled(addr, p) is not None
+            try:
+                raw = self._run_async(p.read_gatt_char(BATTERY_CHAR_UUID), timeout_s=BLE_INITIAL_BATTERY_TIMEOUT_S)
+                self.battery[addr] = raw[0]
+                self.caps[addr]["battery"] = True
+                self.memo[addr].set_latest(f"🔋 {raw[0]}%")
+            except Exception as e:
+                self.info(f"battery read unavailable on {addr}: {e}")
+            if not p.is_connected:
+                raise ConnectionError("Bluetooth link dropped during setup")
+            self.memo[addr].sts = "🟢 connected"
+            self.info(f"MSense {addr}: connect {connected_at - started:.2f}s; "
+                      f"setup {time.monotonic() - connected_at:.2f}s")
+        except Exception as e:
+            self.info(f"Error connecting to {addr}: {e}")
+            self.memo[addr].sts = "⛔ connect failed"
+            self.memo[addr].set_latest(str(e))
+            self.active_devices.pop(addr, None)
+            self._retire_client(addr, p)
+        finally:
+            self.memo[addr].clear_transition()
+
     def connect_devices(self):
-        # retire any clients left over from a previous connect pass before we
-        # drop our references to them, so their disconnect callbacks and BlueZ
-        # links don't leak
-        for name, c in list(self._live_client.items()):
-            self._retire_client(name, c)
-        self.active_devices = {}
-        self.active_outlets = {}
-        self._notify_state = {}
-        self._live_client = {}
-        self.ctl_state = "Start device connection"
-
-        # quick sanity check
-        for addr, blename in self.device_list.items():
-            self.info(f"Connecting to device {addr}")
-            # assert addr in self.devices.keys(), self.info(f"Target device not found {addr}")
-
-            if addr in self.devices.keys():
-                dev = self.devices[addr]
-                n = dev['name']
-
-                self.info(f"Starting to connect to {n}")
-                # gr.Info(f"Connecting to devices: {n}")
-                print(f'==== {n}')
-                print(f"=== {n} at {addr}")
-                p = None
-                self.memo[addr].set_transition("Initializing...")
-                try:
-                    try:
-                        # bind nm by default arg — otherwise the callback closes
-                        # over the loop variable and fires with whichever device
-                        # happened to be last when the loop finished
-                        p = self._make_client(addr, addr)
-                        self._live_client[addr] = p
-                        # bounded: bleak's connect() actually respects this
-                        # timeout (unlike simplepyble's, confirmed via a macOS
-                        # thread dump to hold the GIL hostage indefinitely) —
-                        # don't let one bad device freeze the whole connect loop
-                        self._run_async(p.connect())
-                        self.info(f"{n} connected")
-                        self.active_devices[addr] = p
-                        self.active_outlets[addr] = MsenseOutlet(n, addr)
-                        self._connect_rssi[addr] = dev.get("rssi")
-                        self.caps[addr]["product"] = dev.get("product")
-                        try:
-                            self._ensure_mtu(p, addr)
-                        except Exception as e:
-                            self.info(f"{n}: MTU negotiation error: {e}")
-                        try:
-                            self.register_nus_notify(p, addr)
-                            self.caps[addr]["nus"] = True
-                        except Exception as e:
-                            self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
-                        # can we read the acquisition-enable char back? (used to
-                        # confirm a collection stop — see _confirm_acq_stopped)
-                        self.caps[addr]["acq_readback"] = (
-                            self._read_acq_enabled(addr, p) is not None)
-                        try:
-                            raw = self._run_async(p.read_gatt_char(BATTERY_CHAR_UUID))
-                            pct = raw[0]
-                            self.battery[addr] = pct
-                            self.caps[addr]["battery"] = True
-                            self.memo[addr].set_latest(f"🔋 {pct}%")
-                        except Exception as e:
-                            self.info(f"battery read unavailable on {n}: {e}")
-                    except Exception as e:
-                        self.info(f"Error connecting to {n}: {e}")
-                        self.memo[addr].sts = "⛔ connect failed"
-                        self.active_devices.pop(addr, None)
-                        self.active_outlets.pop(addr, None)
-                        self._retire_client(addr, p)
-                finally:
-                    self.memo[addr].clear_transition()
-            else:
-                self.memo[addr].sts = "⛔ device not found"
-
-        # run the 1 Hz supervisor as soon as anything is connected — it now also
-        # does the auto-reconnect sweep, not just SQC stall recovery
+        """Connect only missing peers; keep healthy links/outlets across passes."""
+        started = time.monotonic()
+        with self._connections_guard():
+            for attempt in range(BLE_CONNECT_PASSES):
+                missing = self._missing_connections()
+                if not missing:
+                    break
+                if attempt:
+                    self.info(f"MSense setup retry: {len(missing)} missing wristband(s)")
+                    self.scan_devices(targets=missing, timeout_s=BLE_RESCAN_TIMEOUT_S, append=True)
+                for addr in missing:
+                    if addr in self.devices:
+                        self._connect_one(addr)
+                    else:
+                        error = getattr(self, "_scan_error", None)
+                        self.memo[addr].sts = "⛔ scan failed" if error else "⛔ device not found"
+                        self.memo[addr].set_latest(error or "Not advertising in the bounded scan windows; retry Initialize to scan missing wristbands")
+            count = len(self.device_list) - len(self._missing_connections())
+            self.ctl_state = f"MSense connections: {count}/{len(self.device_list)}"
+            self.info(f"{self.ctl_state}; connection passes {time.monotonic() - started:.2f}s")
         self._ensure_sqc_threads()
 
     def lsl_streams(self):
@@ -578,7 +609,7 @@ class MotionSenseHRV(PlasmaDevice):
         Two guards keep a BlueZ reconnect storm from flooding this (see
         DISC_LOG_DEBOUNCE_S): ignore callbacks from a client we've already
         retired, and collapse repeats to one per DISC_LOG_DEBOUNCE_S."""
-        if client is not None and self._live_client.get(name) not in (None, client):
+        if client is not None and self._live_client.get(name) is not client:
             return  # a retired / superseded client — not the live link
         now = time.monotonic()
         if now - self._disc_log_at.get(name, 0.0) < DISC_LOG_DEBOUNCE_S:
@@ -589,6 +620,11 @@ class MotionSenseHRV(PlasmaDevice):
             self.memo[name].sts = "🔌 disconnected"
 
     def disconnect(self):
+        self._sqc_threads_stopped = True
+        with self._connections_guard():
+            self._disconnect_clients()
+
+    def _disconnect_clients(self):
         self._journal_finished_sqc(reason="disconnected")  # close any open SQC markers
         try:
             self.stop_all_live_streams()
@@ -608,6 +644,16 @@ class MotionSenseHRV(PlasmaDevice):
         self._notify_state = {}
         self._live_client = {}
 
+    def dispose(self):
+        """Retire a replaced driver, including its BLE loop and exit hook."""
+        self.auto_reconnect = False
+        self.disconnect()
+        watchdog = getattr(self, "_sqc_wd_thread", None)
+        if watchdog is not None and watchdog is not threading.current_thread():
+            watchdog.join(timeout=2.0)
+        self._stop_ble_loop()
+        atexit.unregister(self._shutdown_cleanup)
+
     # ── manual controls (surfaced in the MSense > Control sub-tab) ───────────
 
     def reconnect_all(self):
@@ -620,7 +666,11 @@ class MotionSenseHRV(PlasmaDevice):
                     n += 1
             except Exception as e:
                 self.info(f"reconnect {name} failed: {e}")
-        return f"Reconnect attempted on {n} wristband(s)" if n else "All wristbands connected"
+        missing = set(getattr(self, "device_list", {})) - set(self.active_devices)
+        result = f"Reconnect attempted on {n} wristband(s)" if n else "All previously initialized wristbands connected"
+        if missing:
+            result += f"; {len(missing)} configured wristband(s) never connected — retry Initialize with collection stopped"
+        return result
 
     def erase_flash_data(self, passcode):
         """Full on-device flash erase — gated on the fixed passcode 68.
@@ -1681,6 +1731,12 @@ class MotionSenseHRV(PlasmaDevice):
         return True
 
     def _reconnect_peripheral(self, name, reason):
+        with self._connections_guard():
+            if getattr(self, "_sqc_threads_stopped", False):
+                return
+            self._reconnect_locked(name, reason)
+
+    def _reconnect_locked(self, name, reason):
         """retire the old client → (Linux) make BlueZ forget the peer → wait →
         connect a fresh BleakClient → re-subscribe NUS (+ ENMO/IMU if a
         recording session is running). Runs on the watchdog thread. Both BLE
@@ -1705,11 +1761,16 @@ class MotionSenseHRV(PlasmaDevice):
         self._bluez_release_peer(addr, reason)
 
         time.sleep(1.5)
+        if getattr(self, "_sqc_threads_stopped", False):
+            return
 
         peripheral = self._make_client(addr, name)
         self._live_client[name] = peripheral
         try:
             self._run_async(peripheral.connect())
+            if getattr(self, "_sqc_threads_stopped", False):
+                self._retire_client(name, peripheral)
+                return
         except Exception as e:
             self.info(f"SQC: {name} reconnect FAILED ({reason}): {e}")
             self._sqc_debug(name, f"  reconnect FAILED/timed out: {e}")

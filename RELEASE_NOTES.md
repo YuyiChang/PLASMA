@@ -4,7 +4,52 @@
 
 ---
 
+## Unreleased
+
+### 📶 MSense connection setup
+
+- **More reliable multi-wristband initialization, with macOS in focus.** Reuse
+  scanned native Bluetooth device objects rather than triggering implicit scans
+  for every client. Discovery recognizes configured addresses even in nameless
+  advertisements, normalizes UUID/MAC case and whitespace, and stops early when
+  all configured names arrive. A bounded second scan/connection pass retries
+  only missing or failed peers.
+- **Retry Initialize without disconnecting healthy wristbands.** Unchanged real
+  MSense configurations reuse existing connections and LSL outlets. Changed
+  configurations and simulated devices still reinitialize fully. Initialization
+  is blocked during collection, connection operations are serialized against
+  watchdog reconnects, and stale client callbacks no longer create false
+  disconnect reports. Replaced drivers release their BLE loop and exit hook.
+- **Setup diagnostics now show scan and per-device connection/setup times.**
+  Optional initial battery reads have a shorter timeout, and scan failures are
+  distinguished from devices that were not found. These changes are covered by
+  simulated six-wristband regressions; physical six-device reliability and timing
+  still need verification on the lab's Macs and wristbands.
+
+### 🎓 RA training
+
+- **New Instructor Console for RA training.** Launch with `plasma --training`
+  to run the normal trainee interface on port 7860 and a separate mentor UI on
+  port 7861. Introduce immediate or delayed disconnects, held-offline conditions,
+  live-stream stalls, next-SQC stalls, and ignored acquisition-stop commands.
+  Restore selected/all sensors or cancel pending incidents, save private mentor
+  assessments, and review an event timeline and persistent exercise log.
+  Training markers use the existing PLASMA LSL outlet; coaching notes stay
+  private. Only simulated MSense devices accept incidents, and reinitialization
+  cancels pending triggers before replacing devices. Remote instructor access
+  requires `PLASMA_INSTRUCTOR_TOKEN`. See [RA training](docs/playbook/training.md).
+
+---
+
 ## 🚀 v2.3.1
+
+### 🧪 MSense demo mode
+
+- **First-use demo wristbands now match the configuration editor.** When no
+  demo wristband list has been saved, Initialize connects the default PPG and
+  ECG simulators without requiring **Apply demo wristbands** first. Previously
+  the editor showed those defaults while the driver initialized no devices.
+  Explicitly empty lists and disabled wristbands remain respected.
 
 ### 🩹 macOS LSL discovery
 
