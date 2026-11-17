@@ -18,6 +18,8 @@ from pylsl import StreamInfo, StreamOutlet, cf_double64
 from plasma.lsl_util import mark_plasma_origin
 import numpy as np
 import struct
+from dataclasses import asdict
+from types import MappingProxyType
 from plasma import __version__
 from plasma.config import device_config
 from plasma.app_context import app_context
@@ -536,6 +538,37 @@ class MotionSenseHRV(PlasmaDevice):
                             self.session_info['ses_id'],
                             f"{self.session_info['participant_enc']}_{timestamp}")
 
+    def bind_participants(self, assignments):
+        """Freeze this run's physical-device mapping; never changes BLE identity."""
+        if getattr(self, "participant_assignment_active", False):
+            raise RuntimeError("Participant assignments are locked until Stop.")
+        self.participant_assignments = MappingProxyType(dict(assignments))
+        self.participant_log_dirs = {}
+        for addr, memo in self.memo.items():
+            if not hasattr(memo, "_participant_base_label"):
+                memo._participant_base_label = memo.label
+            assignment = assignments.get(addr)
+            memo.label = memo._participant_base_label + (
+                f" · {assignment.subject_id}" if assignment else "")
+
+    def _verify_participant(self, name):
+        a = self.participant_assignments[name]
+        p = self.active_devices.get(name)
+        if p is None or not p.is_connected:
+            raise RuntimeError(f"{a.label} [{name}]: not connected")
+        try:
+            self._run_async(p.write_gatt_char(CTL_ENC_CHAR_UUID,
+                struct.pack("<I", a.encoding), response=True))
+            back = struct.unpack("<I", self._run_async(p.read_gatt_char(CTL_ENC_CHAR_UUID)))[0]
+            if back != a.encoding:
+                raise RuntimeError(f"expected {a.encoding}, read back {back}")
+        except Exception as exc:
+            raise RuntimeError(f"{a.label} [{name}]: encoding verification failed: {exc}") from exc
+
+    def verify_participants(self):
+        for name in self.participant_assignments:
+            self._verify_participant(name)
+
     def start(self):
         self.log_dir = self._resolve_log_dir()
         print(f"create log dir {self.log_dir}")
@@ -549,23 +582,39 @@ class MotionSenseHRV(PlasmaDevice):
         self.info(f"Session ID = {self.session_info['ses_id']}")
         self.info(f"Participant encoding = {self.session_info['participant_enc']}")
 
+        assignments = getattr(self, "participant_assignments", {})
+        self.participant_assignment_active = bool(assignments)
+        if assignments:
+            self.participant_log_dirs = {
+                addr: os.path.join(self.log_dir, a.subject_id, self.CONFIG_KEY)
+                for addr, a in assignments.items()}
         for name, p in list(self.active_devices.items()):
             print(name, p.is_connected)
             self.memo[name].set_transition("Starting...")
             try:
                 try:
+                    output = self.participant_log_dirs[name] if assignments else self.log_dir
+                    os.makedirs(output, exist_ok=True)
+                    self.active_outlets[name].log_dir = output
                     self.collection_ctl(name, True)
-                    self.active_outlets[name].log_dir = self.log_dir
                     self.memo[name].sts = "🟢"
                 except Exception as e:
                     self.info(f"Error starting {name}: {e}")
                     self.memo[name].sts = "⚠️ start failed"
+                    if assignments:
+                        raise RuntimeError(f"{self.display_name(name)} [{name}]: start failed: {e}") from e
             finally:
                 self.memo[name].clear_transition()
 
         self.ctl_state = "Collection in progress"
 
     def stop(self):
+        with self._connections_guard():
+            return self._stop_locked()
+
+    def _stop_locked(self):
+        # Clear before any slow BLE call so a watchdog cannot resume this run.
+        self.participant_assignment_active = False
         gr.Info("🛑 Stop data collection...")
         self.info("Data collection stopped")
         try:
@@ -736,6 +785,12 @@ class MotionSenseHRV(PlasmaDevice):
 
     def write_enc(self, enc):
         """Write an arbitrary participant-encoding int to every wristband and read it back."""
+        with self._connections_guard():
+            if getattr(self, "participant_assignments", {}):
+                return "⛔ Per-wristband assignments are in use. Use the Session dashboard."
+            return self._write_enc_unassigned(enc)
+
+    def _write_enc_unassigned(self, enc):
         try:
             val = int(enc)
         except (TypeError, ValueError):
@@ -819,10 +874,13 @@ class MotionSenseHRV(PlasmaDevice):
                 CTL_TIME_CHAR_UUID,
                 struct.pack("<Q", int(time.time())), response=True))
             # write participant hash
-            self.participant_byte = struct.pack("<I", self.session_info['participant_enc'])
-            self._run_async(peripheral.write_gatt_char(
-                CTL_ENC_CHAR_UUID,
-                self.participant_byte, response=True))
+            if getattr(self, "participant_assignments", {}):
+                self._verify_participant(name)
+            else:
+                self.participant_byte = struct.pack("<I", self.session_info['participant_enc'])
+                self._run_async(peripheral.write_gatt_char(
+                    CTL_ENC_CHAR_UUID,
+                    self.participant_byte, response=True))
 
         # acquisition enable/disable — one byte with response: 1 requests
         # acquisition, 0 requests a normal stop (SENSOR_STREAM_CENTRAL_HOWTO.md
@@ -1797,7 +1855,14 @@ class MotionSenseHRV(PlasmaDevice):
             self.register_battery(peripheral, name)
         except Exception as e:
             self._sqc_debug(name, f"  battery re-subscribe failed: {e}")
-        if getattr(self, "log_dir", None):
+        if getattr(self, "participant_assignment_active", False):
+            try:
+                self.collection_ctl(name, True)
+            except Exception as e:
+                self.info(f"{name}: assigned participant could not resume: {e}")
+                self.memo[name].sts = "⚠️ assigned recording could not resume"
+                return
+        elif getattr(self, "log_dir", None):
             try:
                 self.register_enmo(peripheral, name)
             except Exception as e:
@@ -1921,6 +1986,10 @@ class MotionSenseHRV(PlasmaDevice):
         `suffix` marks partial (quick-mode) captures on disk, e.g. "_p5s"."""
         ts = time.strftime("%y%m%d_%H%M%S")
         base = getattr(self, "log_dir", None) or os.path.join(app_context().data_dir, "sqc_snapshots", ts)
+        base = getattr(self, "participant_log_dirs", {}).get(name, base)
+        assignment = getattr(self, "participant_assignments", {}).get(name)
+        if assignment:
+            provenance = {**provenance, "participant": asdict(assignment)}
         os.makedirs(base, exist_ok=True)
 
         safe = str(name).replace(":", "-").replace(" ", "_")

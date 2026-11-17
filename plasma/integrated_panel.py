@@ -6,10 +6,12 @@ import os
 import sys
 import html as _html
 import re
+import threading
 from plasma.lsl_session import encode_participant, SessionInfo
 from plasma.journal import open_journal_outlet
 from plasma.task_sequence import TaskSequence, read_tasks
 from plasma.task_buzzer import TaskBuzzer
+from plasma.participant_assignments import ParticipantAssignments, session_locked
 import logging, datetime, time
 from logging import Logger
 from plasma import plugins, __version__, build_info
@@ -170,8 +172,11 @@ def build_memo_html(session_sts, session_info, devices, snap, ext_streams=(),
     return "".join(out)
 
 
-class IntegratedPanel():
+class IntegratedPanel(ParticipantAssignments):
     def __init__(self):
+        self._session_lock = threading.RLock()
+        self.participant_assignment_mode = False
+        self.participant_overrides = {}
         self.device_list = list(device_config.get_active_table().keys())
         self.log_root = app_context().data_dir
 
@@ -437,10 +442,14 @@ class IntegratedPanel():
                         ses_name = gr.Text(default_ses, label="Session ID", info="Format: ses-YY, Y is integer")
                         subject_enc = gr.Number(self.get_participant_encoding(default_sub, default_ses), label='Participant encoding (Read-only)', interactive=False,
                                                 info="Format: XXXXYY")
-                        sub_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
-                        ses_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
+                        sub_change = sub_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
+                        ses_change = ses_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
                         _ = self.get_participant_encoding(default_sub, default_ses)
 
+
+                self._participant_interface(sub_name, ses_name)
+                sub_change.success(self.assignment_preview, outputs=self._assignment_outputs)
+                ses_change.success(self.assignment_preview, outputs=self._assignment_outputs)
 
                 with gr.Accordion(label="Device initialization", open=True):
                     device_grp = gr.CheckboxGroup(choices=self.device_list, value=self.device_list, label="Select sensor(s)")
@@ -457,7 +466,8 @@ class IntegratedPanel():
                         btn_init = gr.Button("🚦Initialize selected device(s)")
                         btn_refresh = gr.Button("Refresh list")
 
-                    btn_init.click(self.init_devices, inputs=device_grp)
+                    btn_init.click(self.init_devices, inputs=device_grp).then(
+                        self.assignment_preview, outputs=self._assignment_outputs)
                     btn_refresh.click(self._refresh_devices, outputs=device_grp)
 
             with gr.Column():
@@ -467,8 +477,10 @@ class IntegratedPanel():
                         self.btn_start = gr.Button("Start▶️")
                         self.btn_stop = gr.Button("Stop🛑")
                                         
-                    self.btn_start.click(self.start_collection)
-                    self.btn_stop.click(self.stop_collection)
+                    self.btn_start.click(self.start_collection).then(
+                        self.assignment_preview, outputs=self._assignment_outputs)
+                    self.btn_stop.click(self.stop_collection).then(
+                        self.assignment_preview, outputs=self._assignment_outputs)
 
                 with gr.Accordion(label="🗒️ Journaler", open=False):
                     with gr.Tabs():
@@ -636,6 +648,7 @@ class IntegratedPanel():
         active = list(device_config.get_active_table().keys())
         return gr.CheckboxGroup(choices=active, value=active)
 
+    @session_locked
     def init_devices(self, selected_devices):
         if (getattr(self, "_collection_started", None) is not None
                 and getattr(self, "_collection_stopped", None) is None):
@@ -726,7 +739,15 @@ class IntegratedPanel():
             gr.Warning(f"LSL recording failed to start: {e}")
             self.lsl_recorder = None
 
+    @session_locked
     def start_collection(self):
+        if self._assignments_running():
+            raise ValueError("Collection is already running. Stop before starting another run.")
+        self._participant_manifest = None
+        if getattr(self, "participant_assignment_mode", False):
+            return self._start_assigned_collection()
+        for dev in self._assignment_devices():
+            dev.bind_participants({})
         self.sts = "Starting..."
         self._collection_started = time.monotonic()
         self._collection_stopped = None
@@ -751,6 +772,7 @@ class IntegratedPanel():
             self._start_recorder()
         self.sts = "Collection in progress"
 
+    @session_locked
     def stop_collection(self):
         self.sts = "Stopping..."
         self.task_sequence.end()
@@ -768,6 +790,10 @@ class IntegratedPanel():
                 self.logger.warning(f"Error stopping LSL recorder: {e}")
         self._collection_stopped = time.monotonic()
         self.sts = "Collection stopped"
+        if (getattr(self, "_participant_manifest", None)
+                and self._participant_manifest["status"] == "recording"):
+            self._participant_manifest["status"] = "stopped"
+            self._save_participant_manifest()
 
     def _external_lsl_streams(self):
         """LSL streams currently on the network that aren't PLASMA's own — so
@@ -823,8 +849,15 @@ class IntegratedPanel():
         if started is not None:
             end = self._collection_stopped or time.monotonic()
             elapsed = _fmt_elapsed(end - started)
+        session_display = self.session_info
+        manifest = getattr(self, "_participant_manifest", None)
+        if manifest:
+            subjects = {a["subject_id"] for a in manifest["assignments"]}
+            session_display = {"sub_id": f"MSense group · {len(subjects)} participant(s)",
+                               "ses_id": manifest["assignments"][0]["session_id"],
+                               "log_dir": self.session_dir}
         html = build_memo_html(
-            self.sts, self.session_info, self.available_devices,
+            self.sts, session_display, self.available_devices,
             rec.status() if rec is not None else None,
             ext_streams=self._external_lsl_streams(), elapsed=elapsed,
             phase=self.phase)
@@ -844,7 +877,9 @@ class IntegratedPanel():
         self.journal("[FLAG]")
         gr.Info("Recorded: [FLAG]")
 
+    @session_locked
     def get_participant_encoding(self, sub, ses):
+        self._require_assignment_edit()
         integer_representation = encode_participant(sub, ses)
 
         # print(name, integer_representation)

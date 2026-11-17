@@ -265,6 +265,7 @@ def test_start_session_reports_device_init_failure(tmp_path):
     assert res["ok"] is False
     assert any("device XYZ" in e for e in res["errors"])
     assert ("enc", "sub-1", "ses-0") in calls
+    assert ("start",) not in calls
 
 
 def test_mark_rejects_empty(tmp_path):

@@ -6,6 +6,22 @@
 
 ## Unreleased
 
+### 👥 Multiple MSense participants
+
+- **Assign participant IDs per wristband on Session Dashboard**, including bulk
+  assignment, inherited dashboard defaults, a shared Session ID, and explicit
+  CSV import/export. Assignments can change after Initialize without reconnecting
+  devices, and are locked during collection. Real and simulated MSense use the
+  same workflow.
+- **Group Start verifies every wristband's encoding before acquisition.** Missing
+  devices and failed readbacks abort Start; acquisition failures trigger stop
+  attempts for devices already started. Reconnects retain the frozen assignment.
+- **Group recordings save a participant manifest, extractor-compatible encoding
+  table, and a participant-map journal marker in the combined XDF.** Local data
+  and SQC captures use participant folders, and Memo labels show the participant.
+  Existing single-participant recording paths remain available with the option
+  off. See [the workflow guide](docs/msense-participants.md).
+
 ### 🔔 Background task alarms
 
 - **Journaler alarms now play from the Python backend.** Natural task expiry
