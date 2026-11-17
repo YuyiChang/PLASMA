@@ -9,7 +9,7 @@ import re
 from plasma.lsl_session import encode_participant, SessionInfo
 from plasma.journal import open_journal_outlet
 from plasma.task_sequence import TaskSequence, read_tasks
-from plasma.task_buzzer import BUZZER_CONTROLS
+from plasma.task_buzzer import TaskBuzzer
 import logging, datetime, time
 from logging import Logger
 from plasma import plugins, __version__, build_info
@@ -188,7 +188,10 @@ class IntegratedPanel():
 
         # session task-marker LSL stream (None if liblsl is unavailable)
         self.journal_outlet = open_journal_outlet()
-        self.task_sequence = TaskSequence(self._sequence_marker)
+        self.task_buzzer = TaskBuzzer(self.logger)
+        self.task_sequence = TaskSequence(self._sequence_marker,
+                                         on_complete=self.task_buzzer.complete,
+                                         on_running_changed=self.task_buzzer.set_task_running)
 
         # built-in LSL -> XDF recorder (default on; see interface() checkbox).
         # Created fresh on each Start, kept after Stop so the memo panel can
@@ -236,6 +239,14 @@ class IntegratedPanel():
                     getattr(dev, m)()
                 except Exception:
                     pass
+
+        buzzer = getattr(self, "task_buzzer", None)
+        if buzzer is not None:
+            try:
+                buzzer.close()
+            except Exception:
+                # Audio cleanup must never prevent the recorder from flushing.
+                pass
 
     def journal(self, msg):
         """Push a task/flag marker onto the journaler LSL stream + the session log."""
@@ -524,18 +535,12 @@ class IntegratedPanel():
         content = self._render_memo()
         return [gr.skip() if content == last else content, content]
 
-    def _buzzer_refresh(self, last):
-        completion = self.task_sequence.snapshot()["completion_id"]
-        event = f'<span data-completion-id="{completion}"></span>'
-        return [gr.skip() if last == completion else event, completion]
-
-    def wire_task_buzzer(self):
-        # One lightweight notification pump for the browser, independent of the
-        # selected tab. No audio data, device work, or extra task timers here.
-        event = gr.HTML(elem_id="plasma-buzzer-event", padding=False)
-        last = gr.State(None)
-        gr.Timer(value=0.5).tick(self._buzzer_refresh, inputs=last, outputs=[event, last],
-                                show_progress="hidden")
+    def _test_buzzer(self):
+        buzzer = getattr(self, "task_buzzer", None)
+        if buzzer is None:
+            return "Host buzzer is unavailable. Restart PLASMA to initialize it."
+        buzzer.test()
+        return buzzer.status()
 
     def _task_view_refresh(self, last):
         snap = self.task_sequence.snapshot()
@@ -551,13 +556,14 @@ class IntegratedPanel():
                    f'{snap["remaining"]}</div><h3>{name}</h3></div>')
         if error:
             content += f'<p role="alert">{error}</p>'
+        buzzer = getattr(self, "task_buzzer", None)
         current = (content, task.instruction if task else "",
                    bool(task) and snap["index"] > 0,
                    bool(task) and snap["index"] < snap["total"] - 1,
                    bool(task) and snap["status"] == "Ready" and self.journal_outlet is not None,
-                   snap["running"])
+                   snap["running"], buzzer.status() if buzzer else "Host buzzer is unavailable.")
         values = [gr.skip() if last is not None and last[i] == value
-                  else value if i < 2 else gr.update(interactive=value)
+                  else gr.update(interactive=value) if 2 <= i < 6 else value
                   for i, value in enumerate(current)]
         return [*values, current]
 
@@ -578,11 +584,22 @@ class IntegratedPanel():
             start = gr.Button("Start task (SPACE)", variant="primary", interactive=False,
                               elem_id="plasma-focus-task-start" if focus else "plasma-task-start")
             end = gr.Button("End task", interactive=False)
-        gr.HTML(BUZZER_CONTROLS, padding=False)
+        with gr.Row():
+            test_buzzer = gr.Button("Test buzzer", scale=0)
+            buzzer_status = gr.Textbox(label="Buzzer status", interactive=False)
         gr.Markdown("Previous/Next ends a running task and prepares the selected row. "
                     "At 00:00 the task ends; advance and start the next task when ready.")
         last = gr.State(None)
-        outputs = [display, instruction, previous, following, start, end, last]
+        outputs = [display, instruction, previous, following, start, end, buzzer_status, last]
+
+        def test_sound(last):
+            self._test_buzzer()
+            # Keep this display's cache in sync with every component mutation.
+            # Otherwise a late Test response can overwrite a newer status and
+            # subsequent unchanged refreshes would leave it stale indefinitely.
+            return self._task_view_refresh(last)
+
+        test_buzzer.click(test_sound, inputs=last, outputs=outputs, show_progress="hidden")
 
         def load(path, last):
             try:

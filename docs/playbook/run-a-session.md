@@ -85,13 +85,25 @@ visible task view. Only the selected top-level view refreshes, and switching
 back updates its task and Memo immediately. Long Memo lists scroll inside the
 Focus panel so the countdown and controls stay visible.
 
-The expiry buzzer is always enabled in both task views. **Test buzzer** plays
-two short tones without changing the task or sending a marker.
-Start task, SPACE, or Test buzzer enables browser audio. Natural expiry plays
-the tones once; End task, navigation, stopping collection, and CSV replacement
-are silent. Switching tabs does not replay the sound. If the browser blocks
-audio, click Test buzzer as prompted. Browser suspension can delay sound;
-the task end marker is sent independently.
+The expiry buzzer is always enabled and plays through the **computer running
+PLASMA**, using its system audio output. **Test buzzer** in either task view
+uses that same backend service without changing the task or sending a marker.
+Natural expiry plays two short tones once, even when the browser is minimized,
+on another tab, suspended, or closed while PLASMA keeps running. End task,
+navigation, stopping collection, and CSV replacement are silent. Returning to
+a page does not replay an old sound. Browser audio permission is not required.
+
+On macOS, PLASMA prevents idle system sleep while a task runs and until its
+queued alarm finishes; display sleep is still allowed. Ending a task or exiting
+PLASMA releases this protection. Forced sleep, lid closure, muted output, or a
+disconnected audio device can still prevent an audible alarm. Check the selected
+system output and volume with Test buzzer before starting. Remote browsers do
+not play the sound on their own computer.
+
+macOS uses its built-in `afplay`; Windows uses Python's `winsound`; Linux needs
+`paplay` or `aplay` and a working audio session on the PLASMA host. Playback errors
+appear in **Buzzer status** and the session log. Sound playback runs on a shared
+worker and does not block task markers or depend on UI refreshes.
 
 ## 5 · Stop
 

@@ -6,6 +6,20 @@
 
 ## Unreleased
 
+### 🔔 Background task alarms
+
+- **Journaler alarms now play from the Python backend.** Natural task expiry
+  directly queues the two-tone sound on the computer running PLASMA, independent
+  of browser visibility, polling, or Web Audio permission. Journaler and Focus
+  share one audio worker; returning to a browser page does not duplicate alarms.
+  **Test buzzer** uses the same host audio path without emitting LSL markers.
+- **macOS idle-sleep protection covers active tasks and queued alarms.** Display
+  sleep remains allowed, and protection is released on task end or shutdown.
+  Forced sleep and muted/disconnected outputs remain outside PLASMA's control.
+  Playback failures are reported in the task view and session log without
+  preventing task-end markers or recorder cleanup. Windows uses `winsound`;
+  Linux uses an installed `paplay` or `aplay` player.
+
 ### 📶 MSense connection setup
 
 - **More reliable multi-wristband initialization, with macOS in focus.** Reuse
