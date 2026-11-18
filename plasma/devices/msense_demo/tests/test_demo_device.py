@@ -6,12 +6,14 @@ restores it afterwards.
 """
 import atexit
 import time
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from plasma.config import device_config
 from plasma.devices.msense import records
-from plasma.devices.msense.device import MotionSenseHRV
+from plasma.devices.msense.device import MotionSenseHRV, AcquisitionStopNotConfirmed
 from plasma.devices.msense_demo import device as demo_device
 from plasma.devices.msense_demo.device import MSenseDemo, FakePeripheral
 
@@ -94,6 +96,129 @@ def test_register_is_gated_on_demo_mode(monkeypatch):
     msense_demo.register(calls.append)
     assert [p.id for p in calls] == ["msense_demo"]
     assert calls[0].enabled_by_default is False
+
+
+def test_first_use_initializes_default_wristbands_without_apply(demo_blob, monkeypatch):
+    # The config editor used to show two rows that the driver could not see
+    # until Apply was pressed, leaving Initialize with zero simulated devices.
+    monkeypatch.delitem(device_config.plugins, "msense_demo", raising=False)
+    d = _make_device()
+    try:
+        assert set(d.device_list.values()) == {"DEMO-PPG-01", "DEMO-ECG-02"}
+        assert len(d.active_devices) == len(d.memo) == 2
+        assert set(d._sensor_type.values()) == {"PPG", "ECG"}
+        d.start()
+        assert _wait(lambda: all(len(m.channels.get("ENMO", [])) >= 2
+                                 for m in d.memo.values()), timeout=6)
+    finally:
+        _teardown(d)
+
+
+def test_explicitly_empty_or_disabled_demo_list_stays_empty():
+    from plasma.devices.msense_demo import config
+
+    assert config._records({"devices": []}) == []
+    assert config.active_devices({"devices": []}) == {}
+    assert config.active_devices(_blob(_row("Disabled", enabled=False))) == {}
+    assert set(config.active_devices({}).values()) == {"DEMO-PPG-01", "DEMO-ECG-02"}
+
+
+def test_instructor_offline_blocks_watchdog_until_restored(demo_blob, monkeypatch):
+    from plasma.training import TrainingController
+
+    demo_blob(_row("DEMO-PPG", imu=False))
+    d = _make_device()
+    d.auto_reconnect = False  # drive reconnect synchronously in this test
+    controller = TrainingController(SimpleNamespace(available_devices=[d], journal=Mock()), background=False)
+    try:
+        name = _key(d, "DEMO-PPG")
+        target = next(iter(controller._targets()))
+        controller.begin("Offline practice")
+        controller.schedule(target, "offline")
+        controller.tick()
+        assert not d.active_devices[name].is_connected
+        # Exercise the driver's real reconnect path, not just the fake connect.
+        d._reconnect_peripheral(name, "training regression")
+        assert not d.active_devices[name].is_connected
+        controller.restore(target)
+        d._reconnect_peripheral(name, "training restoration")
+        assert d.active_devices[name].is_connected
+        controller.tick()
+        assert any(e["event"] == "observed_reconnected" for e in controller.events)
+    finally:
+        controller.close()
+        _teardown(d)
+
+
+def test_instructor_stalls_an_already_running_live_stream(demo_blob, monkeypatch):
+    from plasma.training import TrainingController
+
+    monkeypatch.setattr("plasma.devices.msense.device.SQC_NOPROGRESS_TIMEOUT_S", 0.8)
+    demo_blob(_row("DEMO-ECG", sensor="ECG", imu=False))
+    d = _make_device()
+    controller = TrainingController(SimpleNamespace(available_devices=[d], journal=Mock()), background=False)
+    try:
+        name = _key(d, "DEMO-ECG")
+        target = next(iter(controller._targets()))
+        controller.begin("Live stall practice")
+        d.start_live_stream(name)
+        assert _wait(lambda: d.get_live_stream_status(name)["status"] == "streaming", timeout=5)
+        controller.schedule(target, "stream_stall")
+        assert _wait(lambda: d.get_live_stream_status(name)["status"] == "error", timeout=10)
+        controller.tick()
+        assert d.training_fault_for(name) is None
+        assert any(e["event"] == "incident_triggered" for e in controller.events)
+    finally:
+        controller.close()
+        _teardown(d)
+
+
+def test_instructor_sqc_fault_affects_only_next_snapshot(demo_blob, monkeypatch):
+    from plasma.training import TrainingController
+
+    monkeypatch.setattr("plasma.devices.msense.device.SQC_NOPROGRESS_TIMEOUT_S", 0.8)
+    demo_blob(_row("DEMO-PPG", imu=False))
+    d = _make_device()
+    controller = TrainingController(SimpleNamespace(available_devices=[d], journal=Mock()), background=False)
+    try:
+        name = _key(d, "DEMO-PPG")
+        controller.begin("SQC practice")
+        controller.schedule(next(iter(controller._targets())), "sqc_error")
+        d.request_sqc_snapshot(name)
+        assert _wait(lambda: d.get_sqc_status(name)["status"] == "error", timeout=10)
+        assert _wait(lambda: d.memo[name].sts == "🔄 reconnected", timeout=8)
+        controller.tick()
+        assert d.training_fault_for(name) is None
+        d.request_sqc_snapshot(name)
+        assert _wait(lambda: d.get_sqc_status(name)["status"] in ("ready", "error"), timeout=10)
+        assert d.get_sqc_status(name)["status"] == "ready"
+    finally:
+        controller.close()
+        _teardown(d)
+
+
+def test_instructor_stop_fault_restores_without_changing_config(demo_blob, monkeypatch):
+    from plasma.training import TrainingController
+
+    monkeypatch.setattr("plasma.devices.msense.device.ACQ_STOP_READBACK_INTERVAL_S", 0.0)
+    demo_blob(_row("DEMO-PPG", imu=False))
+    d = _make_device()
+    controller = TrainingController(SimpleNamespace(available_devices=[d], journal=Mock()), background=False)
+    try:
+        name = _key(d, "DEMO-PPG")
+        target = next(iter(controller._targets()))
+        controller.begin("Stop practice")
+        d.collection_ctl(name, True)
+        controller.schedule(target, "acq_stop_ignored")
+        with pytest.raises(AcquisitionStopNotConfirmed, match="still reads 1"):
+            d.collection_ctl(name, False)
+        controller.restore(target)
+        d.collection_ctl(name, False)
+        assert d.get_acq_stop_status(name)["status"] == "confirmed"
+        assert d._demo_faults[name] == "none"
+    finally:
+        controller.close()
+        _teardown(d)
 
 
 # ── encoders round-trip through the real decoders ───────────────────────────

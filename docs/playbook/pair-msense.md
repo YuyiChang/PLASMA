@@ -9,10 +9,11 @@ wristbands"**.
 
 ## Scan and add
 
-!!! warning "Scan before you Initialize"
-    The Mac has a single BLE radio. Do all scanning here **before** you click
-    Initialize on the Session Dashboard — a scan while devices are connected
-    will fail or disrupt the session.
+!!! warning "Finish configuration scans before Initialize"
+    Avoid running an independent Configuration scan during initialization or
+    recording: it shares the Mac's Bluetooth radio and can compete with device
+    setup and streaming. Use **Initialize** again for missing wristbands; its
+    bounded retry scan preserves the already connected devices.
 
 1. Turn the wristband on and make sure it's advertising and in range.
 2. Click **🔍 Scan for MSense wristbands (5 s)**.
@@ -27,6 +28,30 @@ wristbands"**.
 
 Edits here take effect the next time you click **Initialize** on the Session
 Dashboard.
+
+## Initialize several wristbands
+
+Initialize discovers configured addresses, retains the native Bluetooth device
+objects, and connects them serially. Discovery stops early when every configured
+wristband has supplied its advertised name; otherwise the initial window is
+five seconds. A second pass scans for missing/failed wristbands for up to three
+seconds and retries only those peers. A configured address is still considered
+if its advertisement has no name. UUID/MAC matching ignores case and surrounding
+whitespace.
+
+If only five of six connect, leave those five connected and click **Initialize**
+again with collection stopped. With the same saved MSense configuration, this
+reuses the driver, its healthy links, and their LSL outlets, and retries the
+missing wristband. When all are healthy, repeating Initialize does not rescan
+them. Changing the wristband list, names/nicknames, or IMU settings performs a
+full reinitialization; simulated devices also retain their full reinitialization
+behavior. Initialize is blocked during collection.
+
+For troubleshooting, inspect the session log for `MSense scan:` (addresses seen
+and elapsed time), per-address `connect`/`setup` timings, and the final connection
+count. A scan/permission error is distinguished from a wristband not advertising
+and from a connection failure. Physical six-device reliability and timings still
+depend on the Mac's Bluetooth controller, radio conditions, and wristband firmware.
 
 ## The table columns
 

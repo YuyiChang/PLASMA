@@ -437,6 +437,7 @@ def start_session(ip, sub: str, ses: str, devices: list[str],
             fn()
         except Exception as e:
             errors.append(f"{label}: {e!r}")
+            break  # Never start with stale identity/config after a failed setup step.
 
     st = session_status(ip)
     for d in st["devices"]:

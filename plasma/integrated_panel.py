@@ -6,10 +6,13 @@ import os
 import sys
 import html as _html
 import re
+import threading
 from plasma.lsl_session import encode_participant, SessionInfo
 from plasma.journal import open_journal_outlet
 from plasma.task_sequence import TaskSequence, read_tasks
-from plasma.task_buzzer import BUZZER_CONTROLS
+from plasma.task_csv_history import TaskCsvHistory
+from plasma.task_buzzer import TaskBuzzer
+from plasma.participant_assignments import ParticipantAssignments, session_locked
 import logging, datetime, time
 from logging import Logger
 from plasma import plugins, __version__, build_info
@@ -170,8 +173,11 @@ def build_memo_html(session_sts, session_info, devices, snap, ext_streams=(),
     return "".join(out)
 
 
-class IntegratedPanel():
+class IntegratedPanel(ParticipantAssignments):
     def __init__(self):
+        self._session_lock = threading.RLock()
+        self.participant_assignment_mode = False
+        self.participant_overrides = {}
         self.device_list = list(device_config.get_active_table().keys())
         self.log_root = app_context().data_dir
 
@@ -188,7 +194,11 @@ class IntegratedPanel():
 
         # session task-marker LSL stream (None if liblsl is unavailable)
         self.journal_outlet = open_journal_outlet()
-        self.task_sequence = TaskSequence(self._sequence_marker)
+        self.task_buzzer = TaskBuzzer(self.logger)
+        self.task_sequence = TaskSequence(self._sequence_marker,
+                                         on_complete=self.task_buzzer.complete,
+                                         on_running_changed=self.task_buzzer.set_task_running)
+        self.task_csv_history = TaskCsvHistory(os.path.join(app_context().home, "task_sequences"))
 
         # built-in LSL -> XDF recorder (default on; see interface() checkbox).
         # Created fresh on each Start, kept after Stop so the memo panel can
@@ -218,6 +228,9 @@ class IntegratedPanel():
         atexit.register(self._atexit_cleanup)
 
     def _atexit_cleanup(self):
+        training = getattr(self, "training", None)
+        if training is not None:
+            training.close()
         sequence = getattr(self, "task_sequence", None)
         if sequence is not None:
             sequence.end()
@@ -233,6 +246,14 @@ class IntegratedPanel():
                     getattr(dev, m)()
                 except Exception:
                     pass
+
+        buzzer = getattr(self, "task_buzzer", None)
+        if buzzer is not None:
+            try:
+                buzzer.close()
+            except Exception:
+                # Audio cleanup must never prevent the recorder from flushing.
+                pass
 
     def journal(self, msg):
         """Push a task/flag marker onto the journaler LSL stream + the session log."""
@@ -521,23 +542,17 @@ class IntegratedPanel():
         content = self._render_memo()
         return [gr.skip() if content == last else content, content]
 
-    def _buzzer_refresh(self, last):
-        completion = self.task_sequence.snapshot()["completion_id"]
-        event = f'<span data-completion-id="{completion}"></span>'
-        return [gr.skip() if last == completion else event, completion]
-
-    def wire_task_buzzer(self):
-        # One lightweight notification pump for the browser, independent of the
-        # selected tab. No audio data, device work, or extra task timers here.
-        event = gr.HTML(elem_id="plasma-buzzer-event", padding=False)
-        last = gr.State(None)
-        gr.Timer(value=0.5).tick(self._buzzer_refresh, inputs=last, outputs=[event, last],
-                                show_progress="hidden")
+    def _test_buzzer(self):
+        buzzer = getattr(self, "task_buzzer", None)
+        if buzzer is None:
+            return "Host buzzer is unavailable. Restart PLASMA to initialize it."
+        buzzer.test()
+        return buzzer.status()
 
     def _task_view_refresh(self, last):
         snap = self.task_sequence.snapshot()
         task = snap["task"]
-        name = _html.escape(task.name) if task else "Upload a CSV in Journaler to begin"
+        name = _html.escape(task.name) if task else "Upload a CSV in Journaler or load a previous CSV to begin"
         status = _html.escape(snap["status"])
         error = _html.escape(snap["error"])
         if self.journal_outlet is None:
@@ -548,23 +563,36 @@ class IntegratedPanel():
                    f'{snap["remaining"]}</div><h3>{name}</h3></div>')
         if error:
             content += f'<p role="alert">{error}</p>'
+        buzzer = getattr(self, "task_buzzer", None)
         current = (content, task.instruction if task else "",
                    bool(task) and snap["index"] > 0,
                    bool(task) and snap["index"] < snap["total"] - 1,
                    bool(task) and snap["status"] == "Ready" and self.journal_outlet is not None,
-                   snap["running"])
+                   snap["running"], buzzer.status() if buzzer else "Host buzzer is unavailable.")
         values = [gr.skip() if last is not None and last[i] == value
-                  else value if i < 2 else gr.update(interactive=value)
+                  else gr.update(interactive=value) if 2 <= i < 6 else value
                   for i, value in enumerate(current)]
         return [*values, current]
 
     def _task_sequence_interface(self, focus=False):
         tab = "Focus" if focus else "Session Dashboard"
+        if not hasattr(self, "task_csv_history"):
+            self.task_csv_history = TaskCsvHistory(os.path.join(app_context().home, "task_sequences"))
+        history = self.task_csv_history
         if not focus:
             gr.Markdown("Drop a CSV with **Condition**, **Move_Instruction**, and **load** "
                         "(seconds). Start collection first to save markers to XDF. "
                         "All connected viewers share this task sequence.")
-            upload = gr.File(label="Task sequence CSV", file_types=[".csv"], type="filepath")
+            upload = gr.File(label="Task sequence CSV", file_types=[".csv"], type="filepath",
+                             elem_id="plasma-task-upload")
+        with gr.Row():
+            choices = history.choices()
+            recent = gr.Dropdown(choices=choices, value=choices[0][1] if choices else None,
+                                 label="Previous task CSVs", interactive=True)
+            reload_csv = gr.Button("Load selected CSV", scale=0)
+            refresh_csvs = gr.Button("Refresh CSV list", scale=0)
+        gr.Markdown("The 10 most recent valid CSV uploads are saved for reuse, including after restart. "
+                    "Loading a CSV ends the current task and returns to its first row without starting it.")
         display = gr.HTML()
         instruction = gr.Textbox(label="Move instruction", lines=4 if focus else 6,
                                  max_lines=6 if focus else 20, interactive=False)
@@ -575,19 +603,53 @@ class IntegratedPanel():
             start = gr.Button("Start task (SPACE)", variant="primary", interactive=False,
                               elem_id="plasma-focus-task-start" if focus else "plasma-task-start")
             end = gr.Button("End task", interactive=False)
-        gr.HTML(BUZZER_CONTROLS, padding=False)
+        with gr.Row():
+            test_buzzer = gr.Button("Test buzzer", scale=0)
+            buzzer_status = gr.Textbox(label="Buzzer status", interactive=False)
         gr.Markdown("Previous/Next ends a running task and prepares the selected row. "
                     "At 00:00 the task ends; advance and start the next task when ready.")
         last = gr.State(None)
-        outputs = [display, instruction, previous, following, start, end, last]
+        outputs = [display, instruction, previous, following, start, end, buzzer_status, last]
+
+        def test_sound(last):
+            self._test_buzzer()
+            # Keep this display's cache in sync with every component mutation.
+            # Otherwise a late Test response can overwrite a newer status and
+            # subsequent unchanged refreshes would leave it stale indefinitely.
+            return self._task_view_refresh(last)
+
+        test_buzzer.click(test_sound, inputs=last, outputs=outputs, show_progress="hidden")
 
         def load(path, last):
+            saved = None
             try:
                 tasks = read_tasks(path) if path else []
                 self.task_sequence.load(tasks)
             except (ValueError, OSError, UnicodeError, csv.Error) as exc:
                 gr.Warning(f"Cannot load task CSV: {exc}")
-            return self._task_view_refresh(last)
+            else:
+                if path:
+                    try:
+                        saved = history.remember(path)
+                    except (ValueError, OSError, UnicodeError, csv.Error) as exc:
+                        gr.Warning(f"Task CSV loaded, but could not save it for reuse: {exc}")
+            return [*self._task_view_refresh(last), gr.update(choices=history.choices(), value=saved)]
+
+        def refresh_recent(selected):
+            choices = history.choices()
+            ids = {identifier for _, identifier in choices}
+            return gr.update(choices=choices, value=selected if selected in ids
+                             else choices[0][1] if choices else None)
+
+        def load_recent(selected, last):
+            try:
+                self.task_sequence.load(history.load(selected))
+            except (ValueError, OSError, UnicodeError, csv.Error) as exc:
+                gr.Warning(f"Cannot load previous task CSV: {exc}")
+            return [*self._task_view_refresh(last), refresh_recent(selected)]
+
+        refresh_csvs.click(refresh_recent, inputs=recent, outputs=recent, show_progress="hidden")
+        reload_csv.click(load_recent, inputs=[recent, last], outputs=[*outputs, recent], show_progress="hidden")
 
         def action(name):
             def callback(last):
@@ -604,7 +666,7 @@ class IntegratedPanel():
             return callback
 
         if not focus:
-            upload.change(load, inputs=[upload, last], outputs=outputs, show_progress="hidden")
+            upload.change(load, inputs=[upload, last], outputs=[*outputs, recent], show_progress="hidden")
         for button, name in [(previous, "previous"), (following, "next"),
                              (start, "start"), (end, "end")]:
             button.click(action(name), inputs=last, outputs=outputs, show_progress="hidden")
@@ -616,15 +678,40 @@ class IntegratedPanel():
         active = list(device_config.get_active_table().keys())
         return gr.CheckboxGroup(choices=active, value=active)
 
+    @session_locked
     def init_devices(self, selected_devices):
+        if (getattr(self, "_collection_started", None) is not None
+                and getattr(self, "_collection_stopped", None) is None):
+            gr.Warning("Stop collection before initializing devices.")
+            return
+        training = getattr(self, "training", None)
+        if training is not None:
+            # Serialize instructor actions against removal of driver instances.
+            with training.lock:
+                training.restore_all()
+                return self._initialize_devices(selected_devices)
+        return self._initialize_devices(selected_devices)
+
+    def _initialize_devices(self, selected_devices):
         self.sts = "Initializing..."
+        selected_devices = list(selected_devices)
+        reusable = {dev.tag: dev for dev in self.available_devices
+                    if dev.tag in selected_devices
+                    and callable(getattr(dev, "can_retry_initialization", None))
+                    and dev.can_retry_initialization()}
         for dev in self.available_devices:
+            if dev.tag in reusable:
+                continue
             try:
                 dev.stop()
             except Exception as e:
                 self.logger.warning(f"Error stopping previous device before reinit: {e}")
             try:
-                dev.disconnect()
+                dispose = getattr(dev, "dispose", None)
+                if callable(dispose):
+                    dispose()
+                else:
+                    dev.disconnect()
             except Exception as e:
                 self.logger.warning(f"Error disconnecting previous device before reinit: {e}")
 
@@ -632,6 +719,15 @@ class IntegratedPanel():
         active_table = device_config.get_active_table()
         for dev in selected_devices:
             plugin = active_table[dev]
+            if dev in reusable:
+                device_instance = reusable[dev]
+                device_instance.session_info = self.session_info
+                self.available_devices.append(device_instance)
+                try:
+                    self.logger.info(device_instance.retry_initialization())
+                except Exception as error:
+                    self.logger.warning(f"MSense setup retry failed: {error}")
+                continue
             print(dev, plugin)
             Device = plugins.load_device_class(plugin)
             device_instance = Device(self.session_info, self.logger, tag=dev)
@@ -673,7 +769,16 @@ class IntegratedPanel():
             gr.Warning(f"LSL recording failed to start: {e}")
             self.lsl_recorder = None
 
+    @session_locked
     def start_collection(self):
+        if self._assignments_running():
+            raise ValueError("Collection is already running. Stop before starting another run.")
+        self._participant_manifest = None
+        overrides = self._load_participant_overrides()
+        if overrides:
+            return self._start_assigned_collection(self._compile_assignments(overrides))
+        for dev in self._assignment_devices():
+            dev.bind_participants({})
         self.sts = "Starting..."
         self._collection_started = time.monotonic()
         self._collection_stopped = None
@@ -698,6 +803,7 @@ class IntegratedPanel():
             self._start_recorder()
         self.sts = "Collection in progress"
 
+    @session_locked
     def stop_collection(self):
         self.sts = "Stopping..."
         self.task_sequence.end()
@@ -715,6 +821,10 @@ class IntegratedPanel():
                 self.logger.warning(f"Error stopping LSL recorder: {e}")
         self._collection_stopped = time.monotonic()
         self.sts = "Collection stopped"
+        if (getattr(self, "_participant_manifest", None)
+                and self._participant_manifest["status"] == "recording"):
+            self._participant_manifest["status"] = "stopped"
+            self._save_participant_manifest()
 
     def _external_lsl_streams(self):
         """LSL streams currently on the network that aren't PLASMA's own — so
@@ -770,8 +880,15 @@ class IntegratedPanel():
         if started is not None:
             end = self._collection_stopped or time.monotonic()
             elapsed = _fmt_elapsed(end - started)
+        session_display = self.session_info
+        manifest = getattr(self, "_participant_manifest", None)
+        if manifest:
+            subjects = {a["subject_id"] for a in manifest["assignments"]}
+            session_display = {"sub_id": f"MSense group · {len(subjects)} participant(s)",
+                               "ses_id": manifest["assignments"][0]["session_id"],
+                               "log_dir": self.session_dir}
         html = build_memo_html(
-            self.sts, self.session_info, self.available_devices,
+            self.sts, session_display, self.available_devices,
             rec.status() if rec is not None else None,
             ext_streams=self._external_lsl_streams(), elapsed=elapsed,
             phase=self.phase)
@@ -791,7 +908,9 @@ class IntegratedPanel():
         self.journal("[FLAG]")
         gr.Info("Recorded: [FLAG]")
 
+    @session_locked
     def get_participant_encoding(self, sub, ses):
+        self._require_assignment_edit()
         integer_representation = encode_participant(sub, ses)
 
         # print(name, integer_representation)

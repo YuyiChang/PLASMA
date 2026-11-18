@@ -19,7 +19,43 @@ from plasma.devices.msense.config import (
     active_devices,
     imu_stream_devices,
     display_labels,
+    subject_override, participant_overrides, SUBJECT_OVERRIDE, OVERRIDE_ENABLED,
 )
+
+
+@pytest.mark.parametrize("value,expected", [("1002", "1002"), ("0007", "0007"),
+    (" 1234 ", "1234"), ("", ""), (None, ""), (np.nan, "")])
+def test_subject_override_validation(value, expected):
+    assert subject_override(value) == expected
+
+
+@pytest.mark.parametrize("value", ["123", "12345", "sub-1002", "12ab", "1002.0", "１２３４"])
+def test_subject_override_rejects_invalid_ids(value):
+    with pytest.raises(ValueError, match="four digits"):
+        subject_override(value)
+
+
+def test_subject_overrides_require_toggle_and_enabled_row():
+    blob = {"devices": [
+        {"Name": "Band A", "UUID / MAC Address": " a1 ", SUBJECT_OVERRIDE: "0007"},
+        {"Name": "Band B", "UUID / MAC Address": "b1", SUBJECT_OVERRIDE: "1002", "Enabled": False},
+        {"Name": "Band C", "UUID / MAC Address": "c1", SUBJECT_OVERRIDE: ""}]}
+    assert participant_overrides(blob) == {}
+    blob[OVERRIDE_ENABLED] = True
+    assert participant_overrides(blob) == {"A1": "0007"}
+    # Duplicate addresses use the last enabled row, including a blank override.
+    blob["devices"].append({"Name": "Band A", "UUID / MAC Address": "a1", SUBJECT_OVERRIDE: ""})
+    assert participant_overrides(blob) == {}
+
+
+def test_device_info_import_preserves_subject_override_and_toggle(tmp_path):
+    path = tmp_path / "device_info.json"
+    path.write_text('{"Band B": "b1"}')
+    blob = {OVERRIDE_ENABLED: True, "devices": [
+        {"Name": "Band A", "UUID / MAC Address": "a1", SUBJECT_OVERRIDE: "0007"}]}
+    updated, _ = merge_device_info_into_blob(blob, str(path))
+    assert updated[OVERRIDE_ENABLED] is True
+    assert updated["devices"][0][SUBJECT_OVERRIDE] == "0007"
 
 
 # ── _normalize_msense ───────────────────────────────────────────────────────
@@ -69,9 +105,15 @@ def test_display_labels_keyed_by_address():
     ]}
     out = display_labels(blob)
     assert out == {
-        "u1": "MSense4ECG-Z5G4A (left wrist)",
-        "u2": "MSense4ECG-EX4BT",
+        "U1": "MSense4ECG-Z5G4A (left wrist)",
+        "U2": "MSense4ECG-EX4BT",
     }
+
+
+def test_address_case_and_whitespace_are_consistent_across_helpers():
+    blob = {"devices": [{"Name": "MSense4PPG", "Nickname": "left", "UUID / MAC Address": " ab:cd:ef ",
+                         "Enabled": True, "IMU Stream": True}]}
+    assert set(active_devices(blob)) == imu_stream_devices(blob) == set(display_labels(blob)) == {"AB:CD:EF"}
 
 
 # ── two wristbands sharing a Name stay distinct (address is the identity key) ──

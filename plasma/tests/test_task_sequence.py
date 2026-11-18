@@ -245,14 +245,45 @@ def test_only_natural_expiry_creates_unique_completion_event():
     assert messages[-2:] == ["[Replacement] start", "[Replacement] end"]
 
 
-def test_buzzer_notification_baseline_and_no_repeated_payload():
-    ip = IntegratedPanel.__new__(IntegratedPanel)
-    ip.task_sequence, _, now = sequence()
-    event, baseline = ip._buzzer_refresh(None)
-    assert 'data-completion-id="0"' in event
-    assert ip._buzzer_refresh(baseline)[0] == gr.skip()
-    ip.task_sequence.start()
+def test_completion_callback_is_once_and_independent_of_end_marker_failure():
+    runner, messages, now = sequence()
+    completed, running = Mock(), Mock()
+    runner.on_complete = completed
+    runner.on_running_changed = running
+    runner.start()
+    timer = runner.timer
+    runner.emit = Mock(side_effect=RuntimeError("outlet failed"))
     now[0] += 60
-    event, completion = ip._buzzer_refresh(baseline)
-    assert completion == 1 and 'data-completion-id="1"' in event
-    assert ip._buzzer_refresh(completion)[0] == gr.skip()
+    runner.snapshot()
+    timer.fire()
+    runner.end()
+    completed.assert_called_once_with(1)
+    assert [call.args[0] for call in running.call_args_list] == [True, False]
+    assert "outlet failed" in runner.snapshot()["error"]
+
+
+def test_manual_end_navigation_and_reload_do_not_buzz():
+    runner, _, _ = sequence()
+    runner.on_complete = Mock()
+    runner.start()
+    runner.move(1)
+    runner.start()
+    runner.end()
+    runner.move(-1)
+    runner.start()
+    runner.load([])
+    runner.on_complete.assert_not_called()
+
+
+def test_failed_timer_start_releases_sleep_protection():
+    running = Mock()
+    emit = Mock()
+    timer = Mock()
+    timer.start.side_effect = RuntimeError("Cannot start timer")
+    runner = TaskSequence(emit, timer_factory=lambda *args, **kw: timer,
+                          on_running_changed=running)
+    runner.load([Task("A", "", 1)])
+    with pytest.raises(RuntimeError, match="Cannot start timer"):
+        runner.start()
+    assert [call.args[0] for call in running.call_args_list] == [True, False]
+    assert [call.args[0] for call in emit.call_args_list] == ["[A] start", "[A] end"]

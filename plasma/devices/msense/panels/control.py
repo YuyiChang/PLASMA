@@ -71,8 +71,18 @@ def build_control_tab(ip=None):
                 return dev.get_services() if dev is not None else _NO_DEV
 
             def _write_enc(v):
-                dev = _msense_device(ip)
-                return dev.write_enc(v) if dev is not None else _NO_DEV
+                from plasma.participant_assignments import session_locked
+
+                @session_locked
+                def write(panel):
+                    if panel._assignments_running():
+                        return "⛔ Bulk encoding is locked during collection."
+                    if panel._load_participant_overrides():
+                        return "⛔ Subject ID overrides are enabled in Configuration → MSense wristbands; bulk encoding is locked."
+                    dev = _msense_device(panel)
+                    return dev.write_enc(v) if dev is not None else _NO_DEV
+
+                return write(ip) if ip is not None else _NO_DEV
 
             auto_rc.change(_set_auto, inputs=auto_rc)
             btn_reconnect.click(_reconnect, outputs=adv_status)

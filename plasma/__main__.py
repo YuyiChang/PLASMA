@@ -1,4 +1,5 @@
 import atexit
+import argparse
 import os
 import signal
 import sys
@@ -6,7 +7,6 @@ import gradio as gr
 from plasma import plugins
 from plasma.app_context import app_context
 from plasma.integrated_panel import IntegratedPanel
-from plasma.task_buzzer import BUZZER_JS
 from plasma.config import device_config
 from plasma import api as plasma_api
 
@@ -31,6 +31,7 @@ def _relaunch_argv():
 # set by main() so shutdown() can stop the server (frees the port before a
 # restart re-binds it)
 app = None
+instructor_app = None
 
 
 def shutdown(restart=False):
@@ -41,6 +42,11 @@ def shutdown(restart=False):
     event-handler thread — mirrors `_handle_sigterm`'s
     `atexit._run_exitfuncs()` + hard-exit pattern."""
     atexit._run_exitfuncs()
+    if instructor_app is not None:
+        try:
+            instructor_app.close()
+        except Exception:
+            pass
     if app is not None:
         try:
             app.close()
@@ -100,7 +106,6 @@ function refresh() {
     });
     obs.observe(document.body, {childList: true, subtree: true});
     window.addEventListener('pagehide', () => obs.disconnect(), {once: true});
-""" + BUZZER_JS + """
     // SPACE starts a ready task only while its controls are visible. Let
     // inputs, buttons and other keyboard controls retain their native behavior.
     const taskKey = (event) => {
@@ -111,7 +116,6 @@ function refresh() {
             const button = control.matches('button') ? control : control.querySelector('button');
             if (button && !button.disabled && button.getClientRects().length) {
                 event.preventDefault();
-                unlockAudio();
                 button.click();
                 break;
             }
@@ -128,8 +132,7 @@ def build_blocks(ip):
     tool (`scripts/capture_screenshots.py`) so both build the identical UI.
     Does not launch the server."""
     with gr.Blocks(title=app_context().app_name, theme=gr.themes.Ocean(), js=js_func,
-                   css="#plasma-focus-memo {max-height: calc(100vh - 180px); overflow-y: auto;} "
-                       "#plasma-buzzer-event {display:none;}") as app:
+                   css="#plasma-focus-memo {max-height: calc(100vh - 180px); overflow-y: auto;}") as app:
         yams_title = None
         with gr.Tabs() as top_tabs:
             with gr.Tab("Session Dashboard"):
@@ -159,7 +162,6 @@ def build_blocks(ip):
 
         _wire_plot_timer_gate(ip, top_tabs, yams_title)
         ip.wire_session_views(top_tabs)
-        ip.wire_task_buzzer()
 
         # stop any live MSense stream when the last browser tab goes away — a
         # continuous stream with nobody watching just churns the BLE radio and
@@ -208,22 +210,60 @@ def _wire_plot_timer_gate(ip, top_tabs, yams_title):
     top_tabs.select(_on_top, inputs=sub_state, outputs=[t for t, _, _ in specs])
 
 
-def main():
-    global app
+def _launch_options(argv=None):
+    parser = argparse.ArgumentParser(description="PLASMA sensor acquisition")
+    parser.add_argument("--training", action="store_true", help="Enable MSense simulation and the separate Instructor Console")
+    parser.add_argument("--instructor-host", default="127.0.0.1", help="Instructor bind address (default: localhost)")
+    parser.add_argument("--instructor-port", type=int, default=7861)
+    options = parser.parse_args(argv)
+    if options.training:
+        if options.instructor_port == 7860 or not 1 <= options.instructor_port <= 65535:
+            parser.error("Choose an instructor port from 1–65535 other than trainee port 7860")
+        if options.instructor_host not in {"127.0.0.1", "localhost", "::1"} and not os.environ.get("PLASMA_INSTRUCTOR_TOKEN"):
+            parser.error("Set PLASMA_INSTRUCTOR_TOKEN before exposing the Instructor Console beyond localhost")
+    return options
+
+
+def main(argv=None):
+    global app, instructor_app
+    options = _launch_options(argv)
 
     try:
         signal.signal(signal.SIGTERM, _handle_sigterm)
     except ValueError:
         pass  # not the main thread (e.g. imported oddly) — atexit still covers normal exit
 
+    if options.training:
+        device_config.demo_mode = True
     plugins.load_plugins()
-    device_config.refresh_defaults()
+    if options.training:
+        # Runtime selection only; do not overwrite the lab's saved catalog.
+        if "MSense Demo (simulated)" not in plugins.catalog():
+            raise RuntimeError('Training simulator unavailable; install PLASMA with the msense extra and check plugin startup errors.')
+        device_config._active = ["MSense Demo (simulated)"]
+    else:
+        device_config.refresh_defaults()
 
     ip = IntegratedPanel()
-    # pl = PupilLabsDashboard()
+    if options.training:
+        from plasma.training import TrainingController, build_instructor_blocks
+        ip.training = TrainingController(ip)
+        instructor_app = build_instructor_blocks(ip.training)
 
     app = build_blocks(ip)
-    app.launch(inbrowser=True, share=False)
+    try:
+        if instructor_app is not None:
+            token = os.environ.get("PLASMA_INSTRUCTOR_TOKEN")
+            instructor_app.launch(server_name=options.instructor_host,
+                                  server_port=options.instructor_port,
+                                  auth=("instructor", token) if token else None,
+                                  share=False, inbrowser=False, prevent_thread_lock=True)
+            print(f"Instructor Console listening on {options.instructor_host}:{options.instructor_port}")
+        app.launch(inbrowser=True, share=False, server_port=7860 if options.training else None)
+    finally:
+        if options.training:
+            ip.training.close()
+            instructor_app.close()
 
 
 if __name__ == '__main__':

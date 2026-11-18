@@ -48,7 +48,8 @@ class TaskSequence:
     checks prevent a canceled timer from ending a subsequently started task.
     """
 
-    def __init__(self, emit, clock=time.monotonic, timer_factory=threading.Timer):
+    def __init__(self, emit, clock=time.monotonic, timer_factory=threading.Timer, *,
+                 on_complete=None, on_running_changed=None):
         self.emit = emit
         self.clock = clock
         self.timer_factory = timer_factory
@@ -61,6 +62,15 @@ class TaskSequence:
         self.generation = 0
         self.error = ""
         self.completion_id = 0
+        self.on_complete = on_complete
+        self.on_running_changed = on_running_changed
+
+    def _notify(self, callback, value, label):
+        if callback is not None:
+            try:
+                callback(value)
+            except Exception as exc:
+                self.error = "; ".join(filter(None, [self.error, f"{label}: {exc}"]))
 
     def load(self, tasks):
         with self.lock:
@@ -78,10 +88,15 @@ class TaskSequence:
             self.deadline = self.clock() + self.tasks[self.index].seconds
             self.status = "Running"
             self.generation += 1
-            self.timer = self.timer_factory(self.tasks[self.index].seconds,
-                                            self._expire, args=(self.generation,))
-            self.timer.daemon = True
-            self.timer.start()
+            self._notify(self.on_running_changed, True, "Sleep protection failed")
+            try:
+                self.timer = self.timer_factory(max(0, self.deadline - self.clock()),
+                                                self._expire, args=(self.generation,))
+                self.timer.daemon = True
+                self.timer.start()
+            except Exception:
+                self._end()
+                raise
 
     def _expire(self, generation):
         with self.lock:
@@ -99,10 +114,14 @@ class TaskSequence:
         self.status = status
         if status == "Completed":
             self.completion_id += 1
+            # Audio is queued independently of browser polling and LSL success.
+            self._notify(self.on_complete, self.completion_id, "Buzzer request failed")
         try:
             self.emit(f"[{self.tasks[self.index].name}] end")
         except Exception as exc:
-            self.error = f"End marker failed: {exc}"
+            self.error = "; ".join(filter(None, [self.error, f"End marker failed: {exc}"]))
+        finally:
+            self._notify(self.on_running_changed, False, "Sleep protection failed")
 
     def end(self):
         with self.lock:

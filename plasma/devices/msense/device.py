@@ -1,5 +1,5 @@
 from plasma.devices.template import PlasmaDevice, PlasmaMemo
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 import asyncio
 import concurrent.futures
 import atexit
@@ -18,6 +18,8 @@ from pylsl import StreamInfo, StreamOutlet, cf_double64
 from plasma.lsl_util import mark_plasma_origin
 import numpy as np
 import struct
+from dataclasses import asdict
+from types import MappingProxyType
 from plasma import __version__
 from plasma.config import device_config
 from plasma.app_context import app_context
@@ -107,6 +109,10 @@ SQC_AUTO_RECONNECT = True
 # event-loop thread (_start_ble_loop/_run_async below); BLE_OP_TIMEOUT_S
 # bounds how long any caller waits for one.
 BLE_OP_TIMEOUT_S = 15.0
+BLE_SCAN_TIMEOUT_S = 5.0
+BLE_RESCAN_TIMEOUT_S = 3.0
+BLE_CONNECT_PASSES = 2
+BLE_INITIAL_BATTERY_TIMEOUT_S = 3.0
 
 # On BlueZ (Linux), a failed or aborted reconnect leaves stale D-Bus
 # disconnect subscriptions and half-open ACLs behind. Observed on a Jetson:
@@ -160,6 +166,7 @@ class MotionSenseHRV(PlasmaDevice):
 
     def __init__(self, session_info, logger, tag):
         super().__init__(session_info, logger, tag)
+        self._connection_lock = threading.RLock()
 
         self._load_device_config()
 
@@ -271,8 +278,9 @@ class MotionSenseHRV(PlasmaDevice):
 
         The callback passes the client through so ``_on_unexpected_disconnect``
         can drop callbacks fired by a client we've already retired."""
+        native_device = getattr(self, "devices", {}).get(key, {}).get("ble_device")
         return BleakClient(
-            addr,
+            native_device if native_device is not None else addr,
             disconnected_callback=lambda c, nm=key: self._on_unexpected_disconnect(nm, c),
         )
 
@@ -307,6 +315,10 @@ class MotionSenseHRV(PlasmaDevice):
         try:
             subprocess.run(["bluetoothctl", "remove", addr],
                            timeout=6, capture_output=True, check=False)
+            # BlueZ invalidates the cached object when RemoveDevice runs.
+            for device in getattr(self, "devices", {}).values():
+                if str(device.get("address", "")).upper() == addr.upper():
+                    device.pop("ble_device", None)
             self._sqc_debug(addr, f"  BlueZ RemoveDevice ({reason})")
         except Exception as e:
             self._sqc_debug(addr, f"  BlueZ RemoveDevice failed: {e}")
@@ -375,112 +387,133 @@ class MotionSenseHRV(PlasmaDevice):
             future.cancel()
             raise TimeoutError(f"BLE op timed out after {timeout_s:.0f}s")
 
-    def scan_devices(self, filter_name="MSense"):
-        print("start scanning devices")
+    def scan_devices(self, filter_name="MSense", *, targets=None, timeout_s=BLE_SCAN_TIMEOUT_S, append=False):
+        from .ble_scan import discover_targets
+        targets = set(self.device_list) if targets is None else set(targets)
+        started = time.monotonic()
         self.info("start device scanning")
         self.ctl_state = "Start device scanning"
+        self._scan_error = None
         try:
-            found = self._run_async(BleakScanner.discover(timeout=5.0, return_adv=True),
-                                    timeout_s=10.0)
+            found = self._run_async(discover_targets(targets, timeout=timeout_s),
+                                    timeout_s=timeout_s + 5.0)
         except Exception as e:
             self.info(f"scan failed: {e}")
+            self._scan_error = str(e)
             found = {}
 
-        self.devices = {}
-        for i, (addr, (ble_device, adv)) in enumerate(found.items()):
-            identifier = ble_device.name or adv.local_name or ""
-            if filter_name in identifier:
-                addr_u = addr.upper()
-                self.info(f"{i}: {identifier} [{addr_u}]")
-                self.devices[addr_u] = {
-                    "name": f"{identifier} [{addr_u}]",
-                    "address": addr_u,
-                    "rssi": adv.rssi,
-                    "product": _product_from_name(identifier),
-                }
-
-        print(self.devices)
-        self.info("device scanning completed")
+        if not append:
+            self.devices = {}
+        for addr, (ble_device, adv) in found.items():
+            identifier = adv.local_name or ble_device.name or self.device_list.get(addr, "")
+            self.devices[addr] = {
+                "name": f"{identifier} [{addr}]", "address": addr,
+                "ble_device": ble_device, "rssi": adv.rssi,
+                "product": _product_from_name(identifier) or _product_from_name(self.device_list.get(addr, "")),
+            }
+        self.info(f"MSense scan: {len(found)}/{len(targets)} targets seen in {time.monotonic() - started:.2f}s")
         self.ctl_state = "Device scanning completed"
 
+    def _connections_guard(self):
+        # Laziness also supports standalone drivers constructed without __init__.
+        if not hasattr(self, "_connection_lock"):
+            self._connection_lock = threading.RLock()
+        return self._connection_lock
+
+    def _missing_connections(self):
+        return [addr for addr in self.device_list
+                if not getattr(self.active_devices.get(addr), "is_connected", False)]
+
+    def can_retry_initialization(self):
+        """Reuse real wristbands only when their saved setup is unchanged."""
+        if self.CONFIG_KEY != "msense" or getattr(self, "_sqc_threads_stopped", False):
+            return False
+        from . import config as mcfg
+        blob = device_config.get_plugin_config(self.CONFIG_KEY)
+        return (mcfg.active_devices(blob) == self.device_list
+                and mcfg.imu_stream_devices(blob) == self.imu_stream_devices
+                and mcfg.display_labels(blob) == self.display_labels)
+
+    def retry_initialization(self):
+        with self._connections_guard():
+            missing = self._missing_connections()
+            if missing:
+                self.scan_devices(targets=missing, append=True)
+                self.connect_devices()
+            return f"{len(self.device_list) - len(self._missing_connections())}/{len(self.device_list)} MSense wristbands connected"
+
+    def _connect_one(self, addr):
+        dev = self.devices[addr]
+        started = time.monotonic()
+        p = None
+        self.memo[addr].set_transition("Initializing...")
+        old = self._live_client.get(addr) or self.active_devices.get(addr)
+        if old is not None:
+            self._retire_client(addr, old)
+        try:
+            p = self._make_client(addr, addr)
+            self._live_client[addr] = p
+            self._run_async(p.connect())
+            if not p.is_connected:
+                raise ConnectionError("Bluetooth connection did not remain established")
+            connected_at = time.monotonic()
+            self.active_devices[addr] = p
+            if addr not in self.active_outlets:
+                self.active_outlets[addr] = MsenseOutlet(dev["name"], addr)
+            self._connect_rssi[addr] = dev.get("rssi")
+            self.caps[addr].update(product=dev.get("product"), nus=False, battery=False, acq_readback=False)
+            try:
+                self._ensure_mtu(p, addr)
+            except Exception as e:
+                self.info(f"{addr}: MTU negotiation error: {e}")
+            try:
+                self.register_nus_notify(p, addr)
+                self.caps[addr]["nus"] = True
+            except Exception as e:
+                self.info(f"NUS (ECG/PPG SQC) unavailable on {addr}: {e}")
+            self.caps[addr]["acq_readback"] = self._read_acq_enabled(addr, p) is not None
+            try:
+                raw = self._run_async(p.read_gatt_char(BATTERY_CHAR_UUID), timeout_s=BLE_INITIAL_BATTERY_TIMEOUT_S)
+                self.battery[addr] = raw[0]
+                self.caps[addr]["battery"] = True
+                self.memo[addr].set_latest(f"🔋 {raw[0]}%")
+            except Exception as e:
+                self.info(f"battery read unavailable on {addr}: {e}")
+            if not p.is_connected:
+                raise ConnectionError("Bluetooth link dropped during setup")
+            self.memo[addr].sts = "🟢 connected"
+            self.info(f"MSense {addr}: connect {connected_at - started:.2f}s; "
+                      f"setup {time.monotonic() - connected_at:.2f}s")
+        except Exception as e:
+            self.info(f"Error connecting to {addr}: {e}")
+            self.memo[addr].sts = "⛔ connect failed"
+            self.memo[addr].set_latest(str(e))
+            self.active_devices.pop(addr, None)
+            self._retire_client(addr, p)
+        finally:
+            self.memo[addr].clear_transition()
+
     def connect_devices(self):
-        # retire any clients left over from a previous connect pass before we
-        # drop our references to them, so their disconnect callbacks and BlueZ
-        # links don't leak
-        for name, c in list(self._live_client.items()):
-            self._retire_client(name, c)
-        self.active_devices = {}
-        self.active_outlets = {}
-        self._notify_state = {}
-        self._live_client = {}
-        self.ctl_state = "Start device connection"
-
-        # quick sanity check
-        for addr, blename in self.device_list.items():
-            self.info(f"Connecting to device {addr}")
-            # assert addr in self.devices.keys(), self.info(f"Target device not found {addr}")
-
-            if addr in self.devices.keys():
-                dev = self.devices[addr]
-                n = dev['name']
-
-                self.info(f"Starting to connect to {n}")
-                # gr.Info(f"Connecting to devices: {n}")
-                print(f'==== {n}')
-                print(f"=== {n} at {addr}")
-                p = None
-                self.memo[addr].set_transition("Initializing...")
-                try:
-                    try:
-                        # bind nm by default arg — otherwise the callback closes
-                        # over the loop variable and fires with whichever device
-                        # happened to be last when the loop finished
-                        p = self._make_client(addr, addr)
-                        self._live_client[addr] = p
-                        # bounded: bleak's connect() actually respects this
-                        # timeout (unlike simplepyble's, confirmed via a macOS
-                        # thread dump to hold the GIL hostage indefinitely) —
-                        # don't let one bad device freeze the whole connect loop
-                        self._run_async(p.connect())
-                        self.info(f"{n} connected")
-                        self.active_devices[addr] = p
-                        self.active_outlets[addr] = MsenseOutlet(n, addr)
-                        self._connect_rssi[addr] = dev.get("rssi")
-                        self.caps[addr]["product"] = dev.get("product")
-                        try:
-                            self._ensure_mtu(p, addr)
-                        except Exception as e:
-                            self.info(f"{n}: MTU negotiation error: {e}")
-                        try:
-                            self.register_nus_notify(p, addr)
-                            self.caps[addr]["nus"] = True
-                        except Exception as e:
-                            self.info(f"NUS (ECG/PPG SQC) unavailable on {n}: {e}")
-                        # can we read the acquisition-enable char back? (used to
-                        # confirm a collection stop — see _confirm_acq_stopped)
-                        self.caps[addr]["acq_readback"] = (
-                            self._read_acq_enabled(addr, p) is not None)
-                        try:
-                            raw = self._run_async(p.read_gatt_char(BATTERY_CHAR_UUID))
-                            pct = raw[0]
-                            self.battery[addr] = pct
-                            self.caps[addr]["battery"] = True
-                            self.memo[addr].set_latest(f"🔋 {pct}%")
-                        except Exception as e:
-                            self.info(f"battery read unavailable on {n}: {e}")
-                    except Exception as e:
-                        self.info(f"Error connecting to {n}: {e}")
-                        self.memo[addr].sts = "⛔ connect failed"
-                        self.active_devices.pop(addr, None)
-                        self.active_outlets.pop(addr, None)
-                        self._retire_client(addr, p)
-                finally:
-                    self.memo[addr].clear_transition()
-            else:
-                self.memo[addr].sts = "⛔ device not found"
-
-        # run the 1 Hz supervisor as soon as anything is connected — it now also
-        # does the auto-reconnect sweep, not just SQC stall recovery
+        """Connect only missing peers; keep healthy links/outlets across passes."""
+        started = time.monotonic()
+        with self._connections_guard():
+            for attempt in range(BLE_CONNECT_PASSES):
+                missing = self._missing_connections()
+                if not missing:
+                    break
+                if attempt:
+                    self.info(f"MSense setup retry: {len(missing)} missing wristband(s)")
+                    self.scan_devices(targets=missing, timeout_s=BLE_RESCAN_TIMEOUT_S, append=True)
+                for addr in missing:
+                    if addr in self.devices:
+                        self._connect_one(addr)
+                    else:
+                        error = getattr(self, "_scan_error", None)
+                        self.memo[addr].sts = "⛔ scan failed" if error else "⛔ device not found"
+                        self.memo[addr].set_latest(error or "Not advertising in the bounded scan windows; retry Initialize to scan missing wristbands")
+            count = len(self.device_list) - len(self._missing_connections())
+            self.ctl_state = f"MSense connections: {count}/{len(self.device_list)}"
+            self.info(f"{self.ctl_state}; connection passes {time.monotonic() - started:.2f}s")
         self._ensure_sqc_threads()
 
     def lsl_streams(self):
@@ -505,6 +538,38 @@ class MotionSenseHRV(PlasmaDevice):
                             self.session_info['ses_id'],
                             f"{self.session_info['participant_enc']}_{timestamp}")
 
+    def bind_participants(self, assignments):
+        """Freeze this run's physical-device mapping; never changes BLE identity."""
+        if getattr(self, "participant_assignment_active", False):
+            raise RuntimeError("Participant assignments are locked until Stop.")
+        self.participant_assignments = MappingProxyType(dict(assignments))
+        self.participant_log_dirs = {}
+        for addr, memo in self.memo.items():
+            if not hasattr(memo, "_participant_base_label"):
+                memo._participant_base_label = memo.label
+            assignment = assignments.get(addr)
+            memo.label = memo._participant_base_label + (
+                f" · Subject ID override: {assignment.subject_id}"
+                if assignment and assignment.overridden else "")
+
+    def _verify_participant(self, name):
+        a = self.participant_assignments[name]
+        p = self.active_devices.get(name)
+        if p is None or not p.is_connected:
+            raise RuntimeError(f"{a.label} [{name}]: not connected")
+        try:
+            self._run_async(p.write_gatt_char(CTL_ENC_CHAR_UUID,
+                struct.pack("<I", a.encoding), response=True))
+            back = struct.unpack("<I", self._run_async(p.read_gatt_char(CTL_ENC_CHAR_UUID)))[0]
+            if back != a.encoding:
+                raise RuntimeError(f"expected {a.encoding}, read back {back}")
+        except Exception as exc:
+            raise RuntimeError(f"{a.label} [{name}]: encoding verification failed: {exc}") from exc
+
+    def verify_participants(self):
+        for name in self.participant_assignments:
+            self._verify_participant(name)
+
     def start(self):
         self.log_dir = self._resolve_log_dir()
         print(f"create log dir {self.log_dir}")
@@ -518,23 +583,39 @@ class MotionSenseHRV(PlasmaDevice):
         self.info(f"Session ID = {self.session_info['ses_id']}")
         self.info(f"Participant encoding = {self.session_info['participant_enc']}")
 
+        assignments = getattr(self, "participant_assignments", {})
+        self.participant_assignment_active = bool(assignments)
+        if assignments:
+            self.participant_log_dirs = {
+                addr: os.path.join(self.log_dir, a.subject_id, self.CONFIG_KEY)
+                for addr, a in assignments.items()}
         for name, p in list(self.active_devices.items()):
             print(name, p.is_connected)
             self.memo[name].set_transition("Starting...")
             try:
                 try:
+                    output = self.participant_log_dirs[name] if assignments else self.log_dir
+                    os.makedirs(output, exist_ok=True)
+                    self.active_outlets[name].log_dir = output
                     self.collection_ctl(name, True)
-                    self.active_outlets[name].log_dir = self.log_dir
                     self.memo[name].sts = "🟢"
                 except Exception as e:
                     self.info(f"Error starting {name}: {e}")
                     self.memo[name].sts = "⚠️ start failed"
+                    if assignments:
+                        raise RuntimeError(f"{self.display_name(name)} [{name}]: start failed: {e}") from e
             finally:
                 self.memo[name].clear_transition()
 
         self.ctl_state = "Collection in progress"
 
     def stop(self):
+        with self._connections_guard():
+            return self._stop_locked()
+
+    def _stop_locked(self):
+        # Clear before any slow BLE call so a watchdog cannot resume this run.
+        self.participant_assignment_active = False
         gr.Info("🛑 Stop data collection...")
         self.info("Data collection stopped")
         try:
@@ -578,7 +659,7 @@ class MotionSenseHRV(PlasmaDevice):
         Two guards keep a BlueZ reconnect storm from flooding this (see
         DISC_LOG_DEBOUNCE_S): ignore callbacks from a client we've already
         retired, and collapse repeats to one per DISC_LOG_DEBOUNCE_S."""
-        if client is not None and self._live_client.get(name) not in (None, client):
+        if client is not None and self._live_client.get(name) is not client:
             return  # a retired / superseded client — not the live link
         now = time.monotonic()
         if now - self._disc_log_at.get(name, 0.0) < DISC_LOG_DEBOUNCE_S:
@@ -589,6 +670,11 @@ class MotionSenseHRV(PlasmaDevice):
             self.memo[name].sts = "🔌 disconnected"
 
     def disconnect(self):
+        self._sqc_threads_stopped = True
+        with self._connections_guard():
+            self._disconnect_clients()
+
+    def _disconnect_clients(self):
         self._journal_finished_sqc(reason="disconnected")  # close any open SQC markers
         try:
             self.stop_all_live_streams()
@@ -608,6 +694,16 @@ class MotionSenseHRV(PlasmaDevice):
         self._notify_state = {}
         self._live_client = {}
 
+    def dispose(self):
+        """Retire a replaced driver, including its BLE loop and exit hook."""
+        self.auto_reconnect = False
+        self.disconnect()
+        watchdog = getattr(self, "_sqc_wd_thread", None)
+        if watchdog is not None and watchdog is not threading.current_thread():
+            watchdog.join(timeout=2.0)
+        self._stop_ble_loop()
+        atexit.unregister(self._shutdown_cleanup)
+
     # ── manual controls (surfaced in the MSense > Control sub-tab) ───────────
 
     def reconnect_all(self):
@@ -620,7 +716,11 @@ class MotionSenseHRV(PlasmaDevice):
                     n += 1
             except Exception as e:
                 self.info(f"reconnect {name} failed: {e}")
-        return f"Reconnect attempted on {n} wristband(s)" if n else "All wristbands connected"
+        missing = set(getattr(self, "device_list", {})) - set(self.active_devices)
+        result = f"Reconnect attempted on {n} wristband(s)" if n else "All previously initialized wristbands connected"
+        if missing:
+            result += f"; {len(missing)} configured wristband(s) never connected — retry Initialize with collection stopped"
+        return result
 
     def erase_flash_data(self, passcode):
         """Full on-device flash erase — gated on the fixed passcode 68.
@@ -686,6 +786,12 @@ class MotionSenseHRV(PlasmaDevice):
 
     def write_enc(self, enc):
         """Write an arbitrary participant-encoding int to every wristband and read it back."""
+        with self._connections_guard():
+            if getattr(self, "participant_assignments", {}):
+                return "⛔ Per-wristband assignments are in use. Set subject overrides in Configuration → MSense wristbands."
+            return self._write_enc_unassigned(enc)
+
+    def _write_enc_unassigned(self, enc):
         try:
             val = int(enc)
         except (TypeError, ValueError):
@@ -769,10 +875,13 @@ class MotionSenseHRV(PlasmaDevice):
                 CTL_TIME_CHAR_UUID,
                 struct.pack("<Q", int(time.time())), response=True))
             # write participant hash
-            self.participant_byte = struct.pack("<I", self.session_info['participant_enc'])
-            self._run_async(peripheral.write_gatt_char(
-                CTL_ENC_CHAR_UUID,
-                self.participant_byte, response=True))
+            if getattr(self, "participant_assignments", {}):
+                self._verify_participant(name)
+            else:
+                self.participant_byte = struct.pack("<I", self.session_info['participant_enc'])
+                self._run_async(peripheral.write_gatt_char(
+                    CTL_ENC_CHAR_UUID,
+                    self.participant_byte, response=True))
 
         # acquisition enable/disable — one byte with response: 1 requests
         # acquisition, 0 requests a normal stop (SENSOR_STREAM_CENTRAL_HOWTO.md
@@ -1681,6 +1790,12 @@ class MotionSenseHRV(PlasmaDevice):
         return True
 
     def _reconnect_peripheral(self, name, reason):
+        with self._connections_guard():
+            if getattr(self, "_sqc_threads_stopped", False):
+                return
+            self._reconnect_locked(name, reason)
+
+    def _reconnect_locked(self, name, reason):
         """retire the old client → (Linux) make BlueZ forget the peer → wait →
         connect a fresh BleakClient → re-subscribe NUS (+ ENMO/IMU if a
         recording session is running). Runs on the watchdog thread. Both BLE
@@ -1705,11 +1820,16 @@ class MotionSenseHRV(PlasmaDevice):
         self._bluez_release_peer(addr, reason)
 
         time.sleep(1.5)
+        if getattr(self, "_sqc_threads_stopped", False):
+            return
 
         peripheral = self._make_client(addr, name)
         self._live_client[name] = peripheral
         try:
             self._run_async(peripheral.connect())
+            if getattr(self, "_sqc_threads_stopped", False):
+                self._retire_client(name, peripheral)
+                return
         except Exception as e:
             self.info(f"SQC: {name} reconnect FAILED ({reason}): {e}")
             self._sqc_debug(name, f"  reconnect FAILED/timed out: {e}")
@@ -1736,7 +1856,14 @@ class MotionSenseHRV(PlasmaDevice):
             self.register_battery(peripheral, name)
         except Exception as e:
             self._sqc_debug(name, f"  battery re-subscribe failed: {e}")
-        if getattr(self, "log_dir", None):
+        if getattr(self, "participant_assignment_active", False):
+            try:
+                self.collection_ctl(name, True)
+            except Exception as e:
+                self.info(f"{name}: assigned participant could not resume: {e}")
+                self.memo[name].sts = "⚠️ assigned recording could not resume"
+                return
+        elif getattr(self, "log_dir", None):
             try:
                 self.register_enmo(peripheral, name)
             except Exception as e:
@@ -1860,6 +1987,10 @@ class MotionSenseHRV(PlasmaDevice):
         `suffix` marks partial (quick-mode) captures on disk, e.g. "_p5s"."""
         ts = time.strftime("%y%m%d_%H%M%S")
         base = getattr(self, "log_dir", None) or os.path.join(app_context().data_dir, "sqc_snapshots", ts)
+        base = getattr(self, "participant_log_dirs", {}).get(name, base)
+        assignment = getattr(self, "participant_assignments", {}).get(name)
+        if assignment:
+            provenance = {**provenance, "participant": asdict(assignment)}
         os.makedirs(base, exist_ok=True)
 
         safe = str(name).replace(":", "-").replace(" ", "_")

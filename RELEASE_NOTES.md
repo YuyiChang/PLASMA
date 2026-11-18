@@ -4,7 +4,94 @@
 
 ---
 
+## Unreleased
+
+### 📂 Recent task CSVs
+
+- **Reload previously uploaded task CSVs from Journaler or Focus.** The ten most
+  recent valid uploads are kept as local copies and remain available after a
+  restart or upload-cache cleanup. Choose a file under Previous task CSVs and
+  press Load selected CSV. Reloading ends a running task and prepares the first
+  row without starting the timer; invalid files leave the current sequence intact.
+
+### 👥 Multiple MSense participants
+
+- **Set per-wristband participant IDs in Configuration → MSense wristbands.**
+  A saved Available participant IDs list populates each wristband’s Subject ID
+  override dropdown (preserving leading zeroes). An Enable participant ID overrides
+  toggle controls their use; Use dashboard Subject ID inherits the default.
+  The Session ID stays shared. Saved changes
+  apply at the next Start without reconnecting, and active recordings retain
+  their frozen IDs. Simulated MSense supports the same configuration. Memo
+  identifies overridden subjects only when used; the separate dashboard
+  assignment controls have been removed.
+- **Group Start verifies every wristband's encoding before acquisition.** Missing
+  devices and failed readbacks abort Start; acquisition failures trigger stop
+  attempts for devices already started. Reconnects retain the frozen assignment.
+- **Group recordings save a participant manifest, extractor-compatible encoding
+  table, and a participant-map journal marker in the combined XDF.** Local data
+  and SQC captures use participant folders, and Memo labels show the participant.
+  Existing single-participant recording paths remain available with the option
+  off. See [the workflow guide](docs/msense-participants.md).
+
+### 🔔 Background task alarms
+
+- **Journaler alarms now play from the Python backend.** Natural task expiry
+  directly queues the two-tone sound on the computer running PLASMA, independent
+  of browser visibility, polling, or Web Audio permission. Journaler and Focus
+  share one audio worker; returning to a browser page does not duplicate alarms.
+  **Test buzzer** uses the same host audio path without emitting LSL markers.
+- **macOS idle-sleep protection covers active tasks and queued alarms.** Display
+  sleep remains allowed, and protection is released on task end or shutdown.
+  Forced sleep and muted/disconnected outputs remain outside PLASMA's control.
+  Playback failures are reported in the task view and session log without
+  preventing task-end markers or recorder cleanup. Windows uses `winsound`;
+  Linux uses an installed `paplay` or `aplay` player.
+
+### 📶 MSense connection setup
+
+- **More reliable multi-wristband initialization, with macOS in focus.** Reuse
+  scanned native Bluetooth device objects rather than triggering implicit scans
+  for every client. Discovery recognizes configured addresses even in nameless
+  advertisements, normalizes UUID/MAC case and whitespace, and stops early when
+  all configured names arrive. A bounded second scan/connection pass retries
+  only missing or failed peers.
+- **Retry Initialize without disconnecting healthy wristbands.** Unchanged real
+  MSense configurations reuse existing connections and LSL outlets. Changed
+  configurations and simulated devices still reinitialize fully. Initialization
+  is blocked during collection, connection operations are serialized against
+  watchdog reconnects, and stale client callbacks no longer create false
+  disconnect reports. Replaced drivers release their BLE loop and exit hook.
+- **Setup diagnostics now show scan and per-device connection/setup times.**
+  Optional initial battery reads have a shorter timeout, and scan failures are
+  distinguished from devices that were not found. These changes are covered by
+  simulated six-wristband regressions; physical six-device reliability and timing
+  still need verification on the lab's Macs and wristbands.
+
+### 🎓 RA training
+
+- **New Instructor Console for RA training.** Launch with `plasma --training`
+  to run the normal trainee interface on port 7860 and a separate mentor UI on
+  port 7861. Introduce immediate or delayed disconnects, held-offline conditions,
+  live-stream stalls, next-SQC stalls, and ignored acquisition-stop commands.
+  Restore selected/all sensors or cancel pending incidents, save private mentor
+  assessments, and review an event timeline and persistent exercise log.
+  Training markers use the existing PLASMA LSL outlet; coaching notes stay
+  private. Only simulated MSense devices accept incidents, and reinitialization
+  cancels pending triggers before replacing devices. Remote instructor access
+  requires `PLASMA_INSTRUCTOR_TOKEN`. See [RA training](docs/playbook/training.md).
+
+---
+
 ## 🚀 v2.3.1
+
+### 🧪 MSense demo mode
+
+- **First-use demo wristbands now match the configuration editor.** When no
+  demo wristband list has been saved, Initialize connects the default PPG and
+  ECG simulators without requiring **Apply demo wristbands** first. Previously
+  the editor showed those defaults while the driver initialized no devices.
+  Explicitly empty lists and disabled wristbands remain respected.
 
 ### 🩹 macOS LSL discovery
 

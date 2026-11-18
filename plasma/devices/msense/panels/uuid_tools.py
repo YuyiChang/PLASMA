@@ -17,7 +17,8 @@ def _blob_devices():
 
 def _save_devices(records):
     from plasma.config import device_config
-    device_config.update_plugin_config("msense", {"devices": _normalize_msense(records)})
+    device_config.update_plugin_config("msense", {**device_config.get_plugin_config("msense"),
+                                                  "devices": _normalize_msense(records)})
 
 
 def build_uuid_extractor(ip=None):
