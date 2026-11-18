@@ -10,6 +10,7 @@ import threading
 from plasma.lsl_session import encode_participant, SessionInfo
 from plasma.journal import open_journal_outlet
 from plasma.task_sequence import TaskSequence, read_tasks
+from plasma.task_csv_history import TaskCsvHistory
 from plasma.task_buzzer import TaskBuzzer
 from plasma.participant_assignments import ParticipantAssignments, session_locked
 import logging, datetime, time
@@ -197,6 +198,7 @@ class IntegratedPanel(ParticipantAssignments):
         self.task_sequence = TaskSequence(self._sequence_marker,
                                          on_complete=self.task_buzzer.complete,
                                          on_running_changed=self.task_buzzer.set_task_running)
+        self.task_csv_history = TaskCsvHistory(os.path.join(app_context().home, "task_sequences"))
 
         # built-in LSL -> XDF recorder (default on; see interface() checkbox).
         # Created fresh on each Start, kept after Stop so the memo panel can
@@ -550,7 +552,7 @@ class IntegratedPanel(ParticipantAssignments):
     def _task_view_refresh(self, last):
         snap = self.task_sequence.snapshot()
         task = snap["task"]
-        name = _html.escape(task.name) if task else "Upload a CSV in Journaler to begin"
+        name = _html.escape(task.name) if task else "Upload a CSV in Journaler or load a previous CSV to begin"
         status = _html.escape(snap["status"])
         error = _html.escape(snap["error"])
         if self.journal_outlet is None:
@@ -574,11 +576,23 @@ class IntegratedPanel(ParticipantAssignments):
 
     def _task_sequence_interface(self, focus=False):
         tab = "Focus" if focus else "Session Dashboard"
+        if not hasattr(self, "task_csv_history"):
+            self.task_csv_history = TaskCsvHistory(os.path.join(app_context().home, "task_sequences"))
+        history = self.task_csv_history
         if not focus:
             gr.Markdown("Drop a CSV with **Condition**, **Move_Instruction**, and **load** "
                         "(seconds). Start collection first to save markers to XDF. "
                         "All connected viewers share this task sequence.")
-            upload = gr.File(label="Task sequence CSV", file_types=[".csv"], type="filepath")
+            upload = gr.File(label="Task sequence CSV", file_types=[".csv"], type="filepath",
+                             elem_id="plasma-task-upload")
+        with gr.Row():
+            choices = history.choices()
+            recent = gr.Dropdown(choices=choices, value=choices[0][1] if choices else None,
+                                 label="Previous task CSVs", interactive=True)
+            reload_csv = gr.Button("Load selected CSV", scale=0)
+            refresh_csvs = gr.Button("Refresh CSV list", scale=0)
+        gr.Markdown("The 10 most recent valid CSV uploads are saved for reuse, including after restart. "
+                    "Loading a CSV ends the current task and returns to its first row without starting it.")
         display = gr.HTML()
         instruction = gr.Textbox(label="Move instruction", lines=4 if focus else 6,
                                  max_lines=6 if focus else 20, interactive=False)
@@ -607,12 +621,35 @@ class IntegratedPanel(ParticipantAssignments):
         test_buzzer.click(test_sound, inputs=last, outputs=outputs, show_progress="hidden")
 
         def load(path, last):
+            saved = None
             try:
                 tasks = read_tasks(path) if path else []
                 self.task_sequence.load(tasks)
             except (ValueError, OSError, UnicodeError, csv.Error) as exc:
                 gr.Warning(f"Cannot load task CSV: {exc}")
-            return self._task_view_refresh(last)
+            else:
+                if path:
+                    try:
+                        saved = history.remember(path)
+                    except (ValueError, OSError, UnicodeError, csv.Error) as exc:
+                        gr.Warning(f"Task CSV loaded, but could not save it for reuse: {exc}")
+            return [*self._task_view_refresh(last), gr.update(choices=history.choices(), value=saved)]
+
+        def refresh_recent(selected):
+            choices = history.choices()
+            ids = {identifier for _, identifier in choices}
+            return gr.update(choices=choices, value=selected if selected in ids
+                             else choices[0][1] if choices else None)
+
+        def load_recent(selected, last):
+            try:
+                self.task_sequence.load(history.load(selected))
+            except (ValueError, OSError, UnicodeError, csv.Error) as exc:
+                gr.Warning(f"Cannot load previous task CSV: {exc}")
+            return [*self._task_view_refresh(last), refresh_recent(selected)]
+
+        refresh_csvs.click(refresh_recent, inputs=recent, outputs=recent, show_progress="hidden")
+        reload_csv.click(load_recent, inputs=[recent, last], outputs=[*outputs, recent], show_progress="hidden")
 
         def action(name):
             def callback(last):
@@ -629,7 +666,7 @@ class IntegratedPanel(ParticipantAssignments):
             return callback
 
         if not focus:
-            upload.change(load, inputs=[upload, last], outputs=outputs, show_progress="hidden")
+            upload.change(load, inputs=[upload, last], outputs=[*outputs, recent], show_progress="hidden")
         for button, name in [(previous, "previous"), (following, "next"),
                              (start, "start"), (end, "end")]:
             button.click(action(name), inputs=last, outputs=outputs, show_progress="hidden")

@@ -6,6 +6,14 @@
 
 ## Unreleased
 
+### 📂 Recent task CSVs
+
+- **Reload previously uploaded task CSVs from Journaler or Focus.** The ten most
+  recent valid uploads are kept as local copies and remain available after a
+  restart or upload-cache cleanup. Choose a file under Previous task CSVs and
+  press Load selected CSV. Reloading ends a running task and prepares the first
+  row without starting the timer; invalid files leave the current sequence intact.
+
 ### 👥 Multiple MSense participants
 
 - **Set per-wristband participant IDs in Configuration → MSense wristbands.**
