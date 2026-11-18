@@ -3,25 +3,47 @@ selection helpers the driver reads, and the "MSense wristbands" section of the
 Configuration tab.
 
 The blob persisted under ``plugins.msense`` in ``plasma_device_config.json`` is
-``{"devices": [ {Name, Nickname, UUID / MAC Address, Enabled, IMU Stream}, ... ]}``.
+``{"devices": [{Name, Nickname, UUID / MAC Address, Subject ID override,
+Enabled, IMU Stream}, ...], "participant_id_override_enabled": false}``.
 
 This module must NOT import ``plasma.config`` — ``config_section`` receives the
 ``DeviceConfig`` instance as ``host`` and reads/writes it through
 ``host.get_plugin_config`` / ``host.update_plugin_config``.
 """
 import json
+import re
 
 import gradio as gr
 import pandas as pd
 
-_MSENSE_COLUMNS = ["Name", "Nickname", "UUID / MAC Address", "Enabled", "IMU Stream"]
+SUBJECT_OVERRIDE = "Subject ID override"
+OVERRIDE_ENABLED = "participant_id_override_enabled"
+_MSENSE_COLUMNS = ["Name", "Nickname", "UUID / MAC Address", SUBJECT_OVERRIDE, "Enabled", "IMU Stream"]
+
+
+def subject_override(value):
+    """Preserve leading zeroes; only blank or exactly four ASCII digits."""
+    if value is None or pd.isna(value):
+        return ""
+    value = str(value).strip()
+    if value and not re.fullmatch(r"[0-9]{4}", value):
+        raise ValueError("Subject ID override must be exactly four digits (e.g. 1002 or 0007), or blank.")
+    return value
+
+
+def participant_overrides(blob):
+    if not isinstance(blob, dict) or not blob.get(OVERRIDE_ENABLED, False):
+        return {}
+    values = {str(r["UUID / MAC Address"]).strip().upper(): subject_override(r.get(SUBJECT_OVERRIDE))
+              for r in _records(blob) if _row_ok(r)}
+    return {addr: value for addr, value in values.items() if value}
 
 # label -> {"name", "address"} for the most recent Configuration-tab scan
 _scan_cache = {}
 
 
 def _normalize_msense(raw):
-    """Coerce a list of wristband records to the canonical 5-field shape —
+    """Coerce wristband records to the canonical shape —
     Nickname blank when missing, Enabled defaulting on, IMU Stream (demo
     firmware, not every unit has it) defaulting off."""
     if isinstance(raw, list):
@@ -30,6 +52,7 @@ def _normalize_msense(raw):
                 "Name": rec.get("Name", ""),
                 "Nickname": rec.get("Nickname", "") or "",
                 "UUID / MAC Address": rec.get("UUID / MAC Address", ""),
+                SUBJECT_OVERRIDE: subject_override(rec.get(SUBJECT_OVERRIDE)),
                 "Enabled": bool(rec.get("Enabled", True)),
                 "IMU Stream": bool(rec.get("IMU Stream", False)),
             }
@@ -124,7 +147,7 @@ def merge_device_info_into_blob(blob, path, overwrite=False):
     if not scanned:
         return blob, f"No usable entries in {path}"
     records, msg = merge_msense_records(_records(blob), scanned, overwrite)
-    return {"devices": records}, msg
+    return {**(blob or {}), "devices": records}, msg
 
 
 def _msense_records_from_df(msense_df):
@@ -137,6 +160,7 @@ def _msense_records_from_df(msense_df):
             "Name": row.get("Name", ""),
             "Nickname": _nickname(row),
             "UUID / MAC Address": row.get("UUID / MAC Address", ""),
+            SUBJECT_OVERRIDE: subject_override(row.get(SUBJECT_OVERRIDE)),
             "Enabled": bool(row["Enabled"]) if pd.notna(row.get("Enabled", True)) else True,
             "IMU Stream": bool(row["IMU Stream"]) if pd.notna(row.get("IMU Stream", False)) else False,
         }
@@ -197,7 +221,8 @@ def display_labels(blob):
 # ── Configuration-tab section ──────────────────────────────────────────────────
 
 def config_section(host):
-    devices = _records(host.get_plugin_config("msense"))
+    blob = host.get_plugin_config("msense")
+    devices = _normalize_msense(_records(blob))
 
     with gr.Accordion("MSense wristbands", open=True):
         gr.Markdown(
@@ -210,8 +235,14 @@ def config_section(host):
             "apart on screen.\n\n"
             "**Scan** for wristbands in range, tick the ones to add, then Append (keep the current "
             "list) or Overwrite, then **Apply MSense wristbands**. Scan before initializing devices "
-            "on the Session dashboard — the Mac has a single BLE radio, and edits here only take "
-            "effect the next time you Initialize."
+            "on the Session dashboard — the Mac has a single BLE radio. Device edits take "
+            "effect at Initialize; saved subject overrides take effect at the next Start "
+            "without reconnecting.\n\n"
+            "Enter four-digit **Available participant IDs** once, then select an ID in each "
+            "**Subject ID override** dropdown. **Use dashboard Subject ID** inherits the default. "
+            "Session ID remains shared. "
+            "Turn on the toggle and press **Apply MSense wristbands** to use overrides. "
+            "Changes during recording apply to the next run."
         )
         with gr.Row():
             btn_scan = gr.Button("🔍 Scan for MSense wristbands (5 s)")
@@ -219,35 +250,10 @@ def config_section(host):
                 ["Append (skip addresses already listed)", "Overwrite table"],
                 value="Append (skip addresses already listed)",
                 label="Add selected as",
+                interactive=True,
             )
             btn_add = gr.Button("➕ Add selected", variant="primary")
-        scan_results = gr.CheckboxGroup(choices=[], value=[], label="Discovered wristbands")
-        msense_df = gr.Dataframe(
-            value=pd.DataFrame(devices, columns=_MSENSE_COLUMNS),
-            headers=_MSENSE_COLUMNS,
-            datatype=["str", "str", "str", "bool", "bool"],
-            row_count=(len(devices), "dynamic"),
-            col_count=(5, "fixed"),
-            interactive=True,
-        )
-        btn_apply = gr.Button("Apply MSense wristbands", variant="primary")
-        status = gr.Textbox(interactive=False, value="", show_label=False, container=False)
-
-        def _apply(df):
-            records = _msense_records_from_df(df)
-            host.update_plugin_config("msense", {"devices": records})
-            n_enabled = sum(1 for rec in records if rec["Enabled"])
-            msg = f"Saved — {n_enabled}/{len(records)} MSense wristband(s) enabled"
-            # the address is the identity key — two enabled rows with the same
-            # one are treated as one device (last wins)
-            addrs = [rec["UUID / MAC Address"].strip() for rec in records
-                     if rec["Enabled"] and rec["UUID / MAC Address"].strip()]
-            dupes = sorted({a for a in addrs if addrs.count(a) > 1})
-            if dupes:
-                msg += (f" — ⚠️ {', '.join(dupes)} listed more than once; "
-                        f"only the last row for each address is used")
-            return msg
-
+        scan_results = gr.CheckboxGroup(choices=[], value=[], label="Discovered wristbands", interactive=True)
         def _scan():
             from plasma.devices.msense.ble_scan import scan_msense
             _scan_cache.clear()
@@ -264,16 +270,20 @@ def config_section(host):
                    if labels else "No MSense wristbands found (in range and advertising?)")
             return gr.update(choices=labels, value=labels), msg
 
-        def _add(selected_labels, mode, df):
+        def _add(selected_labels, mode, existing):
             picked = [_scan_cache[l] for l in (selected_labels or []) if l in _scan_cache]
             if not picked:
-                return gr.update(), "Nothing selected to add"
-            existing = _msense_records_from_df(df)
+                return existing, "Nothing selected to add"
             records, msg = merge_msense_records(
                 existing, picked, overwrite=str(mode).startswith("Overwrite"))
-            return (gr.update(value=pd.DataFrame(records, columns=_MSENSE_COLUMNS)),
-                    f"{msg} — press Apply MSense wristbands to save")
+            return records, f"{msg} — press Apply MSense wristbands to save"
 
-        btn_apply.click(_apply, inputs=msense_df, outputs=status)
+        from .wristband_editor import build_wristband_editor
+        with gr.Column(elem_id="msense-wristbands-config"):
+            status = build_wristband_editor(
+                host, "msense", devices, _MSENSE_COLUMNS,
+                normalize=lambda rows: _msense_records_from_df(pd.DataFrame(rows)),
+                new_record=lambda _: _normalize_msense([{"Name": "", "UUID / MAC Address": ""}])[0],
+                apply_label="Apply MSense wristbands",
+                scan_action=(btn_add, [scan_results, add_mode], _add))
         btn_scan.click(_scan, outputs=[scan_results, status])
-        btn_add.click(_add, inputs=[scan_results, add_mode, msense_df], outputs=[msense_df, status])

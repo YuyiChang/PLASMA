@@ -75,8 +75,10 @@ def build_control_tab(ip=None):
 
                 @session_locked
                 def write(panel):
-                    if getattr(panel, "participant_assignment_mode", False) or panel._assignments_running():
-                        return "⛔ Use the Session dashboard participant assignments; bulk encoding is locked."
+                    if panel._assignments_running():
+                        return "⛔ Bulk encoding is locked during collection."
+                    if panel._load_participant_overrides():
+                        return "⛔ Subject ID overrides are enabled in Configuration → MSense wristbands; bulk encoding is locked."
                     dev = _msense_device(panel)
                     return dev.write_enc(v) if dev is not None else _NO_DEV
 

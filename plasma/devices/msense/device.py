@@ -549,7 +549,8 @@ class MotionSenseHRV(PlasmaDevice):
                 memo._participant_base_label = memo.label
             assignment = assignments.get(addr)
             memo.label = memo._participant_base_label + (
-                f" · {assignment.subject_id}" if assignment else "")
+                f" · Subject ID override: {assignment.subject_id}"
+                if assignment and assignment.overridden else "")
 
     def _verify_participant(self, name):
         a = self.participant_assignments[name]
@@ -787,7 +788,7 @@ class MotionSenseHRV(PlasmaDevice):
         """Write an arbitrary participant-encoding int to every wristband and read it back."""
         with self._connections_guard():
             if getattr(self, "participant_assignments", {}):
-                return "⛔ Per-wristband assignments are in use. Use the Session dashboard."
+                return "⛔ Per-wristband assignments are in use. Set subject overrides in Configuration → MSense wristbands."
             return self._write_enc_unassigned(enc)
 
     def _write_enc_unassigned(self, enc):

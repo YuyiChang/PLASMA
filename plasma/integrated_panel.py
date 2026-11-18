@@ -442,14 +442,10 @@ class IntegratedPanel(ParticipantAssignments):
                         ses_name = gr.Text(default_ses, label="Session ID", info="Format: ses-YY, Y is integer")
                         subject_enc = gr.Number(self.get_participant_encoding(default_sub, default_ses), label='Participant encoding (Read-only)', interactive=False,
                                                 info="Format: XXXXYY")
-                        sub_change = sub_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
-                        ses_change = ses_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
+                        sub_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
+                        ses_name.change(self.get_participant_encoding, inputs=[sub_name, ses_name], outputs=subject_enc)
                         _ = self.get_participant_encoding(default_sub, default_ses)
 
-
-                self._participant_interface(sub_name, ses_name)
-                sub_change.success(self.assignment_preview, outputs=self._assignment_outputs)
-                ses_change.success(self.assignment_preview, outputs=self._assignment_outputs)
 
                 with gr.Accordion(label="Device initialization", open=True):
                     device_grp = gr.CheckboxGroup(choices=self.device_list, value=self.device_list, label="Select sensor(s)")
@@ -466,8 +462,7 @@ class IntegratedPanel(ParticipantAssignments):
                         btn_init = gr.Button("🚦Initialize selected device(s)")
                         btn_refresh = gr.Button("Refresh list")
 
-                    btn_init.click(self.init_devices, inputs=device_grp).then(
-                        self.assignment_preview, outputs=self._assignment_outputs)
+                    btn_init.click(self.init_devices, inputs=device_grp)
                     btn_refresh.click(self._refresh_devices, outputs=device_grp)
 
             with gr.Column():
@@ -477,10 +472,8 @@ class IntegratedPanel(ParticipantAssignments):
                         self.btn_start = gr.Button("Start▶️")
                         self.btn_stop = gr.Button("Stop🛑")
                                         
-                    self.btn_start.click(self.start_collection).then(
-                        self.assignment_preview, outputs=self._assignment_outputs)
-                    self.btn_stop.click(self.stop_collection).then(
-                        self.assignment_preview, outputs=self._assignment_outputs)
+                    self.btn_start.click(self.start_collection)
+                    self.btn_stop.click(self.stop_collection)
 
                 with gr.Accordion(label="🗒️ Journaler", open=False):
                     with gr.Tabs():
@@ -744,8 +737,9 @@ class IntegratedPanel(ParticipantAssignments):
         if self._assignments_running():
             raise ValueError("Collection is already running. Stop before starting another run.")
         self._participant_manifest = None
-        if getattr(self, "participant_assignment_mode", False):
-            return self._start_assigned_collection()
+        overrides = self._load_participant_overrides()
+        if overrides:
+            return self._start_assigned_collection(self._compile_assignments(overrides))
         for dev in self._assignment_devices():
             dev.bind_participants({})
         self.sts = "Starting..."

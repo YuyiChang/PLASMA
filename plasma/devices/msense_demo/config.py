@@ -3,7 +3,8 @@
 The blob persisted under ``plugins.msense_demo`` in
 ``plasma_device_config.json`` is::
 
-    {"devices": [ {Name, Nickname, Sensor, Enabled, IMU Stream, Fault}, ... ]}
+    {"devices": [{Name, Nickname, Sensor, Subject ID override, Enabled,
+                  IMU Stream, Fault}, ...], "participant_id_override_enabled": false}
 
 ``Sensor`` is ``"PPG"`` or ``"ECG"`` (a real unit is one or the other). ``Fault``
 is one of :data:`plasma.devices.msense_demo.faults.FAULT_IDS`.
@@ -18,8 +19,9 @@ import gradio as gr
 import pandas as pd
 
 from plasma.devices.msense_demo import faults as _faults
+from plasma.devices.msense.config import SUBJECT_OVERRIDE, OVERRIDE_ENABLED, subject_override
 
-_COLUMNS = ["Name", "Nickname", "Sensor", "Enabled", "IMU Stream", "Fault"]
+_COLUMNS = ["Name", "Nickname", "Sensor", SUBJECT_OVERRIDE, "Enabled", "IMU Stream", "Fault"]
 _SENSORS = ("PPG", "ECG")
 
 
@@ -45,6 +47,7 @@ def _normalize_row(rec):
         "Name": str(rec.get("Name", "")).strip(),
         "Nickname": str(rec.get("Nickname", "") or "").strip(),
         "Sensor": sensor if sensor in _SENSORS else "PPG",
+        SUBJECT_OVERRIDE: subject_override(rec.get(SUBJECT_OVERRIDE)),
         "Enabled": bool(rec.get("Enabled", True)),
         "IMU Stream": bool(rec.get("IMU Stream", False)),
         "Fault": _faults.normalize(rec.get("Fault")),
@@ -89,6 +92,13 @@ def device_faults(blob):
     return {_addr(r): r["Fault"] for r in _enabled(blob)}
 
 
+def participant_overrides(blob):
+    if not isinstance(blob, dict) or not blob.get(OVERRIDE_ENABLED, False):
+        return {}
+    values = {_addr(r): r[SUBJECT_OVERRIDE] for r in _enabled(blob)}
+    return {addr: value for addr, value in values.items() if value}
+
+
 # ── Configuration-tab section ────────────────────────────────────────────────
 
 def _records_from_df(df):
@@ -101,6 +111,7 @@ def _records_from_df(df):
             "Name": name,
             "Nickname": row.get("Nickname", ""),
             "Sensor": row.get("Sensor", "PPG"),
+            SUBJECT_OVERRIDE: row.get(SUBJECT_OVERRIDE),
             "Enabled": row.get("Enabled", True) if pd.notna(row.get("Enabled", True)) else True,
             "IMU Stream": row.get("IMU Stream", False) if pd.notna(row.get("IMU Stream", False)) else False,
             "Fault": row.get("Fault", _faults.NO_FAULT),
@@ -132,30 +143,15 @@ def config_section(host):
             "**Sensor** is `PPG` or `ECG`. **Fault** injects a failure:\n\n"
             f"{fault_lines}"
         )
-        df = gr.Dataframe(
-            value=pd.DataFrame(devices, columns=_COLUMNS),
-            headers=_COLUMNS,
-            datatype=["str", "str", "str", "bool", "bool", "str"],
-            row_count=(len(devices), "dynamic"),
-            col_count=(len(_COLUMNS), "fixed"),
-            interactive=True,
-        )
-        with gr.Row():
-            btn_add = gr.Button("➕ Add demo wristband")
-            btn_apply = gr.Button("Apply demo wristbands", variant="primary")
-        status = gr.Textbox(interactive=False, value="", show_label=False, container=False)
-
-        def _add(cur_df):
-            rows = _records_from_df(cur_df)
-            rows.append(_default_row(len(rows)))
-            return (gr.update(value=pd.DataFrame(rows, columns=_COLUMNS)),
-                    "Added — press Apply to save")
-
-        def _apply(cur_df):
-            rows = _records_from_df(cur_df)
-            host.update_plugin_config("msense_demo", {"devices": rows})
-            n_on = sum(1 for r in rows if r["Enabled"])
-            return f"Saved — {n_on}/{len(rows)} demo wristband(s) enabled"
-
-        btn_add.click(_add, inputs=df, outputs=[df, status])
-        btn_apply.click(_apply, inputs=df, outputs=status)
+        gr.Markdown("Enter four-digit **Available participant IDs** once, then select an ID "
+                    "in each **Subject ID override** dropdown. **Use dashboard Subject ID** "
+                    "inherits the default. Enable overrides and press **Apply demo wristbands**; "
+                    "saved overrides apply at the next Start without reconnecting. "
+                    "Changes during recording affect the next run.")
+        from plasma.devices.msense.wristband_editor import build_wristband_editor
+        with gr.Column(elem_id="msense-demo-wristbands-config"):
+            build_wristband_editor(
+                host, "msense_demo", devices, _COLUMNS,
+                normalize=lambda rows: _records_from_df(pd.DataFrame(rows)),
+                new_record=_default_row, apply_label="Apply demo wristbands",
+                choices={"Sensor": list(_SENSORS), "Fault": list(_faults.FAULTS)})

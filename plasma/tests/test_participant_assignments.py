@@ -12,14 +12,23 @@ from plasma.devices.msense.device import CTL_ENC_CHAR_UUID
 from plasma.devices.msense_demo.device import MSenseDemo, CTL_STARTSTOP_CHAR_UUID
 from plasma.integrated_panel import IntegratedPanel
 from plasma.lsl_session import SessionInfo
-from plasma.participant_assignments import identity, device_key
+from plasma.participant_assignments import identity
+from plasma.devices.msense.config import SUBJECT_OVERRIDE, OVERRIDE_ENABLED
+
+
+def _assign(dev, address, value):
+    from plasma.devices.msense_demo.config import _synth_addr
+    blob = device_config.plugins[dev.CONFIG_KEY]
+    for row in blob["devices"]:
+        if _synth_addr(row["Name"], row.get("Nickname", "")) == address:
+            row[SUBJECT_OVERRIDE] = value
 
 
 @pytest.fixture
 def group(tmp_path, monkeypatch):
     monkeypatch.setitem(device_config.plugins, "msense_demo", {"devices": [
-        {"Name": "Band A", "Sensor": "PPG", "Enabled": True, "IMU Stream": False},
-        {"Name": "Band B", "Sensor": "ECG", "Enabled": True, "IMU Stream": False}]})
+        {"Name": "Band A", "Sensor": "PPG", "Enabled": True, "IMU Stream": False, SUBJECT_OVERRIDE: "1001"},
+        {"Name": "Band B", "Sensor": "ECG", "Enabled": True, "IMU Stream": False}], OVERRIDE_ENABLED: True})
     p = IntegratedPanel.__new__(IntegratedPanel)
     p.log_root = str(tmp_path / "data")
     p.logger = logging.getLogger("participant-test")
@@ -28,7 +37,6 @@ def group(tmp_path, monkeypatch):
     p.journal_outlet, p.task_sequence = Mock(), Mock()
     d = MSenseDemo(p.session_info, logger=None, tag="Demo")
     p.available_devices = [d]
-    p.set_assignment_mode(True)
     yield p, d, list(d.device_list)
     d.stop()
     d.dispose()
@@ -51,7 +59,7 @@ def test_invalid_identity(sub, ses):
 
 def test_start_freezes_verified_ids_before_acquisition_and_routes_files(group, monkeypatch):
     p, d, (a, b) = group
-    p.assign_participants([device_key(d.CONFIG_KEY, b)], "sub-1002")
+    _assign(d, b, "1002")
     # Editing after Initialize must require no new connection or outlet.
     clients, outlets = dict(d.active_devices), dict(d.active_outlets)
     seen = []
@@ -87,19 +95,19 @@ def test_start_freezes_verified_ids_before_acquisition_and_routes_files(group, m
         assert os.path.dirname(path) == folder
         sidecar = json.load(open(os.path.splitext(path)[0] + ".json"))
         assert sidecar["participant"]["subject_id"] == subject
-    for action in [lambda: p.assign_participants([device_key(d.CONFIG_KEY, b)], "sub-2000"),
-                   lambda: p.clear_assignments(), lambda: p.set_assignment_mode(False),
-                   lambda: p.get_participant_encoding("sub-1003", "ses-03"),
+    # Saving configuration during a run must leave the frozen mapping untouched.
+    _assign(d, b, "2000")
+    device_config.plugins[d.CONFIG_KEY][OVERRIDE_ENABLED] = False
+    assert d.participant_assignments[b].subject_id == "sub-1002"
+    for action in [lambda: p.get_participant_encoding("sub-1003", "ses-03"),
                    lambda: p.start_collection()]:
         with pytest.raises(ValueError):
             action()
     assert "⛔" in d.write_enc(999)
     p.stop_collection()
     assert json.load(open(os.path.join(p.session_dir, "participant_assignments.json")))["status"] == "stopped"
-    p.clear_assignments()
     # Draft edits do not relabel the preceding run's captures.
     assert d.participant_assignments[b].subject_id == "sub-1002"
-    p.set_assignment_mode(False)
     p.start_collection()
     assert not d.participant_assignments
     assert [clients[x]._last_enc for x in (a, b)] == [100102, 100102]
@@ -143,23 +151,39 @@ def test_start_failure_rolls_back_started_acquisition(group, monkeypatch):
     assert json.load(open(os.path.join(p.session_dir, "participant_assignments.json")))["status"] == "failed"
 
 
-def test_csv_roundtrip_bulk_assignment_and_inheritance(group, tmp_path):
-    p, d, addresses = group
-    keys = [device_key(d.CONFIG_KEY, addr) for addr in addresses]
-    p.assign_participants(keys, "sub-0007")
-    path = p.export_assignments()
-    p.clear_assignments()
-    p.import_assignments(path)
-    assert {a.subject_id for _, _, a in p._compile_assignments()} == {"sub-0007"}
-    p.assign_participants(keys, "")
+def test_config_overrides_persist_leading_zeroes_and_inherit_default(group):
+    from plasma.config import DeviceConfig
+    p, d, (a, b) = group
+    _assign(d, a, "0007")
+    device_config.update_plugin_config(d.CONFIG_KEY, device_config.get_plugin_config(d.CONFIG_KEY))
+    reloaded = DeviceConfig()
+    assert reloaded.get_plugin_config(d.CONFIG_KEY)["devices"][0][SUBJECT_OVERRIDE] == "0007"
     p.get_participant_encoding("sub-1005", "ses-06")
-    assert {a.encoding for _, _, a in p._compile_assignments()} == {100506}
-    invalid = tmp_path / "invalid.csv"
-    invalid.write_text("plugin_id,address,participant_id\nmsense_demo,unknown,sub-9\n")
-    before = dict(p.participant_overrides)
-    with pytest.raises(ValueError, match="Unknown"):
-        p.import_assignments(str(invalid))
-    assert p.participant_overrides == before
+    assignments = {addr: assignment for _, addr, assignment in p._compile_assignments()}
+    assert assignments[a].subject_id == "sub-0007"
+    assert assignments[a].encoding == 706
+    assert assignments[b].subject_id == "sub-1005"
+    assert not assignments[b].overridden
+    p.start_collection()
+    assert "Subject ID override: sub-0007" in d.memo[a].label
+    assert d.memo[b].label == "Band B"
+    p.stop_collection()
+    device_config.plugins[d.CONFIG_KEY][OVERRIDE_ENABLED] = False
+    assert not p._load_participant_overrides()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_no_override_has_no_extra_memo_message_or_group_directory(group, enabled):
+    p, d, _ = group
+    device_config.plugins[d.CONFIG_KEY][OVERRIDE_ENABLED] = enabled
+    if enabled:
+        for row in device_config.plugins[d.CONFIG_KEY]["devices"]:
+            row[SUBJECT_OVERRIDE] = ""
+    p.start_collection()
+    assert not d.participant_assignments
+    assert "group-sessions" not in p.session_dir
+    assert all("override" not in m.label.lower() for m in d.memo.values())
+    p.stop_collection()
 
 
 def test_recording_failure_aborts_before_acquisition(group, monkeypatch):
@@ -173,7 +197,7 @@ def test_recording_failure_aborts_before_acquisition(group, monkeypatch):
 
 def test_reconnect_reapplies_frozen_encoding_and_stop_does_not_resume(group):
     p, d, (_, b) = group
-    p.assign_participants([device_key(d.CONFIG_KEY, b)], "sub-2002")
+    _assign(d, b, "2002")
     p.start_collection()
     old = d.active_devices[b]
     d._reconnect_peripheral(b, "participant-test")
@@ -196,7 +220,7 @@ def test_real_xdf_contains_participant_map_and_stable_device_ids(group):
     configure(journal_stream="participant-map-test-" + uuid.uuid4().hex)
     p.journal_outlet = open_journal_outlet()
     p.record_lsl = True
-    p.assign_participants([device_key(d.CONFIG_KEY, b)], "sub-1002")
+    _assign(d, b, "1002")
     try:
         p.start_collection()
         path = p.lsl_recorder.status()["file"]

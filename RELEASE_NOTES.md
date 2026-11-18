@@ -8,11 +8,15 @@
 
 ### 👥 Multiple MSense participants
 
-- **Assign participant IDs per wristband on Session Dashboard**, including bulk
-  assignment, inherited dashboard defaults, a shared Session ID, and explicit
-  CSV import/export. Assignments can change after Initialize without reconnecting
-  devices, and are locked during collection. Real and simulated MSense use the
-  same workflow.
+- **Set per-wristband participant IDs in Configuration → MSense wristbands.**
+  A saved Available participant IDs list populates each wristband’s Subject ID
+  override dropdown (preserving leading zeroes). An Enable participant ID overrides
+  toggle controls their use; Use dashboard Subject ID inherits the default.
+  The Session ID stays shared. Saved changes
+  apply at the next Start without reconnecting, and active recordings retain
+  their frozen IDs. Simulated MSense supports the same configuration. Memo
+  identifies overridden subjects only when used; the separate dashboard
+  assignment controls have been removed.
 - **Group Start verifies every wristband's encoding before acquisition.** Missing
   devices and failed readbacks abort Start; acquisition failures trigger stop
   attempts for devices already started. Reconnects retain the frozen assignment.
