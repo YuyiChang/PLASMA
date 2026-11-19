@@ -259,7 +259,8 @@ def main(argv=None):
                                   auth=("instructor", token) if token else None,
                                   share=False, inbrowser=False, prevent_thread_lock=True)
             print(f"Instructor Console listening on {options.instructor_host}:{options.instructor_port}")
-        app.launch(inbrowser=True, share=False, server_port=7860 if options.training else None)
+        app.launch(inbrowser=not bool(os.environ.get("PLASMA_NO_BROWSER")), share=False,
+                   server_port=7860 if options.training else None)
     finally:
         if options.training:
             ip.training.close()

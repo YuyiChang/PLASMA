@@ -48,6 +48,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check release tag matches package version
+        run: python .github/check_release_version.py
+
       - name: Install dependencies
         run: pip install -e ".[all,test]"
 
@@ -56,7 +59,10 @@ jobs:
 
   test-lsl-macos:
     needs: test
-    runs-on: macos-15
+    # Release packaging runs the same regression itself. Keep the extra Mac
+    # allocation for PRs only, which do not execute packaging jobs.
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ vars.MACOS_ARM64_RUNNER || 'macos-15' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,13 +80,21 @@ jobs:
         run: bash .github/build_liblsl_macos.sh "$RUNNER_TEMP/plasma-liblsl"
 
   build-macos:
-    needs: [test, test-lsl-macos]
+    needs: test
     if: github.event_name != 'pull_request'
-    runs-on: macos-15
+    runs-on: ${{ vars.MACOS_ARM64_RUNNER || 'macos-15' }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.test.outputs.source-sha }}
+
+      - name: Require an ARM64 macOS runner
+        run: |
+          if [ "$(uname -m)" != arm64 ]; then
+            echo "::error::MACOS_ARM64_RUNNER must select an ARM64 Mac; release assets are ARM64."
+            exit 1
+          fi
 
       - uses: conda-incubator/setup-miniconda@v3
         with:
@@ -111,6 +125,7 @@ jobs:
           --library "$PWD/dist/PLASMA_MacOS_arm64/_internal/pylsl/lib/liblsl.dylib"
 
       - name: Smoke test (clean dir)
+        timeout-minutes: 5
         shell: bash -el {0}
         env:
           PLASMA_BIN: dist/PLASMA_MacOS_arm64/PLASMA_MacOS_arm64
@@ -232,6 +247,7 @@ jobs:
         run: pyinstaller app_linux.spec --noconfirm
 
       - name: Smoke test (clean dir)
+        timeout-minutes: 5
         shell: bash -el {0}
         env:
           PLASMA_BIN: dist/PLASMA_Linux_x64/PLASMA_Linux_x64
@@ -295,6 +311,7 @@ jobs:
         run: pyinstaller app_linux.spec --noconfirm
 
       - name: Smoke test (clean dir)
+        timeout-minutes: 5
         env:
           PLASMA_BIN: dist/PLASMA_Linux_arm64/PLASMA_Linux_arm64
         run: bash .github/smoke_test.sh
@@ -312,6 +329,7 @@ jobs:
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -332,6 +350,7 @@ jobs:
         run: pyinstaller app_windows.spec --noconfirm
 
       - name: Smoke test (clean dir)
+        timeout-minutes: 5
         shell: bash
         env:
           PLASMA_BIN: dist/PLASMA_Windows_x64/PLASMA_Windows_x64.exe
@@ -377,10 +396,12 @@ jobs:
       # was written on — silently install the built installer and re-run the
       # smoke test against the installed copy as the real correctness check
       - name: Smoke test installed copy
+        timeout-minutes: 5
         shell: pwsh
         run: Start-Process "dist\PLASMA_Windows_x64_Setup.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/DIR=C:\PLASMA_installed" -Wait
 
       - name: Smoke test installed copy (verify)
+        timeout-minutes: 5
         shell: bash
         env:
           PLASMA_BIN: /c/PLASMA_installed/PLASMA_Windows_x64.exe
