@@ -4,7 +4,22 @@
 
 ---
 
-## Unreleased
+## 🚀 v2.3.2
+
+### 🛠️ Release reliability
+
+- **Release tags are checked against the package version before expensive builds.**
+  Package and release versions now agree at `2.3.2`, and the participant guide is
+  included in the documentation navigation so strict docs builds pass.
+- **Windows smoke tests have bounded startup and shutdown.** Each launch uses a
+  fresh data directory and port, disables browser auto-launch, and cleans up the
+  process tree. A stale app can no longer satisfy a later readiness probe, and
+  hung HTTP or shutdown operations cannot block the job indefinitely.
+- **Release builds request one ARM64 Mac instead of two sequential runners.**
+  Native LSL regressions still run before packaging and against the packaged
+  library; PRs retain a standalone regression job. `MACOS_ARM64_RUNNER` can select
+  another ARM64 runner label when hosted capacity is constrained. Hosted runner
+  availability remains controlled by GitHub.
 
 ### 📂 Recent task CSVs
 

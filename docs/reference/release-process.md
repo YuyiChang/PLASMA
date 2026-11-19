@@ -4,6 +4,14 @@
 
 ## What a version tag triggers
 
+Prepare the version bump and release notes on a commit before creating its tag.
+Both workflows run `.github/check_release_version.py` before expensive build
+work; a `v2.3.2` tag must point at a commit whose package version is `2.3.2`.
+Re-running a failed workflow uses the original tagged commit, so a retry of an
+old, mismatched tag does not pick up later fixes. If a release tag was created
+prematurely, explicitly correct that tag to the reviewed release commit before
+dispatching the release again; do not publish artifacts from the old commit.
+
 Pushing a `vX.Y.Z` tag (matching `plasma.__version__`, enforced by
 `publish.yml`'s `check-version` job) fires two workflows:
 
@@ -33,6 +41,24 @@ Pushing a `vX.Y.Z` tag (matching `plasma.__version__`, enforced by
 
 Both are source-of-truth downstream of the tag; nothing else needs to run to
 make a release "live" on PyPI or GitHub Releases.
+
+Release and nightly runs allocate one ARM64 macOS runner for packaging. That
+job runs the native liblsl regression before freezing the app and tests the
+packaged library again. PRs, which skip packaging, use a separate native-test
+job. Both default to `macos-15`; the repository Actions variable
+`MACOS_ARM64_RUNNER` can select another available ARM64 label (including a
+dedicated runner). Packaging verifies `uname -m` to prevent Intel binaries from
+being published under ARM64 filenames. Queue-capacity errors occur before any
+steps execute; they require available GitHub capacity or another runner, rather
+than a signing change. Re-run affected jobs once a runner is available.
+
+All frozen-app smoke tests use `.github/smoke_test.py` through the existing shell
+entry point. Each launch receives a fresh state directory and localhost port,
+with browser auto-launch disabled via `PLASMA_NO_BROWSER=1`. HTTP probes time out,
+startup is bounded to 120 seconds, and shutdown kills the native process tree
+(`taskkill /T /F` on Windows, a separate process group on Unix). Workflow smoke
+steps also have a five-minute outer timeout. Native Windows cleanup still needs
+confirmation on the next Windows CI run.
 
 `build.yml` pins all platform checkouts to the exact commit tested by its
 `test` job. Builds upload artifacts to the current workflow run; a single

@@ -112,10 +112,10 @@ def test_macos_build_bundles_the_tested_patched_lsl():
 
     workflow = yaml.safe_load((_ROOT / ".github/workflows/build.yml").read_text())
     native_test = workflow["jobs"]["test-lsl-macos"]
-    assert "if" not in native_test  # the regression also runs on PRs
+    assert native_test["if"] == "github.event_name == 'pull_request'"
     assert any("build_liblsl_macos.sh" in s.get("run", "") for s in native_test["steps"])
     macos = workflow["jobs"]["build-macos"]
-    assert "test-lsl-macos" in macos["needs"]
+    assert macos["needs"] == "test"  # release does not need a second Mac allocation
     packaged_test = next(s for s in macos["steps"] if s.get("name") == "Test the packaged LSL library")
     assert "_internal/pylsl/lib/liblsl.dylib" in packaged_test["run"]
     build = next(s for s in workflow["jobs"]["build-macos"]["steps"] if s.get("name") == "Build")

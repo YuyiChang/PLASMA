@@ -24,6 +24,7 @@ permissions:
 
 jobs:
   test:
+    needs: check-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,21 +40,12 @@ jobs:
         run: pytest
 
   check-version:
-    needs: test
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
 
       - name: Tag must match plasma.__version__
-        run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          PKG_VERSION="$(python3 -c 'import re,pathlib; print(re.search(r"__version__ = \"(.*)\"", pathlib.Path("plasma/__init__.py").read_text())[1])')"
-          echo "tag=$TAG package=$PKG_VERSION"
-          if [ "$TAG" != "$PKG_VERSION" ]; then
-            echo "::error::tag v$TAG does not match plasma.__version__ ($PKG_VERSION)"
-            exit 1
-          fi
+        run: python3 .github/check_release_version.py
 
   build:
     needs: test
@@ -86,9 +78,9 @@ jobs:
 
   publish:
     needs: [check-version, build]
-    # check-version is skipped (not failed) on workflow_dispatch, so gate on
-    # build succeeding rather than requiring every need to have "succeeded"
-    if: always() && needs.build.result == 'success' && (needs.check-version.result == 'success' || needs.check-version.result == 'skipped')
+    # The shared guard succeeds without a tag on manual TestPyPI runs.
+    # A mismatched version tag must never reach either publisher.
+    if: always() && needs.build.result == 'success' && needs.check-version.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: ${{ (github.event_name == 'workflow_dispatch' && inputs.test_pypi) && 'testpypi' || 'pypi' }}

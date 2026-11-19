@@ -84,6 +84,7 @@ nav:
       - Install & first launch: playbook/install.md
       - Configure PLASMA: playbook/configure.md
       - Pair MSense wristbands: playbook/pair-msense.md
+      - Multiple MSense participants: msense-participants.md
       - Run a session: playbook/run-a-session.md
       - Signal-quality checks: playbook/signal-quality.md
       - MSense tools (YAMS): playbook/msense-tools.md
